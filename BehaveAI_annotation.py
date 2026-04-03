@@ -9,6 +9,8 @@ import numpy as np
 import configparser
 import random
 from collections import deque
+import threading
+import copy
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -251,8 +253,6 @@ def build_annot_index_map(items_list):
 
 # initial annotated frames map (used to draw ticks on seek)
 annotated_frames_map = build_annot_index_map(items)
-
-
 
 
 # ---- Build the pool of all annotatable frames across all videos in clips_dir ----
@@ -951,59 +951,267 @@ def save_annotation():
 
 	annot_count += 1
 
+# ---- Prefetch cache ----
+# Stores the precomputed result for the next frame so that transitioning is instant.
+# Structure: {
+#   'video_path': str,
+#   'frame_number': int,
+#   'fr': np.ndarray,           # raw static frame
+#   'motion_image': np.ndarray, # motion false-colour frame
+#   'original_frame': np.ndarray,
+#   'raw_buf': list,            # list of frames for animation buffer
+#   'video_width': int,
+#   'video_height': int,
+#   'total_frames': int,
+# }
+_prefetch_cache = {}
+_prefetch_lock  = threading.Lock()
+_prefetch_thread = None
+
+# ---- Last annotated frame cache (for Shift+Enter to go back) ----
+# Stores the same structure as _prefetch_cache for the frame just saved.
+_last_annotated_cache = {}
+# The next frame that has already been chosen and is being prefetched.
+# Set by load_next_random_frame so the cache lookup is deterministic.
+_prefetched_target = (None, None)  # (video_path, frame_number)
+
+def _compute_frame_data(vpath, fnum):
+	"""
+	Open vpath, seek to fnum, compute static frame + motion image + raw_buf.
+	Returns a dict ready to be stored in _prefetch_cache, or None on failure.
+	This function is designed to run in a background thread — it uses only
+	local variables and does not touch any global state.
+	"""
+	try:
+		cap = cv2.VideoCapture(vpath)
+		if not cap.isOpened():
+			return None
+
+		n_frames   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+		vid_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+		vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+		start_frame = fnum - frameWindow + 1
+		if start_frame < 0:
+			cap.release()
+			return None
+
+		cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+		prev_frames = [None] * 3
+		local_raw_buf = []
+		local_fr = None
+		local_motion = None
+		local_original = None
+		gray = None
+		diffs = None
+		frame_count = 0
+
+		for i in range(frameWindow):
+			ret, raw_frame = cap.read()
+			if not ret:
+				break
+			if frame_count == 0:
+				local_fr = raw_frame.copy()
+				if scale_factor != 1.0:
+					local_fr = cv2.resize(local_fr, (0, 0), fx=scale_factor, fy=scale_factor)
+				local_raw_buf.append(local_fr.copy())
+				gray = cv2.cvtColor(local_fr, cv2.COLOR_BGR2GRAY)
+				if i == 0:
+					prev_frames = [gray.copy()] * 3
+					frame_count += 1
+					if frame_count > frame_skip:
+						frame_count = 0
+					continue
+				diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
+				if strategy == 'exponential':
+					prev_frames[0] = gray
+					prev_frames[1] = cv2.addWeighted(prev_frames[1], expA, gray, 1 - expA, 0)
+					prev_frames[2] = cv2.addWeighted(prev_frames[2], expB, gray, 1 - expB, 0)
+				else:
+					prev_frames[2] = prev_frames[1]
+					prev_frames[1] = prev_frames[0]
+					prev_frames[0] = gray
+			frame_count += 1
+			if frame_count > frame_skip:
+				frame_count = 0
+
+		cap.release()
+
+		if diffs is None or local_fr is None:
+			return None
+
+		if chromatic_tail_only == 'true':
+			tb = cv2.subtract(diffs[0], diffs[1])
+			tr = cv2.subtract(diffs[2], diffs[1])
+			tg = cv2.subtract(diffs[1], diffs[0])
+			blue  = cv2.addWeighted(gray, lum_weight, tb, rgb_multipliers[2], motion_threshold)
+			green = cv2.addWeighted(gray, lum_weight, tg, rgb_multipliers[1], motion_threshold)
+			red   = cv2.addWeighted(gray, lum_weight, tr, rgb_multipliers[0], motion_threshold)
+		else:
+			blue  = cv2.addWeighted(gray, lum_weight, diffs[0], rgb_multipliers[2], motion_threshold)
+			green = cv2.addWeighted(gray, lum_weight, diffs[1], rgb_multipliers[1], motion_threshold)
+			red   = cv2.addWeighted(gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold)
+
+		local_motion   = cv2.merge((blue, green, red)).astype(np.uint8)
+		local_original = local_motion.copy()
+
+		return {
+			'video_path':    vpath,
+			'frame_number':  fnum,
+			'fr':            local_fr,
+			'motion_image':  local_motion,
+			'original_frame': local_original,
+			'raw_buf':       local_raw_buf,
+			'video_width':   vid_width,
+			'video_height':  vid_height,
+			'total_frames':  n_frames,
+		}
+
+	except Exception as e:
+		print(f"Prefetch error for {vpath} frame {fnum}: {e}")
+		return None
+
+
+def _start_prefetch(vpath, fnum):
+	"""
+	Launch a background thread to precompute the next frame.
+	Only one prefetch thread runs at a time — if one is already running it is
+	left to finish (we do not cancel it, just let the new result overwrite).
+	"""
+	global _prefetch_thread, _prefetch_cache
+
+	def _worker():
+		result = _compute_frame_data(vpath, fnum)
+		with _prefetch_lock:
+			_prefetch_cache.clear()
+			if result is not None:
+				_prefetch_cache.update(result)
+
+	# Clear stale cache immediately so we don't accidentally use old data
+	with _prefetch_lock:
+		_prefetch_cache.clear()
+
+	_prefetch_thread = threading.Thread(target=_worker, daemon=True)
+	_prefetch_thread.start()
+
 
 def load_next_random_frame(app_instance):
 	"""
-	After saving an annotation, pick the next random unannotated frame.
-	Handles switching to a different video if needed.
-	Updates all relevant global state: video_path, capture, frame_number,
-	video_label, total_frames, video_width, video_height, frame_updated.
-	Closes the app if all frames are annotated.
+	Transition to the next random unannotated frame.
+	If _prefetched_target matches a ready cache entry, the transition is instant.
+	Otherwise falls back to synchronous loading.
+	After loading, picks the NEXT frame deterministically and starts prefetching it.
 	"""
 	global video_path, capture, frame_number, video_label
 	global total_frames, video_width, video_height, frame_updated
 	global annotated_frames_map, items
+	global fr, original_frame, motion_image, raw_buf
+	global _last_annotated_cache, _prefetched_target
 
-	# Rebuild the unannotated pool to account for the frame we just saved
+	# Save current frame into the "last annotated" cache before moving on
+	if original_frame is not None and fr is not None:
+		_last_annotated_cache = {
+			'video_path':     video_path,
+			'frame_number':   frame_number,
+			'fr':             fr.copy(),
+			'motion_image':   motion_image.copy() if motion_image is not None else None,
+			'original_frame': original_frame.copy(),
+			'raw_buf':        list(raw_buf),
+			'video_width':    video_width,
+			'video_height':   video_height,
+			'total_frames':   total_frames,
+		}
+
+	# Refresh the annotated pool
 	new_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
-
 	if not new_unannotated:
 		messagebox.showinfo("All annotated",
 			"Congratulations! All frames have been annotated.")
 		app_instance.root.destroy()
 		return
 
-	new_video_path, new_frame_number = pick_random_frame(new_unannotated)
+	# Use the pre-chosen target if it exists, otherwise pick randomly now
+	target_vpath, target_fnum = _prefetched_target
+	if target_vpath is None or (target_vpath, target_fnum) not in set(new_unannotated):
+		# No valid pre-chosen target — pick randomly
+		target_vpath, target_fnum = pick_random_frame(new_unannotated)
 
-	# If the new frame is in a different video, close the current capture and open the new one
-	if new_video_path != video_path:
-		capture.release()
-		capture = cv2.VideoCapture(new_video_path)
-		total_frames  = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-		video_width   = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-		video_height  = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-		video_path    = new_video_path
-		video_label   = os.path.splitext(os.path.basename(video_path))[0]
+	new_video_path  = target_vpath
+	new_frame_number = target_fnum
 
-		# Update the window title and the seek bar range to match the new video
-		app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
-		app_instance.seek.configure(to=max(0, total_frames - 1))
+	# ---- Try to use prefetch cache ----
+	cache_hit = False
+	with _prefetch_lock:
+		cached_vpath  = _prefetch_cache.get('video_path')
+		cached_fnum   = _prefetch_cache.get('frame_number')
+		if cached_vpath == new_video_path and cached_fnum == new_frame_number:
+			fr             = _prefetch_cache['fr']
+			motion_image   = _prefetch_cache['motion_image']
+			original_frame = _prefetch_cache['original_frame']
+			raw_buf.clear()
+			for f in _prefetch_cache['raw_buf']:
+				raw_buf.append(f)
+			cache_hit = True
+			print(f"Cache hit — {os.path.basename(new_video_path)} frame {new_frame_number}")
 
-	# Clamp the new frame number to the valid range for this video
-	frame_number  = min(max(new_frame_number, frameWindow - 1), total_frames - 1)
-	frame_updated = True
+	if cache_hit:
+		if new_video_path != video_path:
+			capture.release()
+			capture      = cv2.VideoCapture(new_video_path)
+			video_width  = _prefetch_cache['video_width']
+			video_height = _prefetch_cache['video_height']
+			total_frames = _prefetch_cache['total_frames']
+			video_path   = new_video_path
+			video_label  = os.path.splitext(os.path.basename(video_path))[0]
+			app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+			app_instance.seek.configure(to=max(0, total_frames - 1))
+		else:
+			video_path = new_video_path  # same video, no reopen needed
 
-	# Refresh the annotation index map so seek ticks are up to date
+		frame_number  = new_frame_number
+		frame_updated = False
+		app_instance.redraw()
+
+	else:
+		print(f"Cache miss — loading {os.path.basename(new_video_path)} frame {new_frame_number} synchronously")
+		if new_video_path != video_path:
+			capture.release()
+			capture      = cv2.VideoCapture(new_video_path)
+			total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+			video_width  = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+			video_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+			video_path   = new_video_path
+			video_label  = os.path.splitext(os.path.basename(video_path))[0]
+			app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+			app_instance.seek.configure(to=max(0, total_frames - 1))
+
+		frame_number  = min(max(new_frame_number, frameWindow - 1), total_frames - 1)
+		frame_updated = True
+
+	# Refresh UI
 	items = annotation_index.list_images_labels_and_masks()
 	annotated_frames_map = build_annot_index_map(items)
-
-	# Sync the seek slider to the new frame
 	app_instance.seek.set(frame_number)
 	try:
 		app_instance.frame_var.set(f'Frame {frame_number}')
 	except Exception:
 		pass
 	app_instance.draw_seek_ticks()
+
+	# ---- Pick the NEXT target and schedule prefetch with a short delay ----
+	# The delay lets the main thread finish rendering the current frame
+	# before the prefetch thread starts competing for the video decoder.
+	pool_after = get_unannotated_pool(full_frame_pool, annotation_index)
+	pool_after = [(vp, fn) for vp, fn in pool_after
+				  if not (vp == new_video_path and fn == new_frame_number)]
+	if pool_after:
+		next_vpath, next_fnum = pick_random_frame(pool_after)
+		_prefetched_target = (next_vpath, next_fnum)
+		# Delay prefetch by 2 seconds so the UI is responsive first
+		app_instance.root.after(2000, lambda vp=next_vpath, fn=next_fnum: _start_prefetch(vp, fn))
+	else:
+		_prefetched_target = (None, None)
 
 
 # ---------- Tk UI (composite single-image display) ----------
@@ -1113,7 +1321,7 @@ class AnnotatorTk:
 		# ~ root.bind_all('<Left>', lambda e: self.key_step(-1))
 		# ~ root.bind_all('<Right>', lambda e: self.key_step(1))
 		root.bind_all('<space>', lambda e: self.toggle_show_mode())
-		root.bind_all('<Return>', lambda e: self.key_save())
+		root.bind_all('<Return>', self._on_return_key)
 
 		# drawing/display state
 		# ~ self.display_size = (video_width, video_height)
@@ -1438,6 +1646,11 @@ class AnnotatorTk:
 			self.toggle_grey()
 			return
 
+		# Shift+Enter — go back to the last annotated frame
+		if ks == 'Return' and (event.state & 0x1):
+			self._restore_last_annotated()
+			return
+
 		if ks == 'Return':
 			save_annotation()
 			boxes.clear()
@@ -1498,6 +1711,22 @@ class AnnotatorTk:
 	def toggle_show_mode(self):
 		global show_mode
 		show_mode *= -1
+
+	def _on_return_key(self, event):
+			"""
+			Route Return and Shift+Return to the correct handlers.
+			Shift is detected via event.state bit 0x1.
+			This method is bound globally so it must handle both cases explicitly
+			rather than relying on on_key_all, which is bypassed by bind_all.
+			"""
+			# Ignore Return while a delete confirmation is pending — confirm_delete handles it
+			if getattr(self, 'delete_pending', False):
+				return
+
+			if event.state & 0x1:  # Shift is held
+				self._restore_last_annotated()
+			else:
+				self.key_save()
 
 	def key_save(self):
 		save_annotation()
@@ -1849,9 +2078,81 @@ class AnnotatorTk:
 
 		self.root.after(30, self.loop)
 
+	def _restore_last_annotated(self):
+			"""
+			Restore the frame that was displayed just before the last save.
+			Allows the user to go back and correct a mistake (Shift+Enter).
+			"""
+			global video_path, capture, frame_number, video_label
+			global total_frames, video_width, video_height, frame_updated
+			global fr, original_frame, motion_image, raw_buf
+
+			if not _last_annotated_cache:
+				print("No previous frame in cache to restore.")
+				return
+
+			cache = _last_annotated_cache
+
+			# Switch video if needed
+			if cache['video_path'] != video_path:
+				capture.release()
+				capture        = cv2.VideoCapture(cache['video_path'])
+				video_path     = cache['video_path']
+				video_label    = os.path.splitext(os.path.basename(video_path))[0]
+				total_frames   = cache['total_frames']
+				video_width    = cache['video_width']
+				video_height   = cache['video_height']
+				self.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+				self.seek.configure(to=max(0, total_frames - 1))
+
+			# Restore frame data from cache
+			fr             = cache['fr'].copy()
+			motion_image   = cache['motion_image'].copy() if cache['motion_image'] is not None else None
+			original_frame = cache['original_frame'].copy()
+			raw_buf.clear()
+			for f in cache['raw_buf']:
+				raw_buf.append(f)
+
+			frame_number  = cache['frame_number']
+			frame_updated = False  # data already loaded, no need to recompute
+
+			# Clear any boxes drawn on the new frame — user is back on the old one
+			boxes.clear()
+			grey_boxes.clear()
+
+			# Load existing annotations for this frame if they exist
+			try:
+				base = f"{video_label}_{frame_number}"
+				loaded_boxes, loaded_grey = annotation_index.load_labels_for_basename(
+					base, fr, original_frame)
+				boxes.extend(loaded_boxes)
+				grey_boxes.extend(loaded_grey)
+			except Exception as e:
+				print(f"Could not reload annotations for restored frame: {e}")
+
+			self.seek.set(frame_number)
+			try:
+				self.frame_var.set(f'Frame {frame_number}')
+			except Exception:
+				pass
+			self.draw_seek_ticks()
+			self.redraw()
+			print(f"Restored frame {frame_number} from {os.path.basename(video_path)}")
+
 # Launch app
 root = tk.Tk()
 app = AnnotatorTk(root)
+
+# Pick the first prefetch target deterministically and remember it
+_initial_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
+_initial_unannotated = [(vp, fn) for vp, fn in _initial_unannotated
+						if not (vp == video_path and fn == frame_number)]
+if _initial_unannotated:
+	_next_vpath, _next_fnum = pick_random_frame(_initial_unannotated)
+	_prefetched_target = (_next_vpath, _next_fnum)
+	# Delay so the first frame loads without competing with the prefetch thread
+	root.after(3000, lambda vp=_next_vpath, fn=_next_fnum: _start_prefetch(vp, fn))
+
 root.mainloop()
 
 capture.release()
