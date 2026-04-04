@@ -388,19 +388,44 @@ class ClassListEditor(ttk.Frame):
 # ----------------------- Main app -----------------------
 
 class SettingsEditorApp(tk.Tk):
-	
+
 	def __init__(self, ini_path=INI_DEFAULT_PATH):
 		super().__init__()
 		self.title('BehaveAI Settings Editor')
 		self.geometry('700x600')
 		self.ini_path = ini_path
 		self.dirty = False
-		
+
 		self.project_dir = os.path.dirname(self.ini_path)
 
 		self.clips_dir_var = tk.StringVar()
 		self.input_dir_var = tk.StringVar()
 		self.output_dir_var = tk.StringVar()
+
+		# Data augmentation parameters
+		self.aug_global_prob_var = tk.DoubleVar(value=0)
+		self.aug_brightness_range_var = tk.StringVar(value='0.8,1.2')
+		self.aug_brightness_prob_var = tk.DoubleVar(value=0)
+		self.aug_contrast_range_var = tk.StringVar(value='0.8,1.2')
+		self.aug_contrast_prob_var = tk.DoubleVar(value=0)
+		self.aug_saturation_range_var = tk.StringVar(value='0.8,1.2')
+		self.aug_saturation_prob_var = tk.DoubleVar(value=0)
+		self.aug_hue_range_var = tk.StringVar(value='-15,15')
+		self.aug_hue_prob_var = tk.DoubleVar(value=0)
+		self.aug_sharpness_range_var = tk.StringVar(value='0.8,1.5')
+		self.aug_sharpness_prob_var = tk.DoubleVar(value=0)
+		self.aug_blur_range_var = tk.StringVar(value='1,3')
+		self.aug_blur_prob_var = tk.DoubleVar(value=0)
+		self.aug_noise_range_var = tk.StringVar(value='0,25')
+		self.aug_noise_prob_var = tk.DoubleVar(value=0)
+		self.aug_shear_range_var = tk.StringVar(value='-0.1,0.1')
+		self.aug_shear_prob_var = tk.DoubleVar(value=0)
+		self.aug_flip_h_options_var = tk.StringVar(value='True,False')
+		self.aug_flip_h_prob_var = tk.DoubleVar(value=0)
+		self.aug_flip_v_options_var = tk.StringVar(value='True,False')
+		self.aug_flip_v_prob_var = tk.DoubleVar(value=0.)
+		self.aug_temperature_range_var = tk.StringVar(value='0,10')
+		self.aug_temperature_prob_var = tk.DoubleVar(value=0)
 
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
@@ -420,39 +445,39 @@ class SettingsEditorApp(tk.Tk):
 		]:
 			if not var.get():
 				missing.append(name)
-	
+
 		if missing:
 			return "The following paths are missing:\n\n" + "\n".join(f"• {m}" for m in missing)
 		return None
-	
+
 	def _validate_hotkeys(self):
 		used = {}
 		errors = []
-	
+
 		for key, editor in self.class_editors.items():
 			for label, hotkey, _, _ in editor.get():
-	
+
 				if not hotkey:
 					errors.append(
 						f"Class '{label}' does not have a hotkey assigned."
 					)
 					continue
-	
+
 				if len(hotkey) != 1:
 					errors.append(
 						f"Hotkey '{hotkey}' for class '{label}' must be a single character."
 					)
 					continue
-	
+
 				hk = hotkey.lower()
-	
+
 				if hk in RESERVED_HOTKEYS:
 					errors.append(
 						f"Hotkey '{hotkey}' for class '{label}' is reserved "
 						f"(undo / grey-out)."
 					)
 					continue
-	
+
 				if hk in used:
 					errors.append(
 						f"Hotkey '{hotkey}' is used by both "
@@ -460,14 +485,14 @@ class SettingsEditorApp(tk.Tk):
 					)
 				else:
 					used[hk] = label
-	
+
 		return errors
-	
+
 
 	def _validate_primary_classes(self):
 		pm = self.class_editors['primary_motion'].get()
 		ps = self.class_editors['primary_static'].get()
-	
+
 		if not pm and not ps:
 			return (
 				"You must define at least one PRIMARY class:\n\n"
@@ -475,7 +500,7 @@ class SettingsEditorApp(tk.Tk):
 				"• Primary static"
 			)
 		return None
-		
+
 	def _validate_secondary_classes(self):
 		"""
 		Ensure there are at least 2 secondary static and 2 secondary motion classes
@@ -485,26 +510,26 @@ class SettingsEditorApp(tk.Tk):
 		# Get secondary class counts and filter out empty labels
 		sec_static = [x for x in self.class_editors['secondary_static'].get() if x[0]]
 		sec_motion = [x for x in self.class_editors['secondary_motion'].get() if x[0]]
-		
+
 		# Only validate if there are any secondary classes defined
 		needs_static_validation = len(sec_static) > 0
 		needs_motion_validation = len(sec_motion) > 0
-		
+
 		errors = []
-		
+
 		if needs_static_validation and len(sec_static) < 2:
 			errors.append(
 				"At least 2 secondary static classes are required when using secondary static classes."
 			)
-		
+
 		if needs_motion_validation and len(sec_motion) < 2:
 			errors.append(
 				"At least 2 secondary motion classes are required when using secondary motion classes."
 			)
-		
+
 		if errors:
 			return False, "\n\n".join(errors)
-		
+
 		return True, ""
 
 	def _confirm_modify_structure(self):
@@ -554,7 +579,7 @@ class SettingsEditorApp(tk.Tk):
 		# TAB 1.2: Project paths
 		tab_paths = ttk.Frame(notebook)
 		notebook.add(tab_paths, text='Video paths')
-		
+
 		def _browse_dir(var):
 			path = filedialog.askdirectory(
 				initialdir=var.get() or self.project_dir,
@@ -563,18 +588,90 @@ class SettingsEditorApp(tk.Tk):
 			if path:
 				var.set(path)
 				self._set_dirty()
-		
+
 		def _path_row(parent, label, var, row):
 			ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=8, pady=6)
 			ttk.Entry(parent, textvariable=var, width=60).grid(row=row, column=1, sticky='we', padx=8)
 			ttk.Button(parent, text='Select…', command=lambda: _browse_dir(var)).grid(row=row, column=2, padx=8)
-		
+
 		tab_paths.columnconfigure(1, weight=1)
-		
+
 		_path_row(tab_paths, 'Training video clips directory',  self.clips_dir_var, 0)
 		_path_row(tab_paths, 'Batch video input directory',  self.input_dir_var, 1)
 		_path_row(tab_paths, 'Batch video output directory', self.output_dir_var, 2)
-	
+
+		# TAB 2: Video sampling parameters
+		tab6 = ttk.Frame(notebook)
+		notebook.add(tab6, text='Data augmentation')
+
+		ttk.Label(tab6, text='Global augmentation probability').grid(row=2, column=0, sticky='w', padx=8, pady=6)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_global_prob_var, width=8, command=self._set_dirty).grid(row=2, column=1, sticky='w', padx=8)
+
+		# Brightness
+		ttk.Label(tab6, text='Brightness (range)').grid(row=3, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_brightness_range_var, width=12).grid(row=3, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Brightness (probability)').grid(row=3, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_brightness_prob_var, width=8, command=self._set_dirty).grid(row=3, column=3, sticky='w', padx=8)
+
+		# Contrast
+		ttk.Label(tab6, text='Contrast (range)').grid(row=4, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_contrast_range_var, width=12).grid(row=4, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Contrast (probability)').grid(row=4, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_contrast_prob_var, width=8, command=self._set_dirty).grid(row=4, column=3, sticky='w', padx=8)
+
+		# Saturation
+		ttk.Label(tab6, text='Saturation (range)').grid(row=5, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_saturation_range_var, width=12).grid(row=5, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Saturation (probability)').grid(row=5, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_saturation_prob_var, width=8, command=self._set_dirty).grid(row=5, column=3, sticky='w', padx=8)
+
+		# Hue
+		ttk.Label(tab6, text='Hue (range)').grid(row=6, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_hue_range_var, width=12).grid(row=6, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Hue (probability)').grid(row=6, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_hue_prob_var, width=8, command=self._set_dirty).grid(row=6, column=3, sticky='w', padx=8)
+
+		# Sharpness
+		ttk.Label(tab6, text='Sharpness (range)').grid(row=7, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_sharpness_range_var, width=12).grid(row=7, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Sharpness (probability)').grid(row=7, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_sharpness_prob_var, width=8, command=self._set_dirty).grid(row=7, column=3, sticky='w', padx=8)
+
+		# Blur
+		ttk.Label(tab6, text='Blur (range)').grid(row=8, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_blur_range_var, width=12).grid(row=8, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Blur (probability)').grid(row=8, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_blur_prob_var, width=8, command=self._set_dirty).grid(row=8, column=3, sticky='w', padx=8)
+
+		# Noise
+		ttk.Label(tab6, text='Noise (range)').grid(row=9, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_noise_range_var, width=12).grid(row=9, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Noise (probability)').grid(row=9, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_noise_prob_var, width=8, command=self._set_dirty).grid(row=9, column=3, sticky='w', padx=8)
+
+		# Shear
+		ttk.Label(tab6, text='Shear (range)').grid(row=10, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_shear_range_var, width=12).grid(row=10, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Shear (probability)').grid(row=10, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_shear_prob_var, width=8, command=self._set_dirty).grid(row=10, column=3, sticky='w', padx=8)
+
+		# Horizontal Flip
+		ttk.Label(tab6, text='Horizontal Flip (options)').grid(row=11, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_flip_h_options_var, width=12).grid(row=11, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Horizontal Flip (probability)').grid(row=11, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_flip_h_prob_var, width=8, command=self._set_dirty).grid(row=11, column=3, sticky='w', padx=8)
+
+		# Vertical Flip
+		ttk.Label(tab6, text='Vertical Flip (options)').grid(row=12, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_flip_v_options_var, width=12).grid(row=12, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Vertical Flip (probability)').grid(row=12, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_flip_v_prob_var, width=8, command=self._set_dirty).grid(row=12, column=3, sticky='w', padx=8)
+
+		# Temperature
+		ttk.Label(tab6, text='Temperature (range)').grid(row=13, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(tab6, textvariable=self.aug_temperature_range_var, width=12).grid(row=13, column=1, sticky='w', padx=8)
+		ttk.Label(tab6, text='Temperature (probability)').grid(row=13, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_temperature_prob_var, width=8, command=self._set_dirty).grid(row=13, column=3, sticky='w', padx=8)
 
 		# TAB 2: Motion-from-colour strategy
 		tab2 = ttk.Frame(notebook)
@@ -609,7 +706,7 @@ class SettingsEditorApp(tk.Tk):
 		self.frame_skip_var = tk.IntVar(value=0)
 		ttk.Spinbox(tab2, from_=0, to=10000, textvariable=self.frame_skip_var, width=8, command=self._set_dirty).grid(row=6, column=1, sticky='w', padx=8)
 
-		# TAB 3: Model type
+		# TAB 4: Model type
 		tab3 = ttk.Frame(notebook)
 		notebook.add(tab3, text='Model type')
 
@@ -652,8 +749,7 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Combobox(tab3, values=['confidence', 'motion', 'static'], textvariable=self.dominant_source_var, state='readonly').grid(row=8, column=1, sticky='w', padx=8, pady=(8,0))
 		self.dominant_source_var.trace_add('write', lambda *a: self._set_dirty())
 
-
-		# TAB 4: Tracking
+		# TAB 5: Tracking
 		tab4 = ttk.Frame(notebook)
 		notebook.add(tab4, text='Tracking')
 
@@ -687,7 +783,7 @@ class SettingsEditorApp(tk.Tk):
 		self.kalman_meas_var = tk.DoubleVar(value=0.2)
 		ttk.Entry(tab4, textvariable=self.kalman_meas_var).grid(row=7, column=1, sticky='w', padx=8)
 
-		# TAB 5: Display
+		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
 
@@ -737,7 +833,7 @@ class SettingsEditorApp(tk.Tk):
 		self.output_dir_var.set(
 			d.get('output_dir', fallback=os.path.join(self.project_dir, 'output'))
 		)
-		
+
 
 		# classes
 		# read global ignore_secondary list from the file (may be empty)
@@ -810,7 +906,6 @@ class SettingsEditorApp(tk.Tk):
 		self.primary_conf_var.set(float(d.get('primary_conf_thresh', fallback='0.5')))
 		self.secondary_conf_var.set(float(d.get('secondary_conf_thresh', fallback='0.5')))
 		self.dominant_source_var.set(d.get('dominant_source', fallback='confidence'))
-		
 
 		# tracking
 		self.match_distance_var.set(int(d.get('match_distance_thresh', fallback='200')))
@@ -827,6 +922,30 @@ class SettingsEditorApp(tk.Tk):
 			self.kalman_pos_var.set(0.01)
 			self.kalman_vel_var.set(0.01)
 			self.kalman_meas_var.set(0.2)
+
+		self.aug_global_prob_var.set(float(d.get('aug_global_probability', fallback='0')))
+		self.aug_brightness_range_var.set(d.get('aug_brightness_range', fallback='0.8,1.2'))
+		self.aug_brightness_prob_var.set(float(d.get('aug_brightness_probability', fallback='0')))
+		self.aug_contrast_range_var.set(d.get('aug_contrast_range', fallback='0.8,1.2'))
+		self.aug_contrast_prob_var.set(float(d.get('aug_contrast_probability', fallback='0')))
+		self.aug_saturation_range_var.set(d.get('aug_saturation_range', fallback='0.8,1.2'))
+		self.aug_saturation_prob_var.set(float(d.get('aug_saturation_probability', fallback='0')))
+		self.aug_hue_range_var.set(d.get('aug_hue_range', fallback='-15,15'))
+		self.aug_hue_prob_var.set(float(d.get('aug_hue_probability', fallback='0')))
+		self.aug_sharpness_range_var.set(d.get('aug_sharpness_range', fallback='0.8,1.5'))
+		self.aug_sharpness_prob_var.set(float(d.get('aug_sharpness_probability', fallback='0')))
+		self.aug_blur_range_var.set(d.get('aug_blur_range', fallback='1,3'))
+		self.aug_blur_prob_var.set(float(d.get('aug_blur_probability', fallback='0')))
+		self.aug_noise_range_var.set(d.get('aug_noise_range', fallback='0,25'))
+		self.aug_noise_prob_var.set(float(d.get('aug_noise_probability', fallback='0')))
+		self.aug_shear_range_var.set(d.get('aug_shear_range', fallback='-0.1,0.1'))
+		self.aug_shear_prob_var.set(float(d.get('aug_shear_probability', fallback='0')))
+		self.aug_flip_h_options_var.set(d.get('aug_flip_h_options', fallback='True,False'))
+		self.aug_flip_h_prob_var.set(float(d.get('aug_flip_h_probability', fallback='0')))
+		self.aug_flip_v_options_var.set(d.get('aug_flip_v_options', fallback='True,False'))
+		self.aug_flip_v_prob_var.set(float(d.get('aug_flip_v_probability', fallback='0')))
+		self.aug_temperature_range_var.set(d.get('aug_temperature_range', fallback='0,10'))
+		self.aug_temperature_prob_var.set(float(d.get('aug_temperature_probability', fallback='0')))
 
 		self._set_dirty(False)
 
@@ -850,19 +969,19 @@ class SettingsEditorApp(tk.Tk):
 			static_val_images_dir   = os.path.join(self.project_dir, 'annot_static', 'images', 'val')
 			static_train_labels_dir = os.path.join(self.project_dir, 'annot_static', 'labels', 'train')
 			static_val_labels_dir   = os.path.join(self.project_dir, 'annot_static', 'labels', 'val')
-	
+
 			motion_train_images_dir = os.path.join(self.project_dir, 'annot_motion', 'images', 'train')
 			motion_val_images_dir   = os.path.join(self.project_dir, 'annot_motion', 'images', 'val')
 			motion_train_labels_dir = os.path.join(self.project_dir, 'annot_motion', 'labels', 'train')
 			motion_val_labels_dir   = os.path.join(self.project_dir, 'annot_motion', 'labels', 'val')
-	
+
 			# create directories (images + labels)
 			for d in (static_train_images_dir, static_val_images_dir,
 					  static_train_labels_dir, static_val_labels_dir,
 					  motion_train_images_dir, motion_val_images_dir,
 					  motion_train_labels_dir, motion_val_labels_dir):
 				os.makedirs(d, exist_ok=True)
-	
+
 			# gather class names from GUI editors (use label entries only)
 			try:
 				primary_static_classes = [label for (label, _, _, _) in self.class_editors['primary_static'].get()]
@@ -870,7 +989,7 @@ class SettingsEditorApp(tk.Tk):
 			except Exception:
 				primary_static_classes = []
 				primary_motion_classes = []
-	
+
 			# YAML dicts (train/val paths are absolute)
 			static_yaml_dict = {
 				'train': os.path.abspath(static_train_images_dir),
@@ -884,20 +1003,20 @@ class SettingsEditorApp(tk.Tk):
 				'nc':	len(primary_motion_classes),
 				'names': primary_motion_classes,
 			}
-	
+
 			static_yaml_output = os.path.join(self.project_dir, 'static_annotations.yaml')
 			motion_yaml_output = os.path.join(self.project_dir, 'motion_annotations.yaml')
-	
+
 			# write YAMLs, preserve order of names
 			with open(static_yaml_output, 'w') as yf:
 				yaml.safe_dump(static_yaml_dict, yf, sort_keys=False)
 			with open(motion_yaml_output, 'w') as yf:
 				yaml.safe_dump(motion_yaml_dict, yf, sort_keys=False)
-	
+
 			# Informational prints (visible if you run GUI from terminal)
 			print(f"Written static YOLO dataset config to {static_yaml_output}")
 			print(f"Written motion YOLO dataset config to {motion_yaml_output}")
-	
+
 		except Exception as e:
 			# warn user but don't prevent INI saving
 			messagebox.showwarning("YAML write error", f"Failed to write dataset YAMLs: {e}")
@@ -963,11 +1082,11 @@ class SettingsEditorApp(tk.Tk):
 			# return None on failure
 			print(f"Failed to backup {orig_path}: {e}")
 			return None
-	
-	
+
+
 	def _backup_primary_and_secondary_motion_models(self):
 		"""Rename model_primary_motion and model_secondary_motion* directories to backup names if they exist.
-	
+
 		Skip any directory that already ends with _backupN so backups are not re-backed-up.
 		"""
 		backed = []
@@ -983,7 +1102,7 @@ class SettingsEditorApp(tk.Tk):
 			b = self._backup_dir(primary_dir)
 			if b:
 				backed.append(b)
-	
+
 		# secondary directories start with 'model_secondary_motion'
 		# skip any names that already end with _backup<number>
 		backup_suffix_re = re.compile(r'_backup\d+$')
@@ -1011,7 +1130,7 @@ class SettingsEditorApp(tk.Tk):
 
 		script_name = "Regenerate_annotations.py"
 		launcher_dir = Path(__file__).resolve().parent
-		script_path = launcher_dir / script_name	
+		script_path = launcher_dir / script_name
 
 		# Call script with current Python executable and pass the project INI path
 		cmd = [sys.executable, script_path, self.ini_path]
@@ -1040,7 +1159,7 @@ class SettingsEditorApp(tk.Tk):
 				"\n".join(hotkey_errors)
 			)
 			return
-		
+
 		primary_error = self._validate_primary_classes()
 		if primary_error:
 			messagebox.showwarning(
@@ -1048,7 +1167,7 @@ class SettingsEditorApp(tk.Tk):
 				primary_error
 			)
 			return
-			
+
 		# Add secondary class validation
 		secondary_valid, secondary_error = self._validate_secondary_classes()
 		if not secondary_valid:
@@ -1057,12 +1176,12 @@ class SettingsEditorApp(tk.Tk):
 				secondary_error + "\n\nPlease add more secondary classes before saving."
 			)
 			return
-	
+
 		# ---- build a fresh DEFAULT dict from the current GUI state ----
 		new_default = {}
-	
+
 		ignore_secondary_labels = []
-		
+
 		for key, _title in CLASS_GROUPS:
 			editor = self.class_editors[key]
 			items = editor.get()  # now list of (label, hotkey, (r,g,b), ignore_flag)
@@ -1075,19 +1194,19 @@ class SettingsEditorApp(tk.Tk):
 				cols.append(col)
 				if key.startswith('primary') and ignored:
 					ignore_secondary_labels.append(label)
-		
+
 			new_default[f'{key}_classes'] = list_to_field(labels)
 			new_default[f'{key}_hotkeys'] = list_to_field(hks)
 			new_default[f'{key}_colors'] = colors_to_field(cols)
-		
+
 		new_default['ignore_secondary'] = list_to_field(ignore_secondary_labels)
-		
-		# paths		
+
+		# paths
 		new_default['clips_dir'] = self.clips_dir_var.get()
 		new_default['input_dir'] = self.input_dir_var.get()
 		new_default['output_dir'] = self.output_dir_var.get()
 
-	
+
 		# viewing
 		new_default['motion_blocks_static'] = str(self.motion_blocks_static_var.get()).lower()
 		new_default['static_blocks_motion'] = str(self.static_blocks_motion_var.get()).lower()
@@ -1098,7 +1217,32 @@ class SettingsEditorApp(tk.Tk):
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
-	
+
+		# Data augmentation parameters
+		new_default['aug_global_probability'] = str(self.aug_global_prob_var.get())
+		new_default['aug_brightness_range'] = self.aug_brightness_range_var.get()
+		new_default['aug_brightness_probability'] = str(self.aug_brightness_prob_var.get())
+		new_default['aug_contrast_range'] = self.aug_contrast_range_var.get()
+		new_default['aug_contrast_probability'] = str(self.aug_contrast_prob_var.get())
+		new_default['aug_saturation_range'] = self.aug_saturation_range_var.get()
+		new_default['aug_saturation_probability'] = str(self.aug_saturation_prob_var.get())
+		new_default['aug_hue_range'] = self.aug_hue_range_var.get()
+		new_default['aug_hue_probability'] = str(self.aug_hue_prob_var.get())
+		new_default['aug_sharpness_range'] = self.aug_sharpness_range_var.get()
+		new_default['aug_sharpness_probability'] = str(self.aug_sharpness_prob_var.get())
+		new_default['aug_blur_range'] = self.aug_blur_range_var.get()
+		new_default['aug_blur_probability'] = str(self.aug_blur_prob_var.get())
+		new_default['aug_noise_range'] = self.aug_noise_range_var.get()
+		new_default['aug_noise_probability'] = str(self.aug_noise_prob_var.get())
+		new_default['aug_shear_range'] = self.aug_shear_range_var.get()
+		new_default['aug_shear_probability'] = str(self.aug_shear_prob_var.get())
+		new_default['aug_flip_h_options'] = self.aug_flip_h_options_var.get()
+		new_default['aug_flip_h_probability'] = str(self.aug_flip_h_prob_var.get())
+		new_default['aug_flip_v_options'] = self.aug_flip_v_options_var.get()
+		new_default['aug_flip_v_probability'] = str(self.aug_flip_v_prob_var.get())
+		new_default['aug_temperature_range'] = self.aug_temperature_range_var.get()
+		new_default['aug_temperature_probability'] = str(self.aug_temperature_prob_var.get())
+
 		# motion strategy
 		new_default['strategy'] = self.strategy_var.get()
 		new_default['chromatic_tail_only'] = str(self.chromatic_tail_only_var.get()).lower()
@@ -1108,7 +1252,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['rgb_multipliers'] = self.rgb_mult_var.get()
 		new_default['frame_skip'] = str(self.frame_skip_var.get())
 		# ~ new_default['scale_factor'] = str(self.scale_factor_var.get())
-	
+
 		# model type
 		new_default['primary_classifier'] = self.primary_classifier_var.get()
 		new_default['primary_epochs'] = str(self.primary_epochs_var.get())
@@ -1117,13 +1261,13 @@ class SettingsEditorApp(tk.Tk):
 		new_default['use_ncnn'] = str(self.use_ncnn_var.get()).lower()
 		new_default['primary_conf_thresh'] = str(self.primary_conf_var.get())
 		new_default['secondary_conf_thresh'] = str(self.secondary_conf_var.get())
-	
+
 		# tracking
 		new_default['match_distance_thresh'] = str(self.match_distance_var.get())
 		new_default['delete_after_missed'] = str(self.delete_after_var.get())
 		new_default['centroid_merge_thresh'] = str(self.centroid_merge_var.get())
 		new_default['iou_thresh'] = str(self.iou_var.get())
-	
+
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
 			self.cfg['kalman'] = {}
@@ -1131,25 +1275,25 @@ class SettingsEditorApp(tk.Tk):
 		k['process_noise_pos'] = str(self.kalman_pos_var.get())
 		k['process_noise_vel'] = str(self.kalman_vel_var.get())
 		k['measurement_noise'] = str(self.kalman_meas_var.get())
-		
-		
-		
+
+
+
 		ignore_secondary = []
-		
+
 		for key, editor in self.class_editors.items():
 			labels, hotkeys, colors = [], [], []
-		
+
 			for label, hk, col, ignore_sec in editor.get():
 				if not label:
 					continue
-		
+
 				labels.append(label)
 				hotkeys.append(hk)
 				colors.append(col)
-		
+
 				if key.startswith('primary') and ignore_sec:
 					ignore_secondary.append(label)
-					
+
 		new_default['ignore_secondary'] = ','.join(ignore_secondary)
 
 		path_error = self._validate_paths()
@@ -1173,19 +1317,19 @@ class SettingsEditorApp(tk.Tk):
 			# Replace defaults atomically
 			self.cfg._defaults.clear()
 			self.cfg._defaults.update(new_default)
-	
+
 			with open(self.ini_path, 'w') as f:
 				self.cfg.write(f)
-	
+
 			# saved successfully
 			self._set_dirty(False)
-			
+
 			# attempt to create the annot_*/ directories and write dataset YAMLs now
 			try:
 				self._write_yaml_configs()
 			except Exception:
 				# _write_yaml_configs already shows a messagebox on failure; keep going.
-				pass			
+				pass
 
 			# If we should prompt for regeneration, ask now (after save so regenerate uses new settings)
 			if should_prompt_regen:
@@ -1213,9 +1357,9 @@ class SettingsEditorApp(tk.Tk):
 						messagebox.showinfo("Regeneration finished", "Dataset regeneration finished successfully.")
 					else:
 						messagebox.showwarning("Regeneration failed or missing", msg)
-			
+
 			self.destroy()   # close the window on successful save
-	
+
 		except Exception as e:
 			messagebox.showerror('Error', f'Failed to save ini: {e}')
 
