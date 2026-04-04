@@ -673,6 +673,13 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab6, text='Temperature (probability)').grid(row=13, column=2, sticky='w', padx=8, pady=4)
 		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_temperature_prob_var, width=8, command=self._set_dirty).grid(row=13, column=3, sticky='w', padx=8)
 
+		# Delete augmented data button
+		ttk.Button(
+            tab6,
+            text='Delete all augmented data',
+            command=self._delete_augmented_data
+        ).grid(row=14, column=0, columnspan=2, sticky='w', padx=8, pady=(16, 4))
+
 		# TAB 2: Motion-from-colour strategy
 		tab2 = ttk.Frame(notebook)
 		notebook.add(tab2, text='Motion strategy')
@@ -1147,6 +1154,65 @@ class SettingsEditorApp(tk.Tk):
 			return True, msg
 		except Exception as e:
 			return False, f"Failed to run regeneration script: {e}"
+
+
+	# ----------------------- Delete augmented data  -----------------------
+
+	def _delete_augmented_data(self):
+		"""
+		Delete all augmented annotation files (images and labels) from the project.
+		Augmented files are identified by '_aug_' in their basename.
+		Asks for confirmation before deleting.
+		"""
+		dirs_to_scan = [
+			os.path.join(self.project_dir, 'annot_static',  'images', 'train'),
+			os.path.join(self.project_dir, 'annot_static',  'images', 'val'),
+			os.path.join(self.project_dir, 'annot_static',  'labels', 'train'),
+			os.path.join(self.project_dir, 'annot_static',  'labels', 'val'),
+			os.path.join(self.project_dir, 'annot_motion',  'images', 'train'),
+			os.path.join(self.project_dir, 'annot_motion',  'images', 'val'),
+			os.path.join(self.project_dir, 'annot_motion',  'labels', 'train'),
+			os.path.join(self.project_dir, 'annot_motion',  'labels', 'val'),
+		]
+
+		# First pass: count files to delete so the confirmation dialog is informative
+		to_delete = []
+		for d in dirs_to_scan:
+			if not os.path.isdir(d):
+				continue
+			for fname in os.listdir(d):
+				basename = os.path.splitext(fname)[0]
+				if '_aug_' in basename:
+					to_delete.append(os.path.join(d, fname))
+
+		if not to_delete:
+			messagebox.showinfo("No augmented data",
+				"No augmented files found in this project.")
+			return
+
+		confirmed = messagebox.askyesno(
+			"Delete augmented data",
+			f"This will permanently delete {len(to_delete)} augmented files.\n\n"
+			"This cannot be undone. Continue?"
+		)
+		if not confirmed:
+			return
+
+		deleted = 0
+		errors = 0
+		for fpath in to_delete:
+			try:
+				os.remove(fpath)
+				deleted += 1
+			except Exception as e:
+				print(f"Could not delete {fpath}: {e}")
+				errors += 1
+
+		msg = f"Deleted {deleted} augmented files."
+		if errors:
+			msg += f"\n{errors} files could not be deleted (see console)."
+		messagebox.showinfo("Done", msg)
+
 
 	# ----------------------- Save -----------------------
 
