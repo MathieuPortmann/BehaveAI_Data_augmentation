@@ -974,6 +974,9 @@ _last_annotated_cache = {}
 # The next frame that has already been chosen and is being prefetched.
 # Set by load_next_random_frame so the cache lookup is deterministic.
 _prefetched_target = (None, None)  # (video_path, frame_number)
+# Target display size used when computing the prefetch composite.
+# Updated by loop() to match the current canvas size.
+_display_size_hint = (800, 600)
 
 def _compute_frame_data(vpath, fnum):
 	"""
@@ -1056,22 +1059,85 @@ def _compute_frame_data(vpath, fnum):
 		local_motion   = cv2.merge((blue, green, red)).astype(np.uint8)
 		local_original = local_motion.copy()
 
+		# ---- Precompute the scaled composite for instant display ----
+		# We compute both the motion view and the static view at display size
+		# so redraw() can use them directly without any resize work.
+		disp_w, disp_h = _display_size_hint
+		disp_w = max(1, disp_w)
+		disp_h = max(1, disp_h)
+
+		# Resize both views to display size
+		motion_disp  = cv2.resize(local_motion, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+		static_disp  = cv2.resize(local_fr,     (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+
+		# Build the zoom column (3 panes stacked vertically)
+		widget_size  = max(32, disp_h // 3)
+		zoom_col     = np.zeros((widget_size * 3, widget_size, 3), dtype=np.uint8)
+
+		cx = vid_width  // 2
+		cy = vid_height // 2
+
+		def _quick_crop(src, cx, cy, out_size):
+			"""Centre crop at native resolution then resize — no padding needed for preview."""
+			h, w = src.shape[:2]
+			half = out_size // 2
+			x1 = max(0, cx - half); y1 = max(0, cy - half)
+			x2 = min(w, cx + half); y2 = min(h, cy + half)
+			crop = src[y1:y2, x1:x2]
+			if crop.size == 0:
+				return np.zeros((out_size, out_size, 3), dtype=np.uint8)
+			return cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
+
+		# Top pane: static zoom
+		zoom_col[0:widget_size, 0:widget_size]               = _quick_crop(local_fr,     cx, cy, widget_size)
+		# Mid pane: motion zoom
+		zoom_col[widget_size:widget_size*2, 0:widget_size]   = _quick_crop(local_motion, cx, cy, widget_size)
+		# Bottom pane: blank (animation — cannot be precomputed, changes over time)
+		zoom_col[widget_size*2:widget_size*3, 0:widget_size] = np.zeros((widget_size, widget_size, 3), dtype=np.uint8)
+
+		# Assemble composite (motion view by default — user can toggle with Space)
+		composite_w = disp_w + widget_size
+		composite_h = max(disp_h, widget_size * 3)
+		composite   = np.zeros((composite_h, composite_w, 3), dtype=np.uint8)
+		composite[0:disp_h,      0:disp_w]    = motion_disp
+		composite[0:widget_size*3, disp_w:]   = zoom_col
+
+		# Scale composite to a safe canvas size
+		# (actual canvas size may differ slightly — a final cheap resize in redraw handles it)
+		c_w = composite_w
+		c_h = composite_h
+		scale_w = float(c_w) / float(max(1, composite_w))
+		scale_h = float(c_h) / float(max(1, composite_h))
+		scale   = min(scale_w, scale_h) if scale_w > 0 and scale_h > 0 else 1.0
+
+		scaled_w = max(1, int(round(composite_w * scale)))
+		scaled_h = max(1, int(round(composite_h * scale)))
+		scaled_composite = cv2.resize(composite, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+
+		# Convert to PhotoImage-ready format (RGB numpy array)
+		# We store as numpy RGB rather than PhotoImage because PhotoImage must be
+		# created on the main thread in Tkinter.
+		composite_rgb = cv2.cvtColor(scaled_composite, cv2.COLOR_BGR2RGB)
+
 		return {
-			'video_path':    vpath,
-			'frame_number':  fnum,
-			'fr':            local_fr,
-			'motion_image':  local_motion,
-			'original_frame': local_original,
-			'raw_buf':       local_raw_buf,
-			'video_width':   vid_width,
-			'video_height':  vid_height,
-			'total_frames':  n_frames,
+			'video_path':      vpath,
+			'frame_number':    fnum,
+			'fr':              local_fr,
+			'motion_image':    local_motion,
+			'original_frame':  local_original,
+			'raw_buf':         local_raw_buf,
+			'video_width':     vid_width,
+			'video_height':    vid_height,
+			'total_frames':    n_frames,
+			'composite_rgb':   composite_rgb,
+			'composite_scale': scale,
+			'display_size':    (disp_w, disp_h),
+			'widget_size':     widget_size,
 		}
 
 	except Exception as e:
 		print(f"Prefetch error for {vpath} frame {fnum}: {e}")
 		return None
-
 
 def _start_prefetch(vpath, fnum):
 	"""
@@ -1159,19 +1225,48 @@ def load_next_random_frame(app_instance):
 		if new_video_path != video_path:
 			capture.release()
 			capture      = cv2.VideoCapture(new_video_path)
-			video_width  = _prefetch_cache['video_width']
-			video_height = _prefetch_cache['video_height']
-			total_frames = _prefetch_cache['total_frames']
 			video_path   = new_video_path
 			video_label  = os.path.splitext(os.path.basename(video_path))[0]
 			app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
-			app_instance.seek.configure(to=max(0, total_frames - 1))
-		else:
-			video_path = new_video_path  # same video, no reopen needed
 
+		# Apply cached video metadata (use cache values, avoid re-reading from capture)
+		with _prefetch_lock:
+			video_width  = _prefetch_cache['video_width']
+			video_height = _prefetch_cache['video_height']
+			total_frames = _prefetch_cache['total_frames']
+
+		app_instance.seek.configure(to=max(0, total_frames - 1))
 		frame_number  = new_frame_number
 		frame_updated = False
-		app_instance.redraw()
+
+		# ---- Instant display using the pre-rendered composite ----
+		with _prefetch_lock:
+			composite_rgb   = _prefetch_cache.get('composite_rgb')
+			cached_scale    = _prefetch_cache.get('composite_scale', 1.0)
+			cached_disp_sz  = _prefetch_cache.get('display_size', (800, 600))
+			cached_widget_sz = _prefetch_cache.get('widget_size', 200)
+
+		if composite_rgb is not None:
+			try:
+				from PIL import Image as PilImage
+				pil_img  = PilImage.fromarray(composite_rgb)
+				tk_photo = ImageTk.PhotoImage(pil_img)
+
+				# Store on app so Tkinter doesn't garbage-collect it
+				app_instance.tk_img = tk_photo
+				app_instance.composite_scale  = cached_scale
+				app_instance.display_size     = cached_disp_sz
+
+				h, w = composite_rgb.shape[:2]
+				app_instance.canvas.config(scrollregion=(0, 0, w, h))
+				app_instance.canvas.delete('all')
+				app_instance.canvas.create_image(0, 0, image=tk_photo, anchor='nw')
+				# Full redraw will follow on the next loop() tick with animation etc.
+			except Exception as e:
+				print(f"Fast display failed: {e}")
+				app_instance.redraw()
+			else:
+				app_instance.redraw()
 
 	else:
 		print(f"Cache miss — loading {os.path.basename(new_video_path)} frame {new_frame_number} synchronously")
@@ -1330,6 +1425,10 @@ class AnnotatorTk:
 		self.last_mouse = None
 		self.drawing = False
 		self.start_canvas_xy = None
+
+		# Keep the display size hint in sync for the prefetch thread
+		global _display_size_hint
+		_display_size_hint = self.display_size
 
 		# small layout tuning: padding between main and zoom column when composing
 		self._composite_gap = 8
