@@ -17,7 +17,9 @@ import queue
 import sys
 import os
 import re
+import csv
 import base64
+import time
 from pathlib import Path
 import configparser
 from BehaveAI_augmentation import load_augmentation_config
@@ -228,9 +230,6 @@ class ScriptRunnerApp:
 				ok = self.is_settings_populated(self.current_project)
 				btn.config(state='normal' if ok else 'disabled')
 
-
-
-
 	def refresh_projects(self):
 		projects = self.list_projects()
 		self.project_combo['values'] = projects
@@ -247,6 +246,308 @@ class ScriptRunnerApp:
 			# no project -> disable everything
 			self.update_button_states()
 
+	def display_project_stats(self, project_path: Path):
+	    """
+	    Collect and display project statistics in the integrated terminal.
+	    Runs in a background thread to avoid blocking the UI.
+	    """
+	    def _collect_and_display():
+	        lines = []
+	        sep = "─" * 60
+
+	        lines.append(f"\n{sep}")
+	        lines.append(f"  PROJECT: {project_path.name}")
+	        lines.append(sep)
+
+	        ini_path = project_path / "BehaveAI_settings.ini"
+	        if not ini_path.exists():
+	            lines.append("  No settings file found.")
+	            self._write_stats_lines(lines)
+	            return
+
+	        cfg = configparser.ConfigParser()
+	        cfg.optionxform = str
+	        cfg.read(ini_path)
+	        d = cfg['DEFAULT'] if 'DEFAULT' in cfg else cfg.defaults()
+
+	        def parse_list(key):
+	            v = d.get(key, '0').strip()
+	            if not v or v == '0':
+	                return []
+	            return [x.strip() for x in v.split(',') if x.strip() and x.strip() != '0']
+
+	        primary_static_classes  = parse_list('primary_static_classes')
+	        primary_motion_classes  = parse_list('primary_motion_classes')
+	        all_primary_classes     = primary_static_classes + primary_motion_classes
+	        val_frequency           = float(d.get('val_frequency', '0.1'))
+
+	        # ── Annotation directories ─────────────────────────────────
+	        annot_dirs = {
+	            'static_train_img':  project_path / 'annot_static'  / 'images' / 'train',
+	            'static_val_img':    project_path / 'annot_static'  / 'images' / 'val',
+	            'static_train_lbl':  project_path / 'annot_static'  / 'labels' / 'train',
+	            'static_val_lbl':    project_path / 'annot_static'  / 'labels' / 'val',
+	            'motion_train_img':  project_path / 'annot_motion'  / 'images' / 'train',
+	            'motion_val_img':    project_path / 'annot_motion'  / 'images' / 'val',
+	            'motion_train_lbl':  project_path / 'annot_motion'  / 'labels' / 'train',
+	            'motion_val_lbl':    project_path / 'annot_motion'  / 'labels' / 'val',
+	        }
+
+	        img_ext = ('.jpg', '.jpeg', '.png')
+
+	        def list_images(d):
+	            if not d.is_dir():
+	                return []
+	            return [f for f in d.iterdir()
+	                    if f.suffix.lower() in img_ext]
+
+	        def is_augmented(fname):
+	            return '_aug_' in fname
+
+	        def count_originals_and_aug(files):
+	            orig = [f for f in files if not is_augmented(f.stem)]
+	            aug  = [f for f in files if is_augmented(f.stem)]
+	            return orig, aug
+
+	        # Gather all images (static + motion, train + val)
+	        static_train_all = list_images(annot_dirs['static_train_img'])
+	        static_val_all   = list_images(annot_dirs['static_val_img'])
+	        motion_train_all = list_images(annot_dirs['motion_train_img'])
+	        motion_val_all   = list_images(annot_dirs['motion_val_img'])
+
+	        # Split originals / augmented
+	        static_train_orig, static_train_aug = count_originals_and_aug(static_train_all)
+	        static_val_orig,   static_val_aug   = count_originals_and_aug(static_val_all)
+	        motion_train_orig, motion_train_aug = count_originals_and_aug(motion_train_all)
+	        motion_val_orig,   motion_val_aug   = count_originals_and_aug(motion_val_all)
+
+	        total_orig = len(static_train_orig) + len(static_val_orig) + \
+	                     len(motion_train_orig) + len(motion_val_orig)
+	        total_aug  = len(static_train_aug)  + len(static_val_aug)  + \
+	                     len(motion_train_aug)  + len(motion_val_aug)
+
+	        # Unique basenames (a frame can appear in both static and motion)
+	        orig_basenames = set(
+	            f.stem for f in static_train_orig + static_val_orig +
+	                             motion_train_orig + motion_val_orig
+	        )
+	        total_unique_frames = len(orig_basenames)
+
+	        lines.append(f"\n  ANNOTATIONS")
+	        lines.append(f"  {'Unique annotated frames':<35} {total_unique_frames}")
+	        lines.append(f"  {'Original images (static+motion)':<35} {total_orig}")
+	        lines.append(f"  {'Augmented copies':<35} {total_aug}")
+
+	        # Train / val split
+	        orig_train = len(static_train_orig) + len(motion_train_orig)
+	        orig_val   = len(static_val_orig)   + len(motion_val_orig)
+	        if total_orig > 0:
+	            actual_val_pct = 100.0 * orig_val / total_orig
+	            lines.append(f"  {'Train / Val split':<35} "
+	                          f"{orig_train} / {orig_val}  "
+	                          f"({actual_val_pct:.1f}% val, target {val_frequency*100:.0f}%)")
+
+	        # ── Per-class annotation counts ────────────────────────────
+	        if all_primary_classes:
+	            lines.append(f"\n  CLASS DISTRIBUTION  (from label files)")
+
+	            # Map class index -> name for static and motion
+	            static_class_map = {i: name for i, name in enumerate(primary_static_classes)}
+	            motion_class_map = {i: name for i, name in enumerate(primary_motion_classes)}
+
+	            class_counts = {name: 0 for name in all_primary_classes}
+
+	            def tally_labels(lbl_dir, class_map):
+	                if not lbl_dir.is_dir():
+	                    return
+	                for lf in lbl_dir.iterdir():
+	                    if lf.suffix != '.txt':
+	                        continue
+	                    # Skip augmented label files
+	                    if is_augmented(lf.stem):
+	                        continue
+	                    try:
+	                        for line in lf.read_text().splitlines():
+	                            parts = line.strip().split()
+	                            if not parts:
+	                                continue
+	                            cls_idx = int(parts[0])
+	                            name = class_map.get(cls_idx)
+	                            if name and name in class_counts:
+	                                class_counts[name] += 1
+	                    except Exception:
+	                        pass
+
+	            tally_labels(annot_dirs['static_train_lbl'], static_class_map)
+	            tally_labels(annot_dirs['static_val_lbl'],   static_class_map)
+	            tally_labels(annot_dirs['motion_train_lbl'], motion_class_map)
+	            tally_labels(annot_dirs['motion_val_lbl'],   motion_class_map)
+
+	            total_boxes = sum(class_counts.values())
+	            for name in all_primary_classes:
+	                count = class_counts[name]
+	                pct   = 100.0 * count / total_boxes if total_boxes > 0 else 0.0
+	                warn  = "  ⚠ under-represented" if pct < 10 and total_boxes > 0 else ""
+	                lines.append(f"    {name:<28} {count:>5} boxes  ({pct:5.1f}%){warn}")
+
+	        # ── Videos in clips dir ────────────────────────────────────
+	        clips_dir_raw = d.get('clips_dir', 'clips')
+	        clips_dir = Path(clips_dir_raw) if os.path.isabs(clips_dir_raw) \
+	                    else project_path / clips_dir_raw
+
+	        video_ext = ('.mp4', '.avi', '.mov', '.mkv')
+	        if clips_dir.is_dir():
+	            all_videos = [f for f in clips_dir.iterdir()
+	                          if f.suffix.lower() in video_ext]
+	            # Which videos have at least one annotated frame?
+	            annotated_video_labels = set()
+	            for stem in orig_basenames:
+	                if '_' in stem:
+	                    vlabel = stem.rsplit('_', 1)[0]
+	                    annotated_video_labels.add(vlabel)
+
+	            annotated_videos = [v for v in all_videos
+	                                 if v.stem in annotated_video_labels]
+
+	            lines.append(f"\n  VIDEOS")
+	            lines.append(f"  {'Total videos in clips/':<35} {len(all_videos)}")
+	            lines.append(f"  {'Videos with annotations':<35} "
+	                          f"{len(annotated_videos)} / {len(all_videos)}")
+
+	        # ── Augmented data breakdown ───────────────────────────────
+	        all_aug_files = (static_train_aug + static_val_aug +
+	                         motion_train_aug + motion_val_aug)
+	        if all_aug_files:
+	            aug_type_counts = {}
+	            for f in all_aug_files:
+	                # basename format: <original>_aug_<param_name>.<ext>
+	                parts = f.stem.split('_aug_')
+	                if len(parts) >= 2:
+	                    aug_type = parts[-1]
+	                    aug_type_counts[aug_type] = aug_type_counts.get(aug_type, 0) + 1
+
+	            lines.append(f"\n  AUGMENTED DATA  ({total_aug} total files)")
+	            for aug_type, count in sorted(aug_type_counts.items()):
+	                lines.append(f"    {aug_type:<28} {count:>5} files")
+
+	            # Show configured ranges from INI
+	            aug_params = [
+	                ('brightness',   'aug_brightness_range',   'aug_brightness_probability'),
+	                ('contrast',     'aug_contrast_range',     'aug_contrast_probability'),
+	                ('saturation',   'aug_saturation_range',   'aug_saturation_probability'),
+	                ('hue',          'aug_hue_range',          'aug_hue_probability'),
+	                ('sharpness',    'aug_sharpness_range',    'aug_sharpness_probability'),
+	                ('blur',         'aug_blur_range',         'aug_blur_probability'),
+	                ('noise',        'aug_noise_range',        'aug_noise_probability'),
+	                ('shear',        'aug_shear_range',        'aug_shear_probability'),
+	                ('flip_h',       'aug_flip_h_options',     'aug_flip_h_probability'),
+	                ('flip_v',       'aug_flip_v_options',     'aug_flip_v_probability'),
+	                ('temperature',  'aug_temperature_range',  'aug_temperature_probability'),
+	            ]
+	            lines.append(f"\n  AUGMENTATION PARAMETERS")
+	            lines.append(f"  {'Global probability':<35} "
+	                          f"{d.get('aug_global_probability', '0')}")
+	            for param, range_key, prob_key in aug_params:
+	                prob = float(d.get(prob_key, '0'))
+	                if prob > 0:
+	                    rng = d.get(range_key, '—')
+	                    lines.append(f"    {param:<28} prob={prob:.2f}  range={rng}")
+
+	        # ── Model metrics ──────────────────────────────────────────
+	        model_dirs = [
+	            ('Primary static',  project_path / 'model_primary_static'  / 'train'),
+	            ('Primary motion',  project_path / 'model_primary_motion'  / 'train'),
+	        ]
+	        # Also pick up any secondary models
+	        for p in sorted(project_path.iterdir()):
+	            if p.is_dir() and p.name.startswith('model_secondary') \
+	               and not re.search(r'_backup\d+$', p.name):
+	                model_dirs.append((p.name.replace('model_', '').replace('_', ' '),
+	                                   p / 'train'))
+
+	        model_section_printed = False
+	        for model_label, train_dir in model_dirs:
+	            results_csv = train_dir / 'results.csv'
+	            weights     = train_dir / 'weights' / 'best.pt'
+	            if not results_csv.exists():
+	                continue
+
+	            if not model_section_printed:
+	                lines.append(f"\n  MODEL METRICS  (last epoch)")
+	                model_section_printed = True
+
+	            try:
+	                import csv as _csv
+	                with open(results_csv, newline='') as fh:
+	                    reader = _csv.DictReader(fh)
+	                    rows = list(reader)
+	                if not rows:
+	                    continue
+	                last = rows[-1]
+
+	                # Strip whitespace from keys (YOLO sometimes pads them)
+	                last = {k.strip(): v.strip() for k, v in last.items()}
+
+	                # Common YOLO metrics keys (vary slightly by version)
+	                def get_metric(keys):
+	                    for k in keys:
+	                        if k in last:
+	                            try:
+	                                return float(last[k])
+	                            except ValueError:
+	                                pass
+	                    return None
+
+	                precision = get_metric(['metrics/precision(B)', 'precision'])
+	                recall    = get_metric(['metrics/recall(B)',    'recall'])
+	                map50     = get_metric(['metrics/mAP50(B)',     'mAP_0.5'])
+	                map5095   = get_metric(['metrics/mAP50-95(B)',  'mAP_0.5:0.95'])
+	                epochs    = len(rows)
+
+	                size_str = ''
+	                if weights.exists():
+	                    size_mb  = weights.stat().st_size / 1_048_576
+	                    mtime    = weights.stat().st_mtime
+	                    mod_date = time.strftime('%Y-%m-%d', time.localtime(mtime))
+	                    size_str = f"  weights: {size_mb:.1f} MB  ({mod_date})"
+
+	                lines.append(f"\n    [{model_label}]  {epochs} epochs{size_str}")
+	                if precision is not None:
+	                    lines.append(f"    {'Precision':<20} {precision:.4f}")
+	                if recall is not None:
+	                    lines.append(f"    {'Recall':<20} {recall:.4f}")
+	                if map50 is not None:
+	                    lines.append(f"    {'mAP@0.5':<20} {map50:.4f}")
+	                if map5095 is not None:
+	                    lines.append(f"    {'mAP@0.5:0.95':<20} {map5095:.4f}")
+
+	                # Class confusion signal: check if any class has very low recall
+	                # from the per-class results if available
+	                # (only basic signal from aggregate — detailed confusion needs model inference)
+
+	            except Exception as e:
+	                lines.append(f"    [{model_label}]  could not read results: {e}")
+
+	        lines.append(f"\n{sep}\n")
+	        self._write_stats_lines(lines)
+
+	    threading.Thread(target=_collect_and_display, daemon=True).start()
+
+
+	def _write_stats_lines(self, lines):
+	    """Write a list of text lines to the integrated output terminal (thread-safe)."""
+	    text = '\n'.join(lines) + '\n'
+	    # Schedule on main thread — Tkinter widgets must only be touched from main thread
+	    self.root.after(0, lambda: self._append_to_output(text))
+
+
+	def _append_to_output(self, text):
+	    """Append text to the output area on the main thread."""
+	    self.output_area.configure(state='normal')
+	    self.output_area.insert('end', text, ('stdout',))
+	    self.output_area.see('end')
+	    self.output_area.configure(state='disabled')
+
 	def select_project(self, project_name):
 		if not project_name:
 			return
@@ -259,6 +560,7 @@ class ScriptRunnerApp:
 		self.current_label_var.set(f"Project: {project_name}")
 		# enable/disable buttons depending on settings
 		self.update_button_states()
+		self.display_project_stats(proj_path)
 
 	def _enable_buttons(self, enable: bool):
 		state = "normal" if enable else "disabled"
