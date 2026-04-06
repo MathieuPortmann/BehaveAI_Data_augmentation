@@ -1312,6 +1312,7 @@ class AnnotatorTk:
 	def __init__(self, root):
 		self.root = root
 		root.title(f"BehaveAI — {os.path.basename(video_path)}")
+		root.attributes('-fullscreen', True)
 
 		# sensible default window geometry so the main video panel is visible on launch
 		default_w = max(1000, int(video_width * 1.2))
