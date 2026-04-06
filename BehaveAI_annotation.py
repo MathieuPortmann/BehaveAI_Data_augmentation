@@ -295,7 +295,6 @@ def build_frame_pool(clips_directory, frame_window):
 		for fn in range(first_valid, last_valid + 1):
 			pool.append((vpath, fn))
 
-	print(f"Frame pool built: {len(pool)} annotatable frames across {len(set(p for p,_ in pool))} video(s).")
 	return pool
 
 
@@ -325,8 +324,7 @@ def get_unannotated_pool(full_pool, annotation_index):
 		vlabel = os.path.splitext(os.path.basename(vpath))[0]
 		if (vlabel, fn) not in annotated_set:
 			unannotated.append((vpath, fn))
-
-	print(f"Annotated frames: {len(annotated_set)} ; Unannotated frames : {len(unannotated)} ; Total: {len(full_pool)}")
+	print(f"Frame pool built: {len(annotated_set)}  annotated frames on {len(full_pool)} annotatable frames across {len(set(p for p,_ in full_pool))} video(s).")
 	return unannotated
 
 
@@ -1732,6 +1730,13 @@ class AnnotatorTk:
 						show_mode = 1
 					self.update_button_states()
 					return
+
+		# Tab — skip current frame without saving, pick next random frame
+		if ks == 'Escape':
+			boxes.clear()
+			grey_boxes.clear()
+			load_next_random_frame(self)
+			return
 
 		if ch == 'u':
 			if grey_mode:
