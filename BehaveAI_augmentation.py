@@ -25,6 +25,32 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Progress bar helper — prints to stdout so the BehaveAI launcher picks it up
+# ---------------------------------------------------------------------------
+
+def _print_progress(current, total, label='Augmenting'):
+    """
+    Print a tqdm-style progress line that the BehaveAI launcher recognises
+    and overwrites in-place (matches the is_progress_line regex: 'XX% |').
+
+    The line ends with \\r so the launcher's overwrite logic replaces it.
+    Uses only ASCII characters to stay compatible with Windows cp1252 encoding.
+    """
+    if total <= 0:
+        return
+    pct = int(100 * current / total)
+    bar_width = 30
+    filled = int(bar_width * current / total)
+    bar = '#' * filled + '-' * (bar_width - filled)
+    line = f"{pct}% |{bar}| {current}/{total}  {label}"
+    # \r triggers the launcher's overwrite branch
+    print(line, end='\r', flush=True)
+    if current >= total:
+        # Final newline so the next message starts on a fresh line
+        print(flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Configuration loading
 # ---------------------------------------------------------------------------
 
@@ -196,11 +222,13 @@ def apply_single_augmentation(bgr_image, param_name, value):
         img = PilImage.fromarray(arr)
 
     elif param_name == 'hue':
-        # Shift hue channel in HSV space
-        hsv = img.convert('HSV')
-        arr = np.array(hsv, dtype=np.int16)
-        arr[:, :, 0] = (arr[:, :, 0] + int(value)) % 256
-        img = PilImage.fromarray(arr.astype(np.uint8), 'HSV').convert('RGB')
+        # Shift hue channel in HSV space using OpenCV (avoids deprecated Pillow HSV mode)
+        bgr_tmp = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        hsv_tmp = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV).astype(np.int16)
+        hsv_tmp[:, :, 0] = (hsv_tmp[:, :, 0] + int(value)) % 180
+        hsv_tmp = np.clip(hsv_tmp, 0, 255).astype(np.uint8)
+        rgb_tmp = cv2.cvtColor(cv2.cvtColor(hsv_tmp, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2RGB)
+        img = PilImage.fromarray(rgb_tmp)
 
     elif param_name == 'temperature':
         # Warm/cool shift: add to red, subtract from blue
@@ -278,6 +306,12 @@ def transform_labels(label_path, param_name, value):
 # Core augmentation loop
 # ---------------------------------------------------------------------------
 
+# Augmentation parameters allowed for motion images (colour changes excluded
+# because the false-colour encoding carries motion information — altering
+# hue/brightness/etc. would corrupt that signal).
+MOTION_ALLOWED_PARAMS = {'blur', 'noise', 'sharpness', 'shear', 'flip_h', 'flip_v'}
+
+
 def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
     """
     Main entry point called by the GUI button.
@@ -335,14 +369,22 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
 
     print(f"Augmentation: {total} original annotation images found.")
 
+    # Show initial progress bar at 0%
+    _print_progress(0, total, label='Augmenting')
+
     for i, img_path in enumerate(originals):
+
+        # Update the integrated-terminal progress bar
+        _print_progress(i + 1, total, label=os.path.basename(img_path))
+
+        # Also call the optional external callback (e.g. for a separate GUI widget)
         if progress_callback:
             progress_callback(i, total, os.path.basename(img_path))
 
-        img_dir    = os.path.dirname(img_path)
-        fname      = os.path.basename(img_path)
-        basename   = os.path.splitext(fname)[0]
-        ext        = os.path.splitext(fname)[1]
+        img_dir  = os.path.dirname(img_path)
+        fname    = os.path.basename(img_path)
+        basename = os.path.splitext(fname)[0]
+        ext      = os.path.splitext(fname)[1]
 
         # Derive the corresponding label directory
         # image path:  .../annot_static/images/train/foo.jpg
@@ -356,8 +398,19 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
             print(f"  Warning: could not read {img_path}, skipping.")
             continue
 
+        # Determine if this image comes from a motion annotation directory
+        is_motion = 'annot_motion' in img_path.replace('\\', '/')
+
         # Sample which augmentations apply — returns list of single-key dicts
         augmentation_list = sample_augmentation_list(aug_config)
+
+        # For motion images, restrict to geometry/noise-only transformations
+        # (colour augmentations would corrupt the false-colour motion encoding)
+        if is_motion:
+            augmentation_list = [
+                aug for aug in augmentation_list
+                if next(iter(aug.keys())) in MOTION_ALLOWED_PARAMS
+            ]
 
         if not augmentation_list:
             continue  # this image was not selected for augmentation this run
@@ -388,6 +441,7 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
 
             copies_created += 1
 
+    # Final callback call
     if progress_callback:
         progress_callback(total, total, "Done")
 
