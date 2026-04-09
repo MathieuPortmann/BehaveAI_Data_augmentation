@@ -414,23 +414,19 @@ class ScriptRunnerApp:
 	            lines.append(f"  {'Videos with annotations':<35} "
 	                          f"{len(annotated_videos)} / {len(all_videos)}")
 
-	        # ── Augmented data breakdown ───────────────────────────────
+	        # ── Augmented data breakdown (merged with parameters) ─────
 	        all_aug_files = (static_train_aug + static_val_aug +
 	                         motion_train_aug + motion_val_aug)
 	        if all_aug_files:
+	            # Count files per augmentation type
 	            aug_type_counts = {}
 	            for f in all_aug_files:
-	                # basename format: <original>_aug_<param_name>.<ext>
 	                parts = f.stem.split('_aug_')
 	                if len(parts) >= 2:
 	                    aug_type = parts[-1]
 	                    aug_type_counts[aug_type] = aug_type_counts.get(aug_type, 0) + 1
 
-	            lines.append(f"\n  AUGMENTED DATA  ({total_aug} total files)")
-	            for aug_type, count in sorted(aug_type_counts.items()):
-	                lines.append(f"    {aug_type:<28} {count:>5} files")
-
-	            # Show configured ranges from INI
+	            # Parameters defined in INI (canonical order)
 	            aug_params = [
 	                ('brightness',   'aug_brightness_range',   'aug_brightness_probability'),
 	                ('contrast',     'aug_contrast_range',     'aug_contrast_probability'),
@@ -444,14 +440,19 @@ class ScriptRunnerApp:
 	                ('flip_v',       'aug_flip_v_options',     'aug_flip_v_probability'),
 	                ('temperature',  'aug_temperature_range',  'aug_temperature_probability'),
 	            ]
-	            lines.append(f"\n  AUGMENTATION PARAMETERS")
-	            lines.append(f"  {'Global probability':<35} "
-	                          f"{d.get('aug_global_probability', '0')}")
+
+	            global_prob = d.get('aug_global_probability', '0')
+	            lines.append(f"\n  AUGMENTED DATA  ({total_aug} total files)")
+	            lines.append(f"  {'Global probability':<35} {global_prob}")
+	            # Unified header
+	            lines.append(f"    {'Parameter':<14} {'Prob':>6}  {'Range':<20}  {'Files':>6}")
+	            lines.append(f"    {'-'*14} {'-'*6}  {'-'*20}  {'-'*6}")
 	            for param, range_key, prob_key in aug_params:
 	                prob = float(d.get(prob_key, '0'))
 	                if prob > 0:
-	                    rng = d.get(range_key, '—')
-	                    lines.append(f"    {param:<28} prob={prob:.2f}  range={rng}")
+	                    rng   = d.get(range_key, '—')
+	                    count = aug_type_counts.get(param, 0)
+	                    lines.append(f"    {param:<14} {prob:>6.2f}  {rng:<20}  {count:>5} files")
 
 	        # ── Model metrics ──────────────────────────────────────────
 	        model_dirs = [
@@ -498,11 +499,7 @@ class ScriptRunnerApp:
 	                                pass
 	                    return None
 
-	                precision = get_metric(['metrics/precision(B)', 'precision'])
-	                recall    = get_metric(['metrics/recall(B)',    'recall'])
-	                map50     = get_metric(['metrics/mAP50(B)',     'mAP_0.5'])
-	                map5095   = get_metric(['metrics/mAP50-95(B)',  'mAP_0.5:0.95'])
-	                epochs    = len(rows)
+	                epochs = len(rows)
 
 	                size_str = ''
 	                if weights.exists():
@@ -512,18 +509,46 @@ class ScriptRunnerApp:
 	                    size_str = f"  weights: {size_mb:.1f} MB  ({mod_date})"
 
 	                lines.append(f"\n    [{model_label}]  {epochs} epochs{size_str}")
-	                if precision is not None:
-	                    lines.append(f"    {'Precision':<20} {precision:.4f}")
-	                if recall is not None:
-	                    lines.append(f"    {'Recall':<20} {recall:.4f}")
-	                if map50 is not None:
-	                    lines.append(f"    {'mAP@0.5':<20} {map50:.4f}")
-	                if map5095 is not None:
-	                    lines.append(f"    {'mAP@0.5:0.95':<20} {map5095:.4f}")
 
-	                # Class confusion signal: check if any class has very low recall
-	                # from the per-class results if available
-	                # (only basic signal from aggregate — detailed confusion needs model inference)
+	                # ── Detection metrics (box) ────────────────────────────
+	                metric_groups = [
+	                    # (display label, list of possible CSV column names)
+	                    ('Precision (B)',        ['metrics/precision(B)', 'precision']),
+	                    ('Recall (B)',           ['metrics/recall(B)',    'recall']),
+	                    ('mAP@0.5 (B)',          ['metrics/mAP50(B)',     'mAP_0.5']),
+	                    ('mAP@0.5:0.95 (B)',     ['metrics/mAP50-95(B)', 'mAP_0.5:0.95']),
+	                    # Mask metrics (present in segmentation models)
+	                    ('Precision (M)',        ['metrics/precision(M)']),
+	                    ('Recall (M)',           ['metrics/recall(M)']),
+	                    ('mAP@0.5 (M)',          ['metrics/mAP50(M)']),
+	                    ('mAP@0.5:0.95 (M)',     ['metrics/mAP50-95(M)']),
+	                    # Losses (train)
+	                    ('Box loss (train)',     ['train/box_loss',  'train/box_om']),
+	                    ('Cls loss (train)',     ['train/cls_loss',  'train/cls_om']),
+	                    ('DFL loss (train)',     ['train/dfl_loss',  'train/dfl_om']),
+	                    # Losses (val)
+	                    ('Box loss (val)',       ['val/box_loss',    'val/box_om']),
+	                    ('Cls loss (val)',       ['val/cls_loss',    'val/cls_om']),
+	                    ('DFL loss (val)',       ['val/dfl_loss',    'val/dfl_om']),
+	                    # Learning rates
+	                    ('LR pg0',              ['x/lr0', 'lr/pg0']),
+	                    ('LR pg1',              ['x/lr1', 'lr/pg1']),
+	                    ('LR pg2',              ['x/lr2', 'lr/pg2']),
+	                ]
+
+	                printed_any = False
+	                for label, col_names in metric_groups:
+	                    val = get_metric(col_names)
+	                    if val is not None:
+	                        lines.append(f"    {label:<22} {val:.4f}")
+	                        printed_any = True
+
+	                # F1-score calculated from Precision and Recall
+	                precision = get_metric(['metrics/precision(B)', 'precision'])
+	                recall    = get_metric(['metrics/recall(B)',    'recall'])
+	                if precision is not None and recall is not None and (precision + recall) > 0:
+	                    f1 = 2 * (precision * recall) / (precision + recall)
+	                    lines.append(f"    {'F1-score (B)':<22} {f1:.4f}")
 
 	            except Exception as e:
 	                lines.append(f"    [{model_label}]  could not read results: {e}")
