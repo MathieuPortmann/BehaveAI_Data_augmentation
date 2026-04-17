@@ -816,6 +816,44 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab5, text='Font size').pack(anchor='w', pady=(6,0))
 		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w')
 
+		# ── Model metrics display options ──────────────────────────
+		ttk.Separator(tab5, orient='horizontal').pack(fill='x', pady=(14, 6))
+		ttk.Label(tab5, text='Model metrics shown in project summary').pack(anchor='w', pady=(0, 4))
+
+		# Each entry: (ini_key, display_label, default_on)
+		self._metric_display_defs = [
+			('show_metric_precision_b',    'Precision (B)',       True),
+			('show_metric_recall_b',       'Recall (B)',          True),
+			('show_metric_f1_b',           'F1-score (B)',        True),
+			('show_metric_map50_b',        'mAP@0.5 (B)',         True),
+			('show_metric_map5095_b',      'mAP@0.5:0.95 (B)',    True),
+			('show_metric_precision_m',    'Precision (M)',       False),
+			('show_metric_recall_m',       'Recall (M)',          False),
+			('show_metric_map50_m',        'mAP@0.5 (M)',         False),
+			('show_metric_map5095_m',      'mAP@0.5:0.95 (M)',    False),
+			('show_metric_box_loss_train', 'Box loss (train)',    False),
+			('show_metric_cls_loss_train', 'Cls loss (train)',    False),
+			('show_metric_dfl_loss_train', 'DFL loss (train)',    False),
+			('show_metric_box_loss_val',   'Box loss (val)',      False),
+			('show_metric_cls_loss_val',   'Cls loss (val)',      False),
+			('show_metric_dfl_loss_val',   'DFL loss (val)',      False),
+			('show_metric_lr_pg0',         'LR pg0',              False),
+			('show_metric_lr_pg1',         'LR pg1',              False),
+			('show_metric_lr_pg2',         'LR pg2',              False),
+		]
+		self._metric_display_vars = {}
+
+		# Display in two columns
+		metrics_frame = ttk.Frame(tab5)
+		metrics_frame.pack(anchor='w', padx=8)
+		for i, (key, label, default) in enumerate(self._metric_display_defs):
+			var = tk.BooleanVar(value=default)
+			self._metric_display_vars[key] = var
+			col = i % 2
+			row = i // 2
+			ttk.Checkbutton(metrics_frame, text=label, variable=var,
+							command=self._set_dirty).grid(row=row, column=col, sticky='w', padx=(0, 20), pady=1)
+
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
 		notebook.add(tab_ab, text='Activity Budget')
@@ -916,6 +954,11 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
+
+		# metric display checkboxes
+		for key, label, default in self._metric_display_defs:
+			val = self._str_to_bool(d.get(key, fallback=str(default).lower()))
+			self._metric_display_vars[key].set(val)
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
@@ -1329,6 +1372,10 @@ class SettingsEditorApp(tk.Tk):
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
+
+		# metric display checkboxes
+		for key, label, default in self._metric_display_defs:
+			new_default[key] = str(self._metric_display_vars[key].get()).lower()
 
 		# Data augmentation parameters
 		new_default['aug_global_probability'] = str(self.aug_global_prob_var.get())

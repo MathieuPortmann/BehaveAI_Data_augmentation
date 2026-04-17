@@ -511,44 +511,51 @@ class ScriptRunnerApp:
 	                lines.append(f"\n    [{model_label}]  {epochs} epochs{size_str}")
 
 	                # ── Detection metrics (box) ────────────────────────────
+	                # Each entry: (ini_key, display_label, csv_column_names)
 	                metric_groups = [
-	                    # (display label, list of possible CSV column names)
-	                    ('Precision (B)',        ['metrics/precision(B)', 'precision']),
-	                    ('Recall (B)',           ['metrics/recall(B)',    'recall']),
-	                    ('mAP@0.5 (B)',          ['metrics/mAP50(B)',     'mAP_0.5']),
-	                    ('mAP@0.5:0.95 (B)',     ['metrics/mAP50-95(B)', 'mAP_0.5:0.95']),
-	                    # Mask metrics (present in segmentation models)
-	                    ('Precision (M)',        ['metrics/precision(M)']),
-	                    ('Recall (M)',           ['metrics/recall(M)']),
-	                    ('mAP@0.5 (M)',          ['metrics/mAP50(M)']),
-	                    ('mAP@0.5:0.95 (M)',     ['metrics/mAP50-95(M)']),
-	                    # Losses (train)
-	                    ('Box loss (train)',     ['train/box_loss',  'train/box_om']),
-	                    ('Cls loss (train)',     ['train/cls_loss',  'train/cls_om']),
-	                    ('DFL loss (train)',     ['train/dfl_loss',  'train/dfl_om']),
-	                    # Losses (val)
-	                    ('Box loss (val)',       ['val/box_loss',    'val/box_om']),
-	                    ('Cls loss (val)',       ['val/cls_loss',    'val/cls_om']),
-	                    ('DFL loss (val)',       ['val/dfl_loss',    'val/dfl_om']),
-	                    # Learning rates
-	                    ('LR pg0',              ['x/lr0', 'lr/pg0']),
-	                    ('LR pg1',              ['x/lr1', 'lr/pg1']),
-	                    ('LR pg2',              ['x/lr2', 'lr/pg2']),
+	                    ('show_metric_precision_b',    'Precision (B)',     ['metrics/precision(B)', 'precision']),
+	                    ('show_metric_recall_b',       'Recall (B)',        ['metrics/recall(B)',    'recall']),
+	                    ('show_metric_map50_b',        'mAP@0.5 (B)',       ['metrics/mAP50(B)',     'mAP_0.5']),
+	                    ('show_metric_map5095_b',      'mAP@0.5:0.95 (B)', ['metrics/mAP50-95(B)', 'mAP_0.5:0.95']),
+	                    ('show_metric_precision_m',    'Precision (M)',     ['metrics/precision(M)']),
+	                    ('show_metric_recall_m',       'Recall (M)',        ['metrics/recall(M)']),
+	                    ('show_metric_map50_m',        'mAP@0.5 (M)',       ['metrics/mAP50(M)']),
+	                    ('show_metric_map5095_m',      'mAP@0.5:0.95 (M)', ['metrics/mAP50-95(M)']),
+	                    ('show_metric_box_loss_train', 'Box loss (train)',  ['train/box_loss',  'train/box_om']),
+	                    ('show_metric_cls_loss_train', 'Cls loss (train)',  ['train/cls_loss',  'train/cls_om']),
+	                    ('show_metric_dfl_loss_train', 'DFL loss (train)',  ['train/dfl_loss',  'train/dfl_om']),
+	                    ('show_metric_box_loss_val',   'Box loss (val)',    ['val/box_loss',    'val/box_om']),
+	                    ('show_metric_cls_loss_val',   'Cls loss (val)',    ['val/cls_loss',    'val/cls_om']),
+	                    ('show_metric_dfl_loss_val',   'DFL loss (val)',    ['val/dfl_loss',    'val/dfl_om']),
+	                    ('show_metric_lr_pg0',         'LR pg0',            ['x/lr0', 'lr/pg0']),
+	                    ('show_metric_lr_pg1',         'LR pg1',            ['x/lr1', 'lr/pg1']),
+	                    ('show_metric_lr_pg2',         'LR pg2',            ['x/lr2', 'lr/pg2']),
 	                ]
 
-	                printed_any = False
-	                for label, col_names in metric_groups:
+	                # Default visibility (True if key absent from INI)
+	                default_on = {
+	                    'show_metric_precision_b':  True,
+	                    'show_metric_recall_b':     True,
+	                    'show_metric_f1_b':         True,
+	                    'show_metric_map50_b':      True,
+	                    'show_metric_map5095_b':    True,
+	                }
+
+	                for ini_key, label, col_names in metric_groups:
+	                    show = d.get(ini_key, str(default_on.get(ini_key, False)).lower())
+	                    if show.lower() != 'true':
+	                        continue
 	                    val = get_metric(col_names)
 	                    if val is not None:
 	                        lines.append(f"    {label:<22} {val:.4f}")
-	                        printed_any = True
 
-	                # F1-score calculated from Precision and Recall
-	                precision = get_metric(['metrics/precision(B)', 'precision'])
-	                recall    = get_metric(['metrics/recall(B)',    'recall'])
-	                if precision is not None and recall is not None and (precision + recall) > 0:
-	                    f1 = 2 * (precision * recall) / (precision + recall)
-	                    lines.append(f"    {'F1-score (B)':<22} {f1:.4f}")
+	                # F1-score (calculated from Precision + Recall)
+	                if d.get('show_metric_f1_b', 'true').lower() == 'true':
+	                    precision = get_metric(['metrics/precision(B)', 'precision'])
+	                    recall    = get_metric(['metrics/recall(B)',    'recall'])
+	                    if precision is not None and recall is not None and (precision + recall) > 0:
+	                        f1 = 2 * (precision * recall) / (precision + recall)
+	                        lines.append(f"    {'F1-score (B)':<22} {f1:.4f}")
 
 	            except Exception as e:
 	                lines.append(f"    [{model_label}]  could not read results: {e}")
