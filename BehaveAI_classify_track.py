@@ -608,8 +608,8 @@ if __name__ == '__main__':
 	expA2 = 1 - expA
 	expB2 = 1 - expB
 
-	input_folder = "./input/"
-	output_folder = "./output/"
+	input_folder  = os.path.join(project_dir, 'input')
+	output_folder = os.path.join(project_dir, 'output')
 
 	progress_update = 10 # print progress every n frames
 
@@ -1181,16 +1181,18 @@ if __name__ == '__main__':
 
 					# Draw motion vector (if tracking available)
 					if tid in tracker.tracks:
-						state_post = tracker.tracks[tid]['kf'].statePost
-						x, y = state_post[0, 0], state_post[1, 0]
-						vx, vy = state_post[2, 0], state_post[3, 0]
-						next_x = x + vx
-						next_y = y + vy
+					    state_post = tracker.tracks[tid]['kf'].statePost
+					    x, y = state_post[0, 0], state_post[1, 0]
+					    vx, vy = state_post[2, 0], state_post[3, 0]
+					    next_x = x + vx
+					    next_y = y + vy
 
-						light_color = tuple(int(0.8 * ch + 0.2 * 255) for ch in primary_col)
-						cv2.line(frame, (int(x), int(y)), (int(next_x), int(next_y)), primary_col, line_thickness)
-						cv2.circle(frame, (int(next_x), int(next_y)), 3, light_color, -line_thickness)
-						cv2.circle(frame, (int(cx), int(cy)), 3, primary_col, -line_thickness)
+					    # Guard against NaN/Inf values from Kalman overflow
+					    if all(np.isfinite(v) for v in [x, y, next_x, next_y]):
+					        light_color = tuple(int(0.8 * ch + 0.2 * 255) for ch in primary_col)
+					        cv2.line(frame, (int(x), int(y)), (int(next_x), int(next_y)), primary_col, line_thickness)
+					        cv2.circle(frame, (int(next_x), int(next_y)), 3, light_color, -line_thickness)
+					        cv2.circle(frame, (int(cx), int(cy)), 3, primary_col, -line_thickness)
 
 					# Write to CSV
 					csv_writer.writerow([
@@ -1243,4 +1245,6 @@ if __name__ == '__main__':
 		print("\nLaunching activity budget analysis...")
 		run_activity_budget(config_path)
 	except Exception as e:
+		import traceback
 		print(f"Activity budget analysis failed: {e}")
+		traceback.print_exc()
