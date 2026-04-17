@@ -40,6 +40,7 @@ def load_activity_budget_config(config_path):
         'border_zone_ratio':     float(d.get('ab_border_zone_ratio',     '0.15')),
         'group_type_separator':  d.get('ab_group_type_separator',  '_'),
         'group_type_field_index': int(d.get('ab_group_type_field_index', '4')),
+        'analysis_duration_s':   float(d.get('ab_analysis_duration_s',  '0')),
     }
 
 
@@ -116,7 +117,7 @@ def load_groups_metadata(project_dir):
 # Parse one tracking CSV
 # ---------------------------------------------------------------------------
 
-def parse_tracking_csv(csv_path):
+def parse_tracking_csv(csv_path, max_frame_limit=None):
     """
     Read a tracking CSV and return:
       - fps estimate (frames per second, derived from frame column)
@@ -125,6 +126,9 @@ def parse_tracking_csv(csv_path):
 
     Each row dict has keys: frame (int), x (float), y (float),
     primary_class (str), primary_conf (float).
+
+    If max_frame_limit is set, only frames <= max_frame_limit are kept,
+    which restricts the analysis to a fixed duration from the start of the video.
     """
     tracks = defaultdict(list)
     fps = 0.0
@@ -135,6 +139,11 @@ def parse_tracking_csv(csv_path):
         for row in reader:
             try:
                 frame  = int(row['frame'])
+
+                # Restrict to the analysis window if a frame limit is set
+                if max_frame_limit is not None and frame > max_frame_limit:
+                    continue
+
                 tid    = int(row['id'])
                 x      = float(row['x'])
                 y      = float(row['y'])
@@ -359,23 +368,10 @@ def run_activity_budget(config_path, fps_default=30.0):
     all_behaviors_global = set()
     tracks_cache = {}
     for csv_path in csv_files:
-        tracks, max_frame = parse_tracking_csv(csv_path)
-        tracks_cache[csv_path] = (tracks, max_frame)
-        for rows in tracks.values():
-            for r in rows:
-                if r['behavior'] and r['behavior'] != 'unknown':
-                    all_behaviors_global.add(r['behavior'])
-
-    all_behaviors = sorted(all_behaviors_global)
-
-    for csv_path in csv_files:
-        tracks, max_frame = tracks_cache[csv_path]
-
-        # Derive video filename from CSV name:  foo_tracking.csv -> foo.MP4 (best guess)
+        # Derive video filename from CSV name
         csv_basename   = os.path.basename(csv_path)
         video_stem     = csv_basename.replace('_tracking.csv', '')
-        # Try to find matching video extension
-        video_filename = video_stem  # fallback
+        video_filename = video_stem
         for ext in ('.MP4', '.mp4', '.avi', '.mov', '.mkv'):
             candidate = video_stem + ext
             candidate_path = os.path.join(
@@ -402,7 +398,33 @@ def run_activity_budget(config_path, fps_default=30.0):
         except Exception:
             pass
 
-        # Video dimensions for border detection
+        # Compute frame limit from analysis duration setting (0 = no limit)
+        analysis_duration_s = cfg.get('analysis_duration_s', 0)
+        if analysis_duration_s and analysis_duration_s > 0:
+            max_frame_limit = int(analysis_duration_s * fps)
+            print(f"  Analysis window: first {analysis_duration_s:.0f}s "
+                  f"({max_frame_limit} frames at {fps:.1f} fps)")
+        else:
+            max_frame_limit = None
+
+        tracks, max_frame = parse_tracking_csv(csv_path, max_frame_limit=max_frame_limit)
+        if max_frame_limit is not None:
+            max_frame = min(max_frame, max_frame_limit)
+
+        # Cache tracks together with pre-resolved video info
+        tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename)
+
+        for rows in tracks.values():
+            for r in rows:
+                if r['behavior'] and r['behavior'] != 'unknown':
+                    all_behaviors_global.add(r['behavior'])
+
+    all_behaviors = sorted(all_behaviors_global)
+
+    for csv_path in csv_files:
+        tracks, max_frame, fps, video_filename = tracks_cache[csv_path]
+
+        # Metadata overrides
         video_width = video_height = None
         try:
             import cv2
