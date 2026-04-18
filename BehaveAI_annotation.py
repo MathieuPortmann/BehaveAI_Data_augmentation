@@ -183,6 +183,7 @@ try:
 	rgb_multipliers = [float(x) for x in config['DEFAULT']['rgb_multipliers'].split(',')]
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
+	buttons_per_row = int(config['DEFAULT'].get('buttons_per_row', '8'))
 	# ~ cross_blocking = config['DEFAULT']['cross_blocking'].lower()
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	motion_blocks_static = config['DEFAULT']['motion_blocks_static'].lower()
@@ -1374,8 +1375,11 @@ class AnnotatorTk:
 		self.primary_buttons = []
 		self.secondary_buttons = []
 
-		# create primary buttons
-		col = 0
+		# Number of buttons per row — controlled via Settings > Display Settings
+		BUTTONS_PER_ROW = buttons_per_row
+
+		# create primary buttons — wrap onto multiple rows when needed
+		btn_position = 0
 		for idx, name in enumerate(primary_classes):
 			if name == '0':
 				continue
@@ -1383,25 +1387,32 @@ class AnnotatorTk:
 			if idx < len(primary_colors):
 				bgr = primary_colors[idx]
 				color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+			grid_row = btn_position // BUTTONS_PER_ROW
+			grid_col = btn_position % BUTTONS_PER_ROW
 			btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, primary_classes_info[idx][0]),
 							width=12, relief='raised', command=lambda i=idx: self.select_primary(i))
-			btn.grid(row=0, column=col, padx=2, pady=2)
+			btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 			self.primary_buttons.append((btn, color_hex, idx))
-			col += 1
+			btn_position += 1
 
-		# secondary row
+		# How many grid rows did the primary buttons use?
+		primary_row_count = max(1, (btn_position + BUTTONS_PER_ROW - 1) // BUTTONS_PER_ROW)
+
+		# secondary rows — start after the last primary row
 		if hierarchical_mode:
-			col = 0
+			btn_position = 0
 			for idx, name in enumerate(secondary_classes):
 				color_hex = None
 				if idx < len(secondary_colors):
 					bgr = secondary_colors[idx]
 					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+				grid_row = primary_row_count + (btn_position // BUTTONS_PER_ROW)
+				grid_col = btn_position % BUTTONS_PER_ROW
 				btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, secondary_classes_info[idx][0]),
 								width=12, relief='raised', command=lambda i=idx: self.select_secondary(i))
-				btn.grid(row=1, column=col, padx=2, pady=2)
+				btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 				self.secondary_buttons.append((btn, color_hex, idx))
-				col += 1
+				btn_position += 1
 
 
 		# bind events
