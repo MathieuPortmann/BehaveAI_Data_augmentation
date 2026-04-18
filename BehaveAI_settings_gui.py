@@ -403,6 +403,7 @@ class SettingsEditorApp(tk.Tk):
 		self.output_dir_var = tk.StringVar()
 
 		# Data augmentation parameters
+		self.aug_target_classes_var = tk.StringVar(value='')
 		self.aug_global_prob_var = tk.DoubleVar(value=0)
 		self.aug_brightness_range_var = tk.StringVar(value='0.8,1.2')
 		self.aug_brightness_prob_var = tk.DoubleVar(value=0)
@@ -610,81 +611,114 @@ class SettingsEditorApp(tk.Tk):
 		tab6 = ttk.Frame(notebook)
 		notebook.add(tab6, text='Data augmentation')
 
-		ttk.Label(tab6, text='Global augmentation probability').grid(row=2, column=0, sticky='w', padx=8, pady=6)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_global_prob_var, width=8, command=self._set_dirty).grid(row=2, column=1, sticky='w', padx=8)
+		# Scrollable container so all rows fit without truncation
+		aug_canvas = tk.Canvas(tab6, highlightthickness=0)
+		aug_scroll = ttk.Scrollbar(tab6, orient='vertical', command=aug_canvas.yview)
+		aug_inner  = ttk.Frame(aug_canvas)
+		aug_inner.bind('<Configure>',
+			lambda e: aug_canvas.configure(scrollregion=aug_canvas.bbox('all')))
+		aug_canvas.create_window((0, 0), window=aug_inner, anchor='nw')
+		aug_canvas.configure(yscrollcommand=aug_scroll.set)
+		aug_canvas.pack(side='left', fill='both', expand=True)
+		aug_scroll.pack(side='right', fill='y')
 
-		# Brightness
-		ttk.Label(tab6, text='Brightness (range)').grid(row=3, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_brightness_range_var, width=12).grid(row=3, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Brightness (probability)').grid(row=3, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_brightness_prob_var, width=8, command=self._set_dirty).grid(row=3, column=3, sticky='w', padx=8)
+		r = 0  # running row counter
 
-		# Contrast
-		ttk.Label(tab6, text='Contrast (range)').grid(row=4, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_contrast_range_var, width=12).grid(row=4, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Contrast (probability)').grid(row=4, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_contrast_prob_var, width=8, command=self._set_dirty).grid(row=4, column=3, sticky='w', padx=8)
+		# --- Target classes filter (NEW) ---
+		ttk.Label(aug_inner, text='Target classes (leave empty = all)',
+				  font=('TkDefaultFont', 9, 'bold')).grid(
+			row=r, column=0, columnspan=4, sticky='w', padx=8, pady=(10, 0))
+		r += 1
+		ttk.Label(aug_inner, text='Classes to augment').grid(
+			row=r, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(aug_inner, textvariable=self.aug_target_classes_var, width=40).grid(
+			row=r, column=1, columnspan=3, sticky='w', padx=8)
+		ttk.Label(aug_inner,
+				  text='Comma-separated class names, e.g.  bird, tiger, filght, run   (empty = augment all classes)',
+				  foreground='grey').grid(
+			row=r+1, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 6))
+		r += 2
 
-		# Saturation
-		ttk.Label(tab6, text='Saturation (range)').grid(row=5, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_saturation_range_var, width=12).grid(row=5, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Saturation (probability)').grid(row=5, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_saturation_prob_var, width=8, command=self._set_dirty).grid(row=5, column=3, sticky='w', padx=8)
+		# Separator
+		ttk.Separator(aug_inner, orient='horizontal').grid(
+			row=r, column=0, columnspan=4, sticky='ew', padx=8, pady=6)
+		r += 1
 
-		# Hue
-		ttk.Label(tab6, text='Hue (range)').grid(row=6, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_hue_range_var, width=12).grid(row=6, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Hue (probability)').grid(row=6, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_hue_prob_var, width=8, command=self._set_dirty).grid(row=6, column=3, sticky='w', padx=8)
+		# --- Global probability ---
+		ttk.Label(aug_inner, text='Global augmentation probability').grid(
+			row=r, column=0, sticky='w', padx=8, pady=6)
+		ttk.Spinbox(aug_inner, from_=0.0, to=1.0, increment=0.05,
+					textvariable=self.aug_global_prob_var, width=8,
+					command=self._set_dirty).grid(row=r, column=1, sticky='w', padx=8)
+		r += 1
 
-		# Sharpness
-		ttk.Label(tab6, text='Sharpness (range)').grid(row=7, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_sharpness_range_var, width=12).grid(row=7, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Sharpness (probability)').grid(row=7, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_sharpness_prob_var, width=8, command=self._set_dirty).grid(row=7, column=3, sticky='w', padx=8)
+		# Helper: one parameter row  (label | range entry | prob label | prob spinbox)
+		# Range entry is wider (width=35) to accommodate multi-segment syntax like
+		#   0.5,0.8 | 1.0 | 1.2,1.6
+		def _aug_row(parent, row, label, range_var, prob_var):
+			ttk.Label(parent, text=f'{label} (range)').grid(
+				row=row, column=0, sticky='w', padx=8, pady=4)
+			ttk.Entry(parent, textvariable=range_var, width=35).grid(
+				row=row, column=1, sticky='w', padx=8)
+			ttk.Label(parent, text=f'{label} (probability)').grid(
+				row=row, column=2, sticky='w', padx=8, pady=4)
+			ttk.Spinbox(parent, from_=0.0, to=1.0, increment=0.05,
+						textvariable=prob_var, width=8,
+						command=self._set_dirty).grid(row=row, column=3, sticky='w', padx=8)
 
-		# Blur
-		ttk.Label(tab6, text='Blur (range)').grid(row=8, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_blur_range_var, width=12).grid(row=8, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Blur (probability)').grid(row=8, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_blur_prob_var, width=8, command=self._set_dirty).grid(row=8, column=3, sticky='w', padx=8)
+		# --- Multi-segment range syntax hint ---
+		ttk.Label(aug_inner,
+				  text='Range syntax:  single range: 0.8,1.2  |  '
+				       'multi-segment: 0.5,0.8 | 1.2,1.6  |  '
+				       'discrete value: 0.6  |  mix: 0.5,0.8 | 1.0 | 1.2,1.6',
+				  foreground='grey').grid(
+			row=r, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 6))
+		ttk.Label(aug_inner,
+				  text='Each segment separated by | produces one independent augmented copy.',
+				  foreground='grey').grid(
+			row=r+1, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 8))
+		r += 2
 
-		# Noise
-		ttk.Label(tab6, text='Noise (range)').grid(row=9, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_noise_range_var, width=12).grid(row=9, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Noise (probability)').grid(row=9, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_noise_prob_var, width=8, command=self._set_dirty).grid(row=9, column=3, sticky='w', padx=8)
+		_aug_row(aug_inner, r, 'Brightness',   self.aug_brightness_range_var,   self.aug_brightness_prob_var);   r += 1
+		_aug_row(aug_inner, r, 'Contrast',     self.aug_contrast_range_var,     self.aug_contrast_prob_var);     r += 1
+		_aug_row(aug_inner, r, 'Saturation',   self.aug_saturation_range_var,   self.aug_saturation_prob_var);   r += 1
+		_aug_row(aug_inner, r, 'Hue',          self.aug_hue_range_var,          self.aug_hue_prob_var);          r += 1
+		_aug_row(aug_inner, r, 'Sharpness',    self.aug_sharpness_range_var,    self.aug_sharpness_prob_var);    r += 1
+		_aug_row(aug_inner, r, 'Blur',         self.aug_blur_range_var,         self.aug_blur_prob_var);         r += 1
+		_aug_row(aug_inner, r, 'Noise',        self.aug_noise_range_var,        self.aug_noise_prob_var);        r += 1
+		_aug_row(aug_inner, r, 'Shear',        self.aug_shear_range_var,        self.aug_shear_prob_var);        r += 1
+		_aug_row(aug_inner, r, 'Temperature',  self.aug_temperature_range_var,  self.aug_temperature_prob_var);  r += 1
 
-		# Shear
-		ttk.Label(tab6, text='Shear (range)').grid(row=10, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_shear_range_var, width=12).grid(row=10, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Shear (probability)').grid(row=10, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_shear_prob_var, width=8, command=self._set_dirty).grid(row=10, column=3, sticky='w', padx=8)
+		# Flip H — options field (not a range, kept as-is)
+		ttk.Label(aug_inner, text='Horizontal Flip (options)').grid(
+			row=r, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(aug_inner, textvariable=self.aug_flip_h_options_var, width=14).grid(
+			row=r, column=1, sticky='w', padx=8)
+		ttk.Label(aug_inner, text='Horizontal Flip (probability)').grid(
+			row=r, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(aug_inner, from_=0.0, to=1.0, increment=0.05,
+					textvariable=self.aug_flip_h_prob_var, width=8,
+					command=self._set_dirty).grid(row=r, column=3, sticky='w', padx=8)
+		r += 1
 
-		# Horizontal Flip
-		ttk.Label(tab6, text='Horizontal Flip (options)').grid(row=11, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_flip_h_options_var, width=12).grid(row=11, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Horizontal Flip (probability)').grid(row=11, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_flip_h_prob_var, width=8, command=self._set_dirty).grid(row=11, column=3, sticky='w', padx=8)
-
-		# Vertical Flip
-		ttk.Label(tab6, text='Vertical Flip (options)').grid(row=12, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_flip_v_options_var, width=12).grid(row=12, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Vertical Flip (probability)').grid(row=12, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_flip_v_prob_var, width=8, command=self._set_dirty).grid(row=12, column=3, sticky='w', padx=8)
-
-		# Temperature
-		ttk.Label(tab6, text='Temperature (range)').grid(row=13, column=0, sticky='w', padx=8, pady=4)
-		ttk.Entry(tab6, textvariable=self.aug_temperature_range_var, width=12).grid(row=13, column=1, sticky='w', padx=8)
-		ttk.Label(tab6, text='Temperature (probability)').grid(row=13, column=2, sticky='w', padx=8, pady=4)
-		ttk.Spinbox(tab6, from_=0.0, to=1.0, increment=0.05, textvariable=self.aug_temperature_prob_var, width=8, command=self._set_dirty).grid(row=13, column=3, sticky='w', padx=8)
+		# Flip V
+		ttk.Label(aug_inner, text='Vertical Flip (options)').grid(
+			row=r, column=0, sticky='w', padx=8, pady=4)
+		ttk.Entry(aug_inner, textvariable=self.aug_flip_v_options_var, width=14).grid(
+			row=r, column=1, sticky='w', padx=8)
+		ttk.Label(aug_inner, text='Vertical Flip (probability)').grid(
+			row=r, column=2, sticky='w', padx=8, pady=4)
+		ttk.Spinbox(aug_inner, from_=0.0, to=1.0, increment=0.05,
+					textvariable=self.aug_flip_v_prob_var, width=8,
+					command=self._set_dirty).grid(row=r, column=3, sticky='w', padx=8)
+		r += 1
 
 		# Delete augmented data button
 		ttk.Button(
-            tab6,
-            text='Delete all augmented data',
-            command=self._delete_augmented_data
-        ).grid(row=14, column=0, columnspan=2, sticky='w', padx=8, pady=(16, 4))
+			aug_inner,
+			text='Delete all augmented data',
+			command=self._delete_augmented_data
+		).grid(row=r, column=0, columnspan=2, sticky='w', padx=8, pady=(16, 4))
 
 		# TAB 2: Motion-from-colour strategy
 		tab2 = ttk.Frame(notebook)
@@ -816,10 +850,6 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab5, text='Font size').pack(anchor='w', pady=(6,0))
 		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w')
 
-		self.buttons_per_row_var = tk.IntVar(value=8)
-		ttk.Label(tab5, text='Class buttons per row (annotation & inspect)').pack(anchor='w', pady=(6,0))
-		ttk.Spinbox(tab5, from_=1, to=50, increment=1, textvariable=self.buttons_per_row_var, width=6, command=self._set_dirty).pack(anchor='w')
-
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
 		notebook.add(tab_ab, text='Activity Budget')
@@ -920,7 +950,6 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
-		self.buttons_per_row_var.set(int(d.get('buttons_per_row', fallback='8')))
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
@@ -975,6 +1004,7 @@ class SettingsEditorApp(tk.Tk):
 			self.kalman_meas_var.set(0.2)
 
 		self.aug_global_prob_var.set(float(d.get('aug_global_probability', fallback='0')))
+		self.aug_target_classes_var.set(d.get('aug_target_classes', fallback=''))
 		self.aug_brightness_range_var.set(d.get('aug_brightness_range', fallback='0.8,1.2'))
 		self.aug_brightness_prob_var.set(float(d.get('aug_brightness_probability', fallback='0')))
 		self.aug_contrast_range_var.set(d.get('aug_contrast_range', fallback='0.8,1.2'))
@@ -1333,11 +1363,11 @@ class SettingsEditorApp(tk.Tk):
 		new_default['scale_factor'] = '1.0'
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
-		new_default['buttons_per_row'] = str(self.buttons_per_row_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
 
 		# Data augmentation parameters
 		new_default['aug_global_probability'] = str(self.aug_global_prob_var.get())
+		new_default['aug_target_classes'] = self.aug_target_classes_var.get()
 		new_default['aug_brightness_range'] = self.aug_brightness_range_var.get()
 		new_default['aug_brightness_probability'] = str(self.aug_brightness_prob_var.get())
 		new_default['aug_contrast_range'] = self.aug_contrast_range_var.get()

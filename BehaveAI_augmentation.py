@@ -6,6 +6,20 @@ Applies augmentation to all existing annotations in the project.
 Each triggered augmentation parameter produces one independent copy of the original.
 The original annotation is never modified.
 
+New features:
+  - aug_target_classes: comma-separated list of class names to augment.
+    Only images containing at least one annotation of a target class are augmented.
+    Leave empty (or omit) to augment all classes.
+
+  - Multi-segment range syntax using '|' as separator:
+      Single range   : 0.8,1.2
+      Two ranges     : 0.5,0.8 | 1.2,1.6
+      Discrete value : 0.5
+      Mix            : 0.5,0.8 | 1.0 | 1.2,1.6
+    When multiple segments are provided each segment produces ONE independent
+    augmented copy (same behaviour as having multiple parameters, but for one
+    parameter). A single segment keeps the original random-sample behaviour.
+
 Usage: called programmatically from the GUI or directly via CLI.
 """
 
@@ -13,10 +27,8 @@ import os
 import sys
 import configparser
 import random
-import shutil
 import cv2
 import numpy as np
-from pathlib import Path
 
 try:
     from PIL import Image as PilImage, ImageEnhance, ImageFilter
@@ -32,8 +44,6 @@ def _print_progress(current, total, label='Augmenting'):
     """
     Print a tqdm-style progress line that the BehaveAI launcher recognises
     and overwrites in-place (matches the is_progress_line regex: 'XX% |').
-
-    The line ends with \\r so the launcher's overwrite logic replaces it.
     Uses only ASCII characters to stay compatible with Windows cp1252 encoding.
     """
     if total <= 0:
@@ -43,11 +53,72 @@ def _print_progress(current, total, label='Augmenting'):
     filled = int(bar_width * current / total)
     bar = '#' * filled + '-' * (bar_width - filled)
     line = f"{pct}% |{bar}| {current}/{total}  {label}"
-    # \r triggers the launcher's overwrite branch
     print(line, end='\r', flush=True)
     if current >= total:
-        # Final newline so the next message starts on a fresh line
         print(flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Multi-segment range parser  (NEW)
+# ---------------------------------------------------------------------------
+
+def _parse_segments(raw_str):
+    """
+    Parse a range/discrete string that may contain multiple segments separated
+    by '|'.
+
+    Each segment is either:
+      - A pair  'lo,hi'  -> interpreted as a continuous range [lo, hi]
+      - A single value 'v' -> interpreted as the discrete value v
+
+    Returns a list of segments, where each segment is one of:
+      ('range',    lo, hi)   — sample uniformly from [lo, hi]
+      ('discrete', value)    — use this exact value
+
+    Examples
+    --------
+    '0.8,1.2'          -> [('range', 0.8, 1.2)]
+    '0.5,0.8 | 1.2,1.6' -> [('range', 0.5, 0.8), ('range', 1.2, 1.6)]
+    '0.5 | 1.0 | 1.5'  -> [('discrete', 0.5), ('discrete', 1.0), ('discrete', 1.5)]
+    '0.5,0.8 | 1.0 | 1.2,1.6' -> [('range', 0.5, 0.8), ('discrete', 1.0), ('range', 1.2, 1.6)]
+    """
+    segments = []
+    for part in raw_str.split('|'):
+        part = part.strip()
+        if not part:
+            continue
+        if ',' in part:
+            lo_str, hi_str = part.split(',', 1)
+            segments.append(('range', float(lo_str.strip()), float(hi_str.strip())))
+        else:
+            segments.append(('discrete', float(part)))
+    if not segments:
+        # Fallback: treat whole string as a single range/discrete
+        segments = _parse_segments('0,0')
+    return segments
+
+
+def _sample_segment(segment, value_type):
+    """
+    Sample one value from a parsed segment.
+
+    Parameters
+    ----------
+    segment    : tuple returned by _parse_segments
+    value_type : 'float' or 'int'
+
+    Returns a float or int depending on value_type.
+    """
+    kind = segment[0]
+    if kind == 'discrete':
+        v = segment[1]
+        return int(round(v)) if value_type == 'int' else float(v)
+    else:  # 'range'
+        lo, hi = segment[1], segment[2]
+        if value_type == 'float':
+            return round(random.uniform(lo, hi), 4)
+        else:
+            return random.randint(int(lo), int(hi))
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +130,11 @@ def load_augmentation_config(config_path):
     Read augmentation parameters from BehaveAI_settings.ini.
     Returns the AUGMENTATION_CONFIG dict used by the augmentation functions,
     or None if global_probability is 0 (augmentation disabled).
+
+    New INI keys
+    ------------
+    aug_target_classes : comma-separated class names to augment (empty = all)
+    All range keys now accept the multi-segment syntax described in _parse_segments.
     """
     config = configparser.ConfigParser()
     config.optionxform = str
@@ -66,51 +142,59 @@ def load_augmentation_config(config_path):
     d = config['DEFAULT']
 
     global_prob = float(d.get('aug_global_probability', '0'))
-
-    # If global probability is 0, augmentation is disabled — return None immediately
     if global_prob == 0:
         return None
 
+    # --- target classes filter (NEW) ---
+    raw_target = d.get('aug_target_classes', '').strip()
+    target_classes = [c.strip() for c in raw_target.split(',') if c.strip()] \
+        if raw_target else []
+
+    # Helper: parse a range key into its list of segments
+    def _segs(key, default):
+        return _parse_segments(d.get(key, default))
+
     aug_config = {
         'global_probability': global_prob,
+        'target_classes': target_classes,           # NEW
         'params': {
             'brightness': {
-                'range': [float(x) for x in d.get('aug_brightness_range', '0.8,1.2').split(',')],
+                'segments': _segs('aug_brightness_range', '0.8,1.2'),
                 'type': 'float',
                 'probability': float(d.get('aug_brightness_probability', '0')),
             },
             'contrast': {
-                'range': [float(x) for x in d.get('aug_contrast_range', '0.8,1.2').split(',')],
+                'segments': _segs('aug_contrast_range', '0.8,1.2'),
                 'type': 'float',
                 'probability': float(d.get('aug_contrast_probability', '0')),
             },
             'saturation': {
-                'range': [float(x) for x in d.get('aug_saturation_range', '0.8,1.2').split(',')],
+                'segments': _segs('aug_saturation_range', '0.8,1.2'),
                 'type': 'float',
                 'probability': float(d.get('aug_saturation_probability', '0')),
             },
             'hue': {
-                'range': [float(x) for x in d.get('aug_hue_range', '-15,15').split(',')],
+                'segments': _segs('aug_hue_range', '-15,15'),
                 'type': 'int',
                 'probability': float(d.get('aug_hue_probability', '0')),
             },
             'sharpness': {
-                'range': [float(x) for x in d.get('aug_sharpness_range', '0.8,1.5').split(',')],
+                'segments': _segs('aug_sharpness_range', '0.8,1.5'),
                 'type': 'float',
                 'probability': float(d.get('aug_sharpness_probability', '0')),
             },
             'blur': {
-                'range': [float(x) for x in d.get('aug_blur_range', '1,3').split(',')],
+                'segments': _segs('aug_blur_range', '1,3'),
                 'type': 'int',
                 'probability': float(d.get('aug_blur_probability', '0')),
             },
             'noise': {
-                'range': [float(x) for x in d.get('aug_noise_range', '0,25').split(',')],
+                'segments': _segs('aug_noise_range', '0,25'),
                 'type': 'int',
                 'probability': float(d.get('aug_noise_probability', '0')),
             },
             'shear': {
-                'range': [float(x) for x in d.get('aug_shear_range', '-0.1,0.1').split(',')],
+                'segments': _segs('aug_shear_range', '-0.1,0.1'),
                 'type': 'float',
                 'probability': float(d.get('aug_shear_probability', '0')),
             },
@@ -125,7 +209,7 @@ def load_augmentation_config(config_path):
                 'probability': float(d.get('aug_flip_v_probability', '0')),
             },
             'temperature': {
-                'range': [float(x) for x in d.get('aug_temperature_range', '0,10').split(',')],
+                'segments': _segs('aug_temperature_range', '0,10'),
                 'type': 'int',
                 'probability': float(d.get('aug_temperature_probability', '0')),
             },
@@ -135,53 +219,103 @@ def load_augmentation_config(config_path):
 
 
 # ---------------------------------------------------------------------------
-# Parameter sampling — one dict per triggered parameter
+# Class-filter helper  (NEW)
+# ---------------------------------------------------------------------------
+
+def _label_contains_target_class(label_path, target_class_indices):
+    """
+    Return True if the YOLO label file at label_path contains at least one
+    annotation whose class index is in target_class_indices.
+
+    If target_class_indices is empty (no filter configured) always returns True.
+    If the label file does not exist OR is empty (save_empty_frames = true
+    produces empty label files for background frames), returns True so the
+    image is included — empty frames are valid training data.
+    """
+    if not target_class_indices:
+        return True                  # no filter — augment everything
+    if not os.path.exists(label_path):
+        return True                  # missing label = empty frame, keep it
+
+    with open(label_path, 'r') as f:
+        lines = [l for l in f if l.strip()]
+
+    if not lines:
+        return True                  # empty label file = background frame, keep it
+
+    for line in lines:
+        parts = line.strip().split()
+        if not parts:
+            continue
+        try:
+            if int(parts[0]) in target_class_indices:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Parameter sampling — one dict per (parameter, segment) pair  (UPDATED)
 # ---------------------------------------------------------------------------
 
 def sample_augmentation_list(aug_config):
     """
-    Randomly decide which augmentation parameters apply to one image.
+    Decide which augmentation parameters apply to one image and produce the
+    list of (param_name, value, segment_index) tuples to apply.
 
-    Returns a list of single-key dicts — one per triggered parameter.
-    Each dict contains exactly one key-value pair, e.g. {'brightness': 1.3}.
+    Multi-segment behaviour
+    -----------------------
+    If a parameter has N segments and fires (probability check passes):
+      - Single segment  : one copy, value sampled from that segment  (original behaviour)
+      - Multiple segments: N copies, one per segment, each with its own sampled value
 
-    Returns an empty list if the image is not selected for augmentation
-    (global probability check) or if no individual parameter fires.
+    The returned list contains one dict per copy to be written:
+      {'param_name': value, '_seg_idx': i}
+    The '_seg_idx' key is used to build a unique output filename when N > 1.
 
-    This guarantees that each triggered parameter produces one independent
-    copy of the original annotation.
+    Returns an empty list if the global gate rejects this image or no
+    individual parameter fires.
     """
-    # Global gate: with probability (1 - global_probability) skip entirely
     if random.random() >= aug_config['global_probability']:
         return []
 
     triggered = []
 
     for param_name, param_cfg in aug_config['params'].items():
-        # Each parameter has its own independent probability
         if random.random() >= param_cfg['probability']:
             continue
 
-        # Sample a value for this parameter
+        # --- flip_h / flip_v keep their existing 'options' logic ---
         if 'options' in param_cfg:
             value = random.choice(param_cfg['options'])
-        elif param_cfg['type'] == 'float':
-            value = round(random.uniform(param_cfg['range'][0], param_cfg['range'][1]), 4)
-        elif param_cfg['type'] == 'int':
-            value = random.randint(int(param_cfg['range'][0]), int(param_cfg['range'][1]))
-            if param_name == 'blur' and value % 2 == 0:
-                value = max(1, value - 1)
-        else:
+            triggered.append({param_name: value, '_seg_idx': 0})
             continue
 
-        # One dict per parameter — this is the key design rule
-        triggered.append({param_name: value})
+        # --- range/discrete parameters ---
+        segments = param_cfg.get('segments', [])
+        vtype    = param_cfg.get('type', 'float')
+
+        if len(segments) <= 1:
+            # Single segment — original behaviour: one copy, random sample
+            seg   = segments[0] if segments else ('range', 0.0, 1.0)
+            value = _sample_segment(seg, vtype)
+            if param_name == 'blur' and vtype == 'int' and value % 2 == 0:
+                value = max(1, value - 1)
+            triggered.append({param_name: value, '_seg_idx': 0})
+        else:
+            # Multiple segments — one copy per segment
+            for seg_idx, seg in enumerate(segments):
+                value = _sample_segment(seg, vtype)
+                if param_name == 'blur' and vtype == 'int' and value % 2 == 0:
+                    value = max(1, value - 1)
+                triggered.append({param_name: value, '_seg_idx': seg_idx})
 
     return triggered
 
 
 # ---------------------------------------------------------------------------
-# Image transformation — one parameter at a time
+# Image transformation — one parameter at a time  (unchanged)
 # ---------------------------------------------------------------------------
 
 def apply_single_augmentation(bgr_image, param_name, value):
@@ -193,7 +327,6 @@ def apply_single_augmentation(bgr_image, param_name, value):
     if PilImage is None:
         raise ImportError("Pillow is required for augmentation: pip install Pillow")
 
-    # Convert BGR (OpenCV) -> RGB (PIL)
     rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
     img = PilImage.fromarray(rgb)
 
@@ -223,22 +356,21 @@ def apply_single_augmentation(bgr_image, param_name, value):
 
     elif param_name == 'hue':
         # Shift hue channel in HSV space using OpenCV (avoids deprecated Pillow HSV mode)
-        bgr_tmp = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        hsv_tmp = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV).astype(np.int16)
+        bgr_tmp  = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        hsv_tmp  = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV).astype(np.int16)
         hsv_tmp[:, :, 0] = (hsv_tmp[:, :, 0] + int(value)) % 180
-        hsv_tmp = np.clip(hsv_tmp, 0, 255).astype(np.uint8)
-        rgb_tmp = cv2.cvtColor(cv2.cvtColor(hsv_tmp, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2RGB)
+        hsv_tmp  = np.clip(hsv_tmp, 0, 255).astype(np.uint8)
+        rgb_tmp  = cv2.cvtColor(cv2.cvtColor(hsv_tmp, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2RGB)
         img = PilImage.fromarray(rgb_tmp)
 
     elif param_name == 'temperature':
-        # Warm/cool shift: add to red, subtract from blue
         arr = np.array(img, dtype=np.int16)
-        arr[:, :, 0] = np.clip(arr[:, :, 0] + int(value), 0, 255)  # red
-        arr[:, :, 2] = np.clip(arr[:, :, 2] - int(value), 0, 255)  # blue
+        arr[:, :, 0] = np.clip(arr[:, :, 0] + int(value), 0, 255)
+        arr[:, :, 2] = np.clip(arr[:, :, 2] - int(value), 0, 255)
         img = PilImage.fromarray(arr.astype(np.uint8))
 
     elif param_name == 'flip_h':
-        if value:  # value is True/False
+        if value:
             img = img.transpose(PilImage.FLIP_LEFT_RIGHT)
 
     elif param_name == 'flip_v':
@@ -246,32 +378,23 @@ def apply_single_augmentation(bgr_image, param_name, value):
             img = img.transpose(PilImage.FLIP_TOP_BOTTOM)
 
     elif param_name == 'shear':
-        # Affine shear along x axis
         w, h = img.size
         shear_x = float(value)
-        # Affine transform matrix for horizontal shear
-        transform_matrix = (1, shear_x, -shear_x * h / 2,
-                             0, 1, 0)
+        transform_matrix = (1, shear_x, -shear_x * h / 2, 0, 1, 0)
         img = img.transform((w, h), PilImage.AFFINE, transform_matrix,
                              resample=PilImage.BILINEAR)
 
-    # Convert back RGB -> BGR
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
 # ---------------------------------------------------------------------------
-# Label transformation for geometric augmentations
+# Label transformation for geometric augmentations  (unchanged)
 # ---------------------------------------------------------------------------
 
 def transform_labels(label_path, param_name, value):
     """
     Read a YOLO label file and return transformed label lines as a string.
     Only flip_h and flip_v require coordinate adjustments.
-    All other augmentations are colour/filter changes — labels are unchanged.
-
-    YOLO format: <class> <xc> <yc> <w> <h>  (all normalised 0..1)
-    flip_h: xc -> 1 - xc
-    flip_v: yc -> 1 - yc
     """
     if not os.path.exists(label_path):
         return ''
@@ -280,7 +403,6 @@ def transform_labels(label_path, param_name, value):
         lines = f.readlines()
 
     if param_name not in ('flip_h', 'flip_v') or not value:
-        # No geometric change — return labels unchanged
         return ''.join(lines)
 
     out_lines = []
@@ -291,12 +413,10 @@ def transform_labels(label_path, param_name, value):
             continue
         cls = parts[0]
         xc, yc, bw, bh = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
-
         if param_name == 'flip_h':
             xc = 1.0 - xc
         elif param_name == 'flip_v':
             yc = 1.0 - yc
-
         out_lines.append(f"{cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
 
     return ''.join(out_lines)
@@ -306,33 +426,27 @@ def transform_labels(label_path, param_name, value):
 # Core augmentation loop
 # ---------------------------------------------------------------------------
 
-# Augmentation parameters allowed for motion images (colour changes excluded
-# because the false-colour encoding carries motion information — altering
-# hue/brightness/etc. would corrupt that signal).
+# Parameters EXCLUDED from motion images (colour augmentations that would
+# corrupt the false-colour motion encoding).
+# Everything NOT in this set is allowed on motion images.
+MOTION_EXCLUDED_PARAMS = {'brightness', 'contrast', 'saturation', 'hue', 'temperature'}
+
+# For convenience: the full set of allowed params on motion images
 MOTION_ALLOWED_PARAMS = {'blur', 'noise', 'sharpness', 'shear', 'flip_h', 'flip_v'}
 
 
 def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
     """
-    Main entry point called by the GUI button.
+    Main entry point called by the GUI button or CLI.
 
-    Scans all annotation images in the project, applies augmentation, and writes
-    augmented copies alongside the originals.
+    For each original annotation image:
+      1. Skip if no label file contains a target class (when aug_target_classes
+         is configured).
+      2. Sample the augmentation list; multi-segment parameters produce one
+         copy per segment.
+      3. Write each copy as <basename>_aug_<param>[_<seg_idx>].<ext>.
 
-    Rules:
-    - Original files are never modified.
-    - Files whose basename already contains '_aug_' are skipped (no re-augmentation).
-    - Each triggered parameter produces one independent copy named
-      <basename>_aug_<param_name>.<ext>.
-    - If a copy with that name already exists it is overwritten (idempotent).
-
-    Args:
-        config_path (str): Path to BehaveAI_settings.ini.
-        progress_callback (callable): Optional function(current, total, message)
-            called periodically so the GUI can update a progress bar.
-
-    Returns:
-        (int, int): (copies_created, originals_processed)
+    Returns (copies_created, originals_processed).
     """
     aug_config = load_augmentation_config(config_path)
     if aug_config is None:
@@ -341,7 +455,35 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
 
     project_dir = os.path.dirname(os.path.abspath(config_path))
 
-    # Directories that hold annotation images (train and val for both streams)
+    # --- Build target-class index set (NEW) ---
+    # We need the YOLO integer indices that correspond to the configured class names.
+    # The class names are read from the annotation YAML files (static + motion).
+    # If target_classes is empty, target_class_indices stays empty (= no filter).
+    target_class_indices = set()
+    target_classes = aug_config.get('target_classes', [])
+    if target_classes:
+        import yaml
+        for yaml_name in ('static_annotations.yaml', 'motion_annotations.yaml'):
+            yaml_path = os.path.join(project_dir, yaml_name)
+            if not os.path.exists(yaml_path):
+                continue
+            try:
+                with open(yaml_path, 'r') as yf:
+                    ydata = yaml.safe_load(yf)
+                names = ydata.get('names', [])
+                for idx, name in enumerate(names):
+                    if name in target_classes:
+                        target_class_indices.add(idx)
+            except Exception as e:
+                print(f"  Warning: could not read {yaml_path}: {e}")
+        if target_class_indices:
+            print(f"Class filter active — augmenting only classes: "
+                  f"{target_classes} (indices {sorted(target_class_indices)})")
+        else:
+            print(f"  Warning: aug_target_classes={target_classes} but none were found "
+                  f"in YAML files. All classes will be augmented.")
+
+    # Annotation image directories
     image_dirs = [
         os.path.join(project_dir, 'annot_static',  'images', 'train'),
         os.path.join(project_dir, 'annot_static',  'images', 'val'),
@@ -349,7 +491,6 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
         os.path.join(project_dir, 'annot_motion',  'images', 'val'),
     ]
 
-    # Collect all original images (skip augmented copies from previous runs)
     image_ext = ('.jpg', '.jpeg', '.png')
     originals = []
     for img_dir in image_dirs:
@@ -359,25 +500,21 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
             if not fname.lower().endswith(image_ext):
                 continue
             basename = os.path.splitext(fname)[0]
-            # Skip files that are themselves augmented copies
             if '_aug_' in basename:
                 continue
             originals.append(os.path.join(img_dir, fname))
 
-    total = len(originals)
+    total        = len(originals)
     copies_created = 0
+    skipped_class  = 0
 
     print(f"Augmentation: {total} original annotation images found.")
-
-    # Show initial progress bar at 0%
     _print_progress(0, total, label='Augmenting')
 
     for i, img_path in enumerate(originals):
 
-        # Update the integrated-terminal progress bar
         _print_progress(i + 1, total, label=os.path.basename(img_path))
 
-        # Also call the optional external callback (e.g. for a separate GUI widget)
         if progress_callback:
             progress_callback(i, total, os.path.basename(img_path))
 
@@ -386,71 +523,78 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
         basename = os.path.splitext(fname)[0]
         ext      = os.path.splitext(fname)[1]
 
-        # Derive the corresponding label directory
-        # image path:  .../annot_static/images/train/foo.jpg
-        # label path:  .../annot_static/labels/train/foo.txt
         label_dir  = img_dir.replace('images', 'labels')
         label_path = os.path.join(label_dir, basename + '.txt')
 
-        # Load the original image
+        # --- Class filter (NEW) ---
+        if not _label_contains_target_class(label_path, target_class_indices):
+            skipped_class += 1
+            continue
+
         bgr = cv2.imread(img_path)
         if bgr is None:
             print(f"  Warning: could not read {img_path}, skipping.")
             continue
 
-        # Determine if this image comes from a motion annotation directory
         is_motion = 'annot_motion' in img_path.replace('\\', '/')
 
-        # Sample which augmentations apply — returns list of single-key dicts
         augmentation_list = sample_augmentation_list(aug_config)
 
-        # For motion images, restrict to geometry/noise-only transformations
-        # (colour augmentations would corrupt the false-colour motion encoding)
         if is_motion:
+            # Colour augmentations are excluded from motion images because the
+            # false-colour encoding carries motion information — altering
+            # hue/brightness/etc. would corrupt that signal.
             augmentation_list = [
                 aug for aug in augmentation_list
-                if next(iter(aug.keys())) in MOTION_ALLOWED_PARAMS
+                if next(k for k in aug if k != '_seg_idx') not in MOTION_EXCLUDED_PARAMS
             ]
 
         if not augmentation_list:
-            continue  # this image was not selected for augmentation this run
+            continue
 
         for aug_dict in augmentation_list:
-            # Each dict has exactly one key
-            param_name, value = next(iter(aug_dict.items()))
+            # Extract param name (the only key that is not '_seg_idx')
+            param_name = next(k for k in aug_dict if k != '_seg_idx')
+            value      = aug_dict[param_name]
+            seg_idx    = aug_dict.get('_seg_idx', 0)
 
-            # Build output paths
-            aug_basename   = f"{basename}_aug_{param_name}"
+            # Build unique output filename:
+            # single-segment  -> <basename>_aug_<param>.<ext>   (unchanged)
+            # multi-segment   -> <basename>_aug_<param>_<idx>.<ext>
+            num_segs = len(aug_config['params'][param_name].get('segments', [None]))
+            if num_segs > 1:
+                aug_basename = f"{basename}_aug_{param_name}_{seg_idx}"
+            else:
+                aug_basename = f"{basename}_aug_{param_name}"
+
             aug_img_path   = os.path.join(img_dir,   aug_basename + ext)
             aug_label_path = os.path.join(label_dir, aug_basename + '.txt')
 
-            # Apply image transformation
             try:
                 aug_bgr = apply_single_augmentation(bgr, param_name, value)
             except Exception as e:
                 print(f"  Warning: augmentation '{param_name}' failed on {fname}: {e}")
                 continue
 
-            # Write augmented image
             cv2.imwrite(aug_img_path, aug_bgr)
 
-            # Write (potentially transformed) labels
             transformed_labels = transform_labels(label_path, param_name, value)
             with open(aug_label_path, 'w') as lf:
                 lf.write(transformed_labels)
 
             copies_created += 1
 
-    # Final callback call
     if progress_callback:
         progress_callback(total, total, "Done")
 
+    if skipped_class:
+        print(f"  Skipped {skipped_class} images (no target class found).")
     print(f"Augmentation complete: {copies_created} copies created from {total} originals.")
     return copies_created, total
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point (optional — for testing outside the GUI)
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
