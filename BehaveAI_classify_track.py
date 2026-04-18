@@ -318,6 +318,7 @@ try:
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
 	frame_skip = int(config['DEFAULT'].get('frame_skip', '0'))
+	ab_analysis_duration_s = float(config['DEFAULT'].get('ab_analysis_duration_s', '0'))
 
 	process_noise_pos = float(config['kalman'].get('process_noise_pos', '0.01'))
 	process_noise_vel = float(config['kalman'].get('process_noise_vel', '0.1'))
@@ -807,6 +808,17 @@ if __name__ == '__main__':
 		w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)*scale_factor)
 		h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)*scale_factor)
 		fps = cap.get(cv2.CAP_PROP_FPS)
+
+		# Compute frame limit from analysis duration setting (0 = no limit / full video)
+		if ab_analysis_duration_s and ab_analysis_duration_s > 0:
+			max_frame_limit = int(ab_analysis_duration_s * fps)
+			print(f"Analysis window: first {ab_analysis_duration_s:.0f}s "
+			      f"({max_frame_limit} frames at {fps:.1f} fps) — "
+			      f"full video is {total_frames} frames "
+			      f"({total_frames / fps:.0f}s)")
+		else:
+			max_frame_limit = None
+
 		writer = cv2.VideoWriter(
 			os.path.join(output_folder, base + "_detected.mp4"),
 			cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h)
@@ -851,6 +863,11 @@ if __name__ == '__main__':
 			ret, raw_frame = cap.read()
 			if not ret: break
 			frame_idx += 1
+
+			# Stop processing once the analysis window is reached
+			if max_frame_limit is not None and frame_idx > max_frame_limit:
+				break
+
 			if frame_count == 0:
 				if scale_factor != 1.0:
 					raw_frame = cv2.resize(raw_frame, None, fx=scale_factor, fy=scale_factor)
@@ -1219,7 +1236,8 @@ if __name__ == '__main__':
 				if print_tick > progress_update:
 					elapsed = time.time() - start_time
 					current_fps = current_frame / elapsed if elapsed > 0 else 0
-					pc_done = 100 * (frame_skip+1) * current_frame / total_frames
+					frames_total_for_progress = max_frame_limit if max_frame_limit is not None else total_frames
+					pc_done = 100 * (frame_skip+1) * current_frame / frames_total_for_progress
 					print(f"Progress: {pc_done:.2f}% | {current_fps:.1f} FPS", end='\r', flush=True)
 					print_tick = 0
 				current_frame += 1
