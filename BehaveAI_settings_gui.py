@@ -402,6 +402,12 @@ class SettingsEditorApp(tk.Tk):
 		self.input_dir_var = tk.StringVar()
 		self.output_dir_var = tk.StringVar()
 
+		# Activity budget parameters
+		self.ab_min_presence_ratio_var    = tk.DoubleVar(value=0.10)
+		self.ab_border_zone_ratio_var     = tk.DoubleVar(value=0.15)
+		self.ab_group_type_separator_var  = tk.StringVar(value='_')
+		self.ab_group_type_field_index_var = tk.IntVar(value=4)
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -701,6 +707,33 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab5, text='Font size').pack(anchor='w', pady=(6,0))
 		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w')
 
+		# TAB: Activity Budget
+		tab_ab = ttk.Frame(notebook)
+		notebook.add(tab_ab, text='Activity Budget')
+
+		ttk.Label(tab_ab, text='Min presence ratio (stranger threshold)').grid(
+			row=0, column=0, sticky='w', padx=8, pady=6)
+		ttk.Spinbox(tab_ab, from_=0.01, to=1.0, increment=0.01,
+			textvariable=self.ab_min_presence_ratio_var,
+			width=8, command=self._set_dirty).grid(row=0, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab_ab, text='Border zone ratio (stranger threshold)').grid(
+			row=1, column=0, sticky='w', padx=8, pady=6)
+		ttk.Spinbox(tab_ab, from_=0.01, to=0.5, increment=0.01,
+			textvariable=self.ab_border_zone_ratio_var,
+			width=8, command=self._set_dirty).grid(row=1, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab_ab, text='Filename field separator').grid(
+			row=2, column=0, sticky='w', padx=8, pady=6)
+		ttk.Entry(tab_ab, textvariable=self.ab_group_type_separator_var,
+			width=4).grid(row=2, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab_ab, text='Group type field index (0-based)').grid(
+			row=3, column=0, sticky='w', padx=8, pady=6)
+		ttk.Spinbox(tab_ab, from_=0, to=10, increment=1,
+			textvariable=self.ab_group_type_field_index_var,
+			width=6, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
+
 		# bottom save/cancel
 		bottom = ttk.Frame(self)
 		bottom.pack(side='bottom', fill='x', padx=8, pady=8)
@@ -774,6 +807,13 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
+
+		# activity budget
+		self.ab_min_presence_ratio_var.set(float(d.get('ab_min_presence_ratio', fallback='0.10')))
+		self.ab_border_zone_ratio_var.set(float(d.get('ab_border_zone_ratio', fallback='0.15')))
+		self.ab_group_type_separator_var.set(d.get('ab_group_type_separator', fallback='_'))
+		self.ab_group_type_field_index_var.set(int(d.get('ab_group_type_field_index', fallback='4')))
+
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
@@ -1098,6 +1138,12 @@ class SettingsEditorApp(tk.Tk):
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
+
+		# activity budget
+		new_default['ab_min_presence_ratio']    = str(self.ab_min_presence_ratio_var.get())
+		new_default['ab_border_zone_ratio']     = str(self.ab_border_zone_ratio_var.get())
+		new_default['ab_group_type_separator']  = self.ab_group_type_separator_var.get()
+		new_default['ab_group_type_field_index'] = str(self.ab_group_type_field_index_var.get())
 	
 		# motion strategy
 		new_default['strategy'] = self.strategy_var.get()
