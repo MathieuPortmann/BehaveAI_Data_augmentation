@@ -1233,5 +1233,13 @@ def process_video(file):
 	print(f"Done processing {base} | {current_fps:.1f} FPS")
 
 if __name__ == '__main__':
-	for vid in glob.glob(os.path.join(input_folder, "*.*")):
+	# Collect all video files recursively from input_folder (any subfolder depth)
+	_video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.MP4', '.AVI', '.MOV', '.MKV')
+	_all_input_videos = []
+	for _dirpath, _dirs, _files in os.walk(input_folder):
+		for _fname in sorted(_files):
+			if _fname.lower().endswith(_video_exts):
+				_all_input_videos.append(os.path.join(_dirpath, _fname))
+
+	for vid in _all_input_videos:
 		process_video(vid)
