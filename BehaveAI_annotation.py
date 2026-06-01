@@ -73,6 +73,11 @@ def resolve_project_path(value, fallback):
 clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
 clips_dir = resolve_project_path(clips_dir_ini, 'clips')
 
+# Second annotation source: input_dir (e.g. Activity_budget folder).
+# If the key is missing or empty the source is simply ignored.
+input_dir_ini = config['DEFAULT'].get('input_dir', '')
+input_dir_for_annotation = resolve_project_path(input_dir_ini, '') if input_dir_ini.strip() else ''
+
 
 
 
@@ -256,45 +261,85 @@ def build_annot_index_map(items_list):
 annotated_frames_map = build_annot_index_map(items)
 
 
-# ---- Build the pool of all annotatable frames across all videos in clips_dir ----
+# ---- Build the pool of all annotatable frames across all video sources ----
 
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
-def build_frame_pool(clips_directory, frame_window):
+
+def _scan_videos_recursive(root_directory):
 	"""
-	Scan all video files in clips_directory and return a list of all
-	annotatable (video_path, frame_number) pairs.
+	Walk root_directory recursively and return a sorted list of all video
+	file paths found at any depth.  Works with any folder structure.
+	Returns an empty list if root_directory does not exist.
+	"""
+	found = []
+	if not os.path.isdir(root_directory):
+		return found
+	for dirpath, _dirnames, filenames in os.walk(root_directory):
+		for fname in sorted(filenames):
+			if fname.lower().endswith(VIDEO_EXTENSIONS):
+				found.append(os.path.join(dirpath, fname))
+	return found
+
+
+def build_frame_pool(clips_directory, frame_window, extra_directories=None):
+	"""
+	Scan all video files found recursively inside clips_directory (and any
+	paths listed in extra_directories) and return a list of annotatable
+	(video_path, frame_number) pairs.
 
 	A frame is annotatable if its index >= frame_window - 1, because the
 	motion engine needs frame_window preceding frames to compute the diff.
-	We also skip the last 2 frames as a safety margin for capture.read().
+	The last 2 frames are skipped as a safety margin for capture.read().
+
+	Parameters
+	----------
+	clips_directory : str
+		Primary video source (e.g. Training folder).  Scanned recursively.
+	frame_window : int
+		Minimum number of frames required before a frame is annotatable.
+	extra_directories : list[str] | None
+		Additional directories to scan recursively (e.g. Activity_budget
+		folder).  Each directory is scanned independently; duplicate video
+		paths are silently ignored.
 	"""
 	pool = []
-	if not os.path.isdir(clips_directory):
-		return pool
+	seen_paths = set()
 
-	for fname in sorted(os.listdir(clips_directory)):
-		if not fname.lower().endswith(VIDEO_EXTENSIONS):
-			continue
-		vpath = os.path.join(clips_directory, fname)
-		cap = cv2.VideoCapture(vpath)
-		if not cap.isOpened():
-			print(f"Warning: could not open {fname}, skipping.")
+	# Collect all source directories, filtering out empty / non-existent ones
+	sources = [clips_directory]
+	if extra_directories:
+		for d in extra_directories:
+			if d and os.path.isdir(d):
+				sources.append(d)
+
+	for source in sources:
+		video_files = _scan_videos_recursive(source)
+		for vpath in video_files:
+			# Avoid adding the same file twice (e.g. if dirs overlap)
+			norm = os.path.normpath(vpath)
+			if norm in seen_paths:
+				continue
+			seen_paths.add(norm)
+
+			cap = cv2.VideoCapture(vpath)
+			if not cap.isOpened():
+				print(f"Warning: could not open {vpath}, skipping.")
+				cap.release()
+				continue
+			n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 			cap.release()
-			continue
-		n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-		cap.release()
 
-		# Valid range: needs frame_window preceding frames, and a small safety margin at the end
-		first_valid = frame_window - 1
-		last_valid  = n_frames - 3  # safety margin
+			first_valid = frame_window - 1
+			last_valid  = n_frames - 3  # safety margin
 
-		if first_valid > last_valid:
-			print(f"Warning: {fname} is too short for the current frameWindow ({n_frames} frames), skipping.")
-			continue
+			if first_valid > last_valid:
+				print(f"Warning: {os.path.basename(vpath)} is too short "
+					  f"for the current frameWindow ({n_frames} frames), skipping.")
+				continue
 
-		for fn in range(first_valid, last_valid + 1):
-			pool.append((vpath, fn))
+			for fn in range(first_valid, last_valid + 1):
+				pool.append((vpath, fn))
 
 	return pool
 
@@ -358,12 +403,17 @@ frameWindow = frameWindow * (frame_skip + 1)
 
 # ---- Initial random frame selection ----
 
-full_frame_pool = build_frame_pool(clips_dir, frameWindow)
+# Build pool from clips_dir (Training) AND input_dir (Activity_budget) when available
+_extra_dirs = [input_dir_for_annotation] if input_dir_for_annotation else []
+full_frame_pool = build_frame_pool(clips_dir, frameWindow, extra_directories=_extra_dirs)
 
 if not full_frame_pool:
+	_searched = clips_dir
+	if _extra_dirs:
+		_searched += '\n' + '\n'.join(_extra_dirs)
 	root_tmp = tk.Tk(); root_tmp.withdraw()
 	messagebox.showinfo("No videos found",
-		f"No valid video files found in:\n{clips_dir}\n\nAdd videos and relaunch.")
+		f"No valid video files found in:\n{_searched}\n\nAdd videos and relaunch.")
 	root_tmp.destroy()
 	sys.exit(0)
 

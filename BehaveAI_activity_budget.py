@@ -353,8 +353,42 @@ def run_activity_budget(config_path, fps_default=30.0):
 
     metadata     = load_groups_metadata(project_dir)
 
-    # Collect all tracking CSVs
-    csv_files = sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv')))
+    # Resolve input_dir: protocol videos live here (e.g. Activity_budget folder).
+    # Used to locate video files for FPS / dimension reading.
+    input_dir_raw = d.get('input_dir', 'input')
+    if os.path.isabs(input_dir_raw):
+        input_dir = input_dir_raw
+    else:
+        input_dir = os.path.join(project_dir, input_dir_raw)
+
+    # Helper: build a name -> full_path map by walking input_dir recursively.
+    # This lets us find any video file regardless of how deep in the tree it lives.
+    def _build_video_index(root):
+        """Return dict: filename (with extension) -> absolute path."""
+        index = {}
+        if not os.path.isdir(root):
+            return index
+        video_exts = ('.mp4', '.avi', '.mov', '.mkv')
+        for dirpath, _, files in os.walk(root):
+            for fname in files:
+                if fname.lower().endswith(video_exts):
+                    index[fname] = os.path.join(dirpath, fname)
+        return index
+
+    video_file_index = _build_video_index(input_dir)
+
+    # Collect all tracking CSVs from output_dir.
+    # Filter out CSVs whose stem ends with '_Training' — those come from
+    # training-only footage and must not be included in the activity budget.
+    _raw_csv_files = sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv')))
+    csv_files = [
+        p for p in _raw_csv_files
+        if not os.path.splitext(os.path.basename(p))[0]
+                  .replace('_tracking', '').endswith('_Training')
+    ]
+    skipped = len(_raw_csv_files) - len(csv_files)
+    if skipped:
+        print(f"Activity budget: skipped {skipped} Training CSV(s).")
     if not csv_files:
         print(f"Activity budget: no tracking CSVs found in {output_dir}")
         return
@@ -368,29 +402,37 @@ def run_activity_budget(config_path, fps_default=30.0):
     all_behaviors_global = set()
     tracks_cache = {}
     for csv_path in csv_files:
-        # Derive video filename from CSV name
+        # Derive video filename from CSV name:  foo_tracking.csv -> foo.MP4 (best guess)
         csv_basename   = os.path.basename(csv_path)
         video_stem     = csv_basename.replace('_tracking.csv', '')
-        video_filename = video_stem
+        # Try to find matching video using the recursive index first,
+        # then fall back to a direct path in input_dir or clips_dir.
+        video_filename = video_stem  # fallback (no extension)
+        video_full_path = None
         for ext in ('.MP4', '.mp4', '.avi', '.mov', '.mkv'):
             candidate = video_stem + ext
-            candidate_path = os.path.join(
-                d.get('clips_dir', os.path.join(project_dir, 'clips')),
-                candidate)
-            if os.path.exists(candidate_path):
-                video_filename = candidate
+            if candidate in video_file_index:
+                video_filename  = candidate
+                video_full_path = video_file_index[candidate]
                 break
+        # Further fallback: check clips_dir (flat) for backward compatibility
+        if video_full_path is None:
+            clips_dir_raw = d.get('clips_dir', 'clips')
+            clips_dir_ab  = clips_dir_raw if os.path.isabs(clips_dir_raw) \
+                            else os.path.join(project_dir, clips_dir_raw)
+            for ext in ('.MP4', '.mp4', '.avi', '.mov', '.mkv'):
+                candidate_path = os.path.join(clips_dir_ab, video_stem + ext)
+                if os.path.exists(candidate_path):
+                    video_filename  = video_stem + ext
+                    video_full_path = candidate_path
+                    break
 
         # FPS: try to read from video file, else use default
         fps = fps_default
         try:
             import cv2
-            clips_dir_raw = d.get('clips_dir', 'clips')
-            clips_dir = clips_dir_raw if os.path.isabs(clips_dir_raw) \
-                        else os.path.join(project_dir, clips_dir_raw)
-            vpath = os.path.join(clips_dir, video_filename)
-            if os.path.exists(vpath):
-                cap = cv2.VideoCapture(vpath)
+            if video_full_path and os.path.exists(video_full_path):
+                cap = cv2.VideoCapture(video_full_path)
                 fps_read = cap.get(cv2.CAP_PROP_FPS)
                 if fps_read > 0:
                     fps = fps_read
@@ -412,7 +454,7 @@ def run_activity_budget(config_path, fps_default=30.0):
             max_frame = min(max_frame, max_frame_limit)
 
         # Cache tracks together with pre-resolved video info
-        tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename)
+        tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename, video_full_path)
 
         for rows in tracks.values():
             for r in rows:
@@ -422,18 +464,14 @@ def run_activity_budget(config_path, fps_default=30.0):
     all_behaviors = sorted(all_behaviors_global)
 
     for csv_path in csv_files:
-        tracks, max_frame, fps, video_filename = tracks_cache[csv_path]
+        tracks, max_frame, fps, video_filename, video_full_path = tracks_cache[csv_path]
 
-        # Metadata overrides
+        # Video dimensions for border detection
         video_width = video_height = None
         try:
             import cv2
-            clips_dir_raw = d.get('clips_dir', 'clips')
-            clips_dir = clips_dir_raw if os.path.isabs(clips_dir_raw) \
-                        else os.path.join(project_dir, clips_dir_raw)
-            vpath = os.path.join(clips_dir, video_filename)
-            if os.path.exists(vpath):
-                cap = cv2.VideoCapture(vpath)
+            if video_full_path and os.path.exists(video_full_path):
+                cap = cv2.VideoCapture(video_full_path)
                 video_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 cap.release()
