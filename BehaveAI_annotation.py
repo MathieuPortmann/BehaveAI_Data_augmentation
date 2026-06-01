@@ -9,6 +9,8 @@ import numpy as np
 import configparser
 import random
 from collections import deque
+import threading
+import copy
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -71,27 +73,32 @@ def resolve_project_path(value, fallback):
 clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
 clips_dir = resolve_project_path(clips_dir_ini, 'clips')
 
+# Second annotation source: input_dir (e.g. Activity_budget folder).
+# If the key is missing or empty the source is simply ignored.
+input_dir_ini = config['DEFAULT'].get('input_dir', '')
+input_dir_for_annotation = resolve_project_path(input_dir_ini, '') if input_dir_ini.strip() else ''
+
 
 
 
 # Read parameters
 try:
-	
+
 	primary_motion_classes = [name.strip() for name in config['DEFAULT']['primary_motion_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_motion_colors', '').split(';') if c.strip()]
 	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
-	
+
 	secondary_motion_classes = [name.strip() for name in config['DEFAULT']['secondary_motion_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('secondary_motion_colors', '').split(';') if c.strip()]
 	secondary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	secondary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_motion_hotkeys'].split(',')]
-	
+
 	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
 	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
-	
+
 	secondary_static_classes = [name.strip() for name in config['DEFAULT']['secondary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('secondary_static_colors', '').split(';') if c.strip()]
 	secondary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
@@ -100,27 +107,27 @@ try:
 	primary_static_project_path = 'model_primary_static'
 	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
 	primary_static_yaml_path = 'static_annotations.yaml'
-	
+
 	primary_motion_project_path = 'model_primary_motion'
 	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
 	primary_motion_yaml_path = 'motion_annotations.yaml'
-	
+
 	ignore_secondary = [name.strip() for name in config['DEFAULT']['ignore_secondary'].split(',')]
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
 
 	motion_cropped_base_dir = 'annot_motion_crop'
 	static_cropped_base_dir = 'annot_static_crop'
-	
+
 	if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
 		hierarchical_mode = True
-		
+
 		# secondary classes need more than one value, so clear if there's only one value
 		if len(secondary_motion_classes) == 1:
 			secondary_motion_classes = []
 			secondary_motion_colors = []
 			secondary_motion_hotkeys = []
-					
+
 		if len(secondary_static_classes) == 1:
 			secondary_static_classes = []
 			secondary_static_colors = []
@@ -131,7 +138,7 @@ try:
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
-	
+
 	secondary_classes = secondary_static_classes + secondary_motion_classes
 	secondary_colors = secondary_static_colors + secondary_motion_colors
 	secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
@@ -141,32 +148,32 @@ try:
 		secondary_static_project_path = 'model_secondary_static'
 		secondary_static_data_path = 'annot_static_crop'
 		secondary_static_model_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
-		
+
 		secondary_motion_project_path = 'model_secondary_motion'
 		secondary_motion_data_path = 'annot_motion_crop'
 		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
-		
+
 		secondary_class_ids = list(range(len(secondary_classes)))
 		paired = list(zip(secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys))
 		paired_sorted = sorted(paired, key=lambda x: x[0].lower())
 		secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = zip(*paired_sorted)
 		# Convert back to lists
 		secondary_classes = list(secondary_classes)
-		secondary_colors = list(secondary_colors)	
+		secondary_colors = list(secondary_colors)
 		secondary_class_ids = list(secondary_class_ids)
 		secondary_hotkeys = list(secondary_hotkeys)
 
-			
+
 	static_train_images_dir = 'annot_static/images/train'
 	static_val_images_dir = 'annot_static/images/val'
 	static_train_labels_dir = 'annot_static/labels/train'
 	static_val_labels_dir = 'annot_static/labels/val'
-		
+
 	motion_train_images_dir = 'annot_motion/images/train'
 	motion_val_images_dir = 'annot_motion/images/val'
 	motion_train_labels_dir = 'annot_motion/labels/train'
 	motion_val_labels_dir = 'annot_motion/labels/val'
-	
+
 	# Common parameters
 	scale_factor = float(config['DEFAULT'].get('scale_factor', '1.0'))
 	expA = float(config['DEFAULT'].get('expA', '0.5'))
@@ -181,6 +188,7 @@ try:
 	rgb_multipliers = [float(x) for x in config['DEFAULT']['rgb_multipliers'].split(',')]
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
+	buttons_per_row = int(config['DEFAULT'].get('buttons_per_row', '8'))
 	# ~ cross_blocking = config['DEFAULT']['cross_blocking'].lower()
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	motion_blocks_static = config['DEFAULT']['motion_blocks_static'].lower()
@@ -188,7 +196,7 @@ try:
 	save_empty_frames = config['DEFAULT']['save_empty_frames'].lower()
 	frame_skip = int(config['DEFAULT'].get('frame_skip', '0'))
 	motion_threshold = -1 * int(config['DEFAULT'].get('motion_threshold', '0'))
-	
+
 except KeyError as e:
 	raise KeyError(f"Missing configuration parameter: {e}")
 
@@ -253,27 +261,129 @@ def build_annot_index_map(items_list):
 annotated_frames_map = build_annot_index_map(items)
 
 
+# ---- Build the pool of all annotatable frames across all video sources ----
+
+VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 
-# Open video
-root_tmp = tk.Tk(); root_tmp.withdraw()
-initial_dir = clips_dir if os.path.isdir(clips_dir) else os.getcwd()
-video_path = filedialog.askopenfilename(title="Select video file", initialdir=initial_dir)
-root_tmp.destroy()
-if not video_path:
-	print("No video selected. Exiting.")
-	sys.exit(0)
+def _scan_videos_recursive(root_directory):
+	"""
+	Walk root_directory recursively and return a sorted list of all video
+	file paths found at any depth.  Works with any folder structure.
+	Returns an empty list if root_directory does not exist.
+	"""
+	found = []
+	if not os.path.isdir(root_directory):
+		return found
+	for dirpath, _dirnames, filenames in os.walk(root_directory):
+		for fname in sorted(filenames):
+			if fname.lower().endswith(VIDEO_EXTENSIONS):
+				found.append(os.path.join(dirpath, fname))
+	return found
 
 
+def build_frame_pool(clips_directory, frame_window, extra_directories=None):
+	"""
+	Scan all video files found recursively inside clips_directory (and any
+	paths listed in extra_directories) and return a list of annotatable
+	(video_path, frame_number) pairs.
+
+	A frame is annotatable if its index >= frame_window - 1, because the
+	motion engine needs frame_window preceding frames to compute the diff.
+	The last 2 frames are skipped as a safety margin for capture.read().
+
+	Parameters
+	----------
+	clips_directory : str
+		Primary video source (e.g. Training folder).  Scanned recursively.
+	frame_window : int
+		Minimum number of frames required before a frame is annotatable.
+	extra_directories : list[str] | None
+		Additional directories to scan recursively (e.g. Activity_budget
+		folder).  Each directory is scanned independently; duplicate video
+		paths are silently ignored.
+	"""
+	pool = []
+	seen_paths = set()
+
+	# Collect all source directories, filtering out empty / non-existent ones
+	sources = [clips_directory]
+	if extra_directories:
+		for d in extra_directories:
+			if d and os.path.isdir(d):
+				sources.append(d)
+
+	for source in sources:
+		video_files = _scan_videos_recursive(source)
+		for vpath in video_files:
+			# Avoid adding the same file twice (e.g. if dirs overlap)
+			norm = os.path.normpath(vpath)
+			if norm in seen_paths:
+				continue
+			seen_paths.add(norm)
+
+			cap = cv2.VideoCapture(vpath)
+			if not cap.isOpened():
+				print(f"Warning: could not open {vpath}, skipping.")
+				cap.release()
+				continue
+			n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+			cap.release()
+
+			first_valid = frame_window - 1
+			last_valid  = n_frames - 3  # safety margin
+
+			if first_valid > last_valid:
+				print(f"Warning: {os.path.basename(vpath)} is too short "
+					  f"for the current frameWindow ({n_frames} frames), skipping.")
+				continue
+
+			for fn in range(first_valid, last_valid + 1):
+				pool.append((vpath, fn))
+
+	return pool
 
 
-capture = cv2.VideoCapture(video_path)
-total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-video_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-video_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+def get_unannotated_pool(full_pool, annotation_index):
+	"""
+	Filter full_pool by removing frames that already have an annotation on disk.
+
+	The annotation filenames follow the convention  <video_label>_<frame_number>.jpg
+	so we rebuild the annotated set from the index and exclude matching entries.
+	"""
+	# Build a set of (video_label, frame_number) pairs that are already annotated
+	existing_items = annotation_index.list_images_labels_and_masks()
+	annotated_set = set()
+	for item in existing_items:
+		base = item.get('basename', '')
+		if '_' not in base:
+			continue
+		vlabel, tail = base.rsplit('_', 1)
+		try:
+			annotated_set.add((vlabel, int(tail)))
+		except ValueError:
+			continue
+
+	# Filter the pool: keep only entries not yet annotated
+	unannotated = []
+	for vpath, fn in full_pool:
+		vlabel = os.path.splitext(os.path.basename(vpath))[0]
+		if (vlabel, fn) not in annotated_set:
+			unannotated.append((vpath, fn))
+	print(f"Frame pool built: {len(annotated_set)}  annotated frames on {len(full_pool)} annotatable frames across {len(set(p for p,_ in full_pool))} video(s).")
+	return unannotated
+
+
+def pick_random_frame(unannotated_pool):
+	"""
+	Pick a random (video_path, frame_number) from the unannotated pool.
+	Returns (None, None) if the pool is empty.
+	"""
+	if not unannotated_pool:
+		return None, None
+	return random.choice(unannotated_pool)
 
 # frameWindow logic
-right_frame_width = max(96, int(video_height / 3))
 frameWindow = 4
 if strategy == 'exponential':
 	if expA > 0.2 or expB > 0.2:
@@ -289,7 +399,47 @@ if strategy == 'exponential':
 
 raw_buf = deque(maxlen=frameWindow)
 frameWindow = frameWindow * (frame_skip + 1)
-frame_number = min(max(frameWindow - 1, 0), total_frames - 1)
+
+
+# ---- Initial random frame selection ----
+
+# Build pool from clips_dir (Training) AND input_dir (Activity_budget) when available
+_extra_dirs = [input_dir_for_annotation] if input_dir_for_annotation else []
+full_frame_pool = build_frame_pool(clips_dir, frameWindow, extra_directories=_extra_dirs)
+
+if not full_frame_pool:
+	_searched = clips_dir
+	if _extra_dirs:
+		_searched += '\n' + '\n'.join(_extra_dirs)
+	root_tmp = tk.Tk(); root_tmp.withdraw()
+	messagebox.showinfo("No videos found",
+		f"No valid video files found in:\n{_searched}\n\nAdd videos and relaunch.")
+	root_tmp.destroy()
+	sys.exit(0)
+
+unannotated_pool = get_unannotated_pool(full_frame_pool, annotation_index)
+
+if not unannotated_pool:
+	root_tmp = tk.Tk(); root_tmp.withdraw()
+	messagebox.showinfo("All annotated",
+		"All frames in the clips folder have already been annotated!")
+	root_tmp.destroy()
+	sys.exit(0)
+
+video_path, _initial_frame = pick_random_frame(unannotated_pool)
+
+
+capture = cv2.VideoCapture(video_path)
+total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+video_width  = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+video_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+# Apply the randomly chosen frame (overrides the default frameWindow-based value set below)
+# We store it here; frame_number is set a few lines later after frameWindow is computed.
+_random_start_frame = _initial_frame
+
+right_frame_width = max(96, int(video_height / 3))
+frame_number = min(max(_random_start_frame, frameWindow - 1), total_frames - 1)
 frame_updated = True
 
 # state
@@ -340,20 +490,20 @@ if hierarchical_mode:
 		for primary_class in primary_classes:
 			idx = primary_classes.index(primary_class)
 			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys: 
+			if hotkey in secondary_hotkeys:
 				continue
-				
+
 			if primary_class in ignore_secondary:
 				continue
-			
+
 			data_dir = os.path.join(secondary_static_data_path, primary_class)
 			if not os.path.isdir(data_dir):
 				continue
-			
+
 			# Create model directory for this static class
 			model_dir = f"model_static_static_{primary_class}"
 			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-			
+
 			# Check if model exists
 			if not os.path.exists(weights_path):
 				print(f'Secondary static model for "{primary_class}" not found')
@@ -365,29 +515,29 @@ if hierarchical_mode:
 
 
 		# ~ print(f"secondary_static_models {secondary_static_models}")
-		
+
 	secondary_motion_models = {}
 	motion_class_map = [[None] * len(secondary_classes) for _ in range(len(primary_classes))]
 	if len(secondary_motion_classes) >= 2:
 		for primary_class in primary_classes:
 			idx = primary_classes.index(primary_class)
 			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys: 
+			if hotkey in secondary_hotkeys:
 				continue
-			
+
 			if primary_class in ignore_secondary:
-				continue			
-			
+				continue
+
 			data_dir = os.path.join(secondary_motion_data_path, primary_class)
 			if not os.path.isdir(data_dir):
 				continue
-			
+
 			disk_classes = sorted(os.listdir(data_dir))
-			
+
 			# Create model directory for this static class
 			model_dir = f"model_secondary_motion_{primary_class}"
 			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-			
+
 			# Check if model exists
 			if not os.path.exists(weights_path):
 				print(f'Secondary motion model for "{primary_class}" not found')
@@ -397,7 +547,7 @@ if hierarchical_mode:
 				# Load the trained model
 				secondary_motion_models[primary_class] = YOLO(weights_path)
 				# ~ motion_model_count += 1
-				
+
 		# ~ print(f"secondary_motion_models {secondary_motion_models}")
 
 
@@ -408,12 +558,12 @@ def cv2_to_photoimage(bgr_img):
 	pil = Image.fromarray(rgb)
 	return ImageTk.PhotoImage(pil)
 
-## remove overlapping detections	
+## remove overlapping detections
 def non_max_suppression(box_list):
 	"""Remove overlapping detections keeping highest confidence box."""
 	if len(box_list) == 0:
 		return []
-	
+
 	# Calculate overall confidence for each box
 	confidences = []
 	for box in box_list:
@@ -423,32 +573,32 @@ def non_max_suppression(box_list):
 			conf = box[5]
 
 		confidences.append(conf)
-	
+
 	# Sort by confidence (descending)
 	sorted_indices = sorted(range(len(box_list)), key=lambda i: confidences[i], reverse=True)
 	suppressed = [False] * len(box_list)
 	keep = []
-	
+
 	for i in range(len(sorted_indices)):
 		idx_i = sorted_indices[i]
 		if suppressed[idx_i]:
 			continue
-			
+
 		keep.append(box_list[idx_i])
 		box_i = box_list[idx_i]
 		coords_i = (box_i[0], box_i[1], box_i[2], box_i[3])
-		
+
 		for j in range(i + 1, len(sorted_indices)):
 			idx_j = sorted_indices[j]
 			if suppressed[idx_j]:
 				continue
-				
+
 			box_j = box_list[idx_j]
 			coords_j = (box_j[0], box_j[1], box_j[2], box_j[3])
-			
+
 			if iou(coords_i, coords_j) > iou_thresh:
 				suppressed[idx_j] = True
-				
+
 	return keep
 
 
@@ -487,7 +637,7 @@ def auto_annotate_local():
 	# Collect all primary detections
 	# ~ all_detections = []
 	global boxes
-	
+
 	# Primary static detection
 	if primary_static_classes[0] != '0' and model_static != None:
 		results_static = model_static.predict(fr, conf=primary_conf_thresh, verbose=False)
@@ -514,7 +664,7 @@ def auto_annotate_local():
 				crop = None
 				if crop_img is not None:
 					crop = crop_img[y1:y2, x1:x2]
-				
+
 				secondary_class = primary_class
 				secondary_conf = 1.0
 				secondary_class_idx = -1
@@ -528,7 +678,7 @@ def auto_annotate_local():
 						secondary_class = sec_model.names[secondary_class_idx]
 
 				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf))#conf 1 & 2 need separating
-				
+
 
 			else:
 				boxes.append((x1, y1, x2, y2, class_idx, conf))
@@ -559,7 +709,7 @@ def auto_annotate_local():
 				crop = None
 				if crop_img is not None:
 					crop = crop_img[y1:y2, x1:x2]
-				
+
 				secondary_class = primary_class
 				secondary_conf = 1.0
 				secondary_class_idx = -1
@@ -573,7 +723,7 @@ def auto_annotate_local():
 						secondary_class = sec_model.names[secondary_class_idx]
 
 				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), secondary_class_idx, conf, secondary_conf))#conf 1 & 2 need separating
-				
+
 			else:
 				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), conf))
 
@@ -620,8 +770,8 @@ def draw_boxes_on_image(base_img):
 					label = label + f" {conf:.2f}"
 				except Exception:
 					pass
-			
-			if primary_classes[primary_cls] not in ignore_secondary:	
+
+			if primary_classes[primary_cls] not in ignore_secondary:
 				if secondary_cls is not None and secondary_cls != -1 and secondary_cls < len(secondary_classes):
 					label2 = f"{secondary_classes[secondary_cls]}"
 					if sec_conf != -1 and sec_conf is not None:
@@ -658,8 +808,8 @@ def draw_boxes_on_image(base_img):
 		cv2.addWeighted(overlay, 0.5, out, 0.5, 0, out)
 
 	return out
-	
-	
+
+
 def save_annotation():
 	global annot_count
 	if original_frame is None or (not boxes and not grey_boxes) and save_empty_frames == 'false':
@@ -667,13 +817,13 @@ def save_annotation():
 	# randomly assign to valdiation
 	randVal = random.random()
 	is_val = randVal < val_frequency
-	
+
 	motion_target_img_dir = motion_val_images_dir if is_val else motion_train_images_dir
 	motion_target_lbl_dir = motion_val_labels_dir if is_val else motion_train_labels_dir
 
 	static_target_img_dir = static_val_images_dir if is_val else static_train_images_dir
 	static_target_lbl_dir = static_val_labels_dir if is_val else static_train_labels_dir
-		
+
 	annot_type = 'validation' if is_val else 'training'
 
 
@@ -681,11 +831,11 @@ def save_annotation():
 	motion_ann_frame = original_frame.copy()
 	for gx1, gy1, gx2, gy2 in grey_boxes:
 		cv2.rectangle(motion_ann_frame, (gx1, gy1), (gx2, gy2), (128, 128, 128), -line_thickness)
-		
+
 	static_ann_frame = fr.copy()
 	for gx1, gy1, gx2, gy2 in grey_boxes:
 		cv2.rectangle(static_ann_frame, (gx1, gy1), (gx2, gy2), (128, 128, 128), -line_thickness)
-	
+
 
 	# fill static boxes with grey (to avoid cross-training on similar motion & static things)
 	static_count = 0
@@ -705,21 +855,21 @@ def save_annotation():
 			if motion_blocks_static == 'true':
 				cv2.rectangle(static_ann_frame, (x1, y1), (x2, y2), (128, 128, 128), -line_thickness)
 
-	
+
 
 	h, w = original_frame.shape[:2]
 	base_filename = f"{video_label}_{frame_number}"
-	
+
 	## delete any existing annotations for this frame
 	deleted = annotation_index.delete_frame(base_filename)
 	if deleted:
 		print("Overwriting existing annotation")
-	
-	if static_count > 0 or save_empty_frames == 'true': # don't save blank images	
-		static_img_path = os.path.join(static_target_img_dir, f"{base_filename}.jpg")
-		cv2.imwrite(static_img_path, static_ann_frame)	
 
-		
+	if static_count > 0 or save_empty_frames == 'true': # don't save blank images
+		static_img_path = os.path.join(static_target_img_dir, f"{base_filename}.jpg")
+		cv2.imwrite(static_img_path, static_ann_frame)
+
+
 		# Save static labels
 		static_ann_path = os.path.join(static_target_lbl_dir, f"{base_filename}.txt")
 		with open(static_ann_path, 'w') as f:
@@ -740,7 +890,7 @@ def save_annotation():
 	if motion_count > 0 or save_empty_frames == 'true': # don't save blank images
 		img_path = os.path.join(motion_target_img_dir, f"{base_filename}.jpg")
 		cv2.imwrite(img_path, motion_ann_frame)
-				
+
 		# Save motion labels
 		motion_ann_path = os.path.join(motion_target_lbl_dir, f"{base_filename}.txt")
 		with open(motion_ann_path, 'w') as f:
@@ -763,12 +913,12 @@ def save_annotation():
 		motion_ann_frame = original_frame.copy()
 		for gx1, gy1, gx2, gy2 in grey_boxes:
 			cv2.rectangle(motion_ann_frame, (gx1, gy1), (gx2, gy2), (128, 128, 128), -line_thickness)
-		
-	if motion_blocks_static == 'true':		
+
+	if motion_blocks_static == 'true':
 		static_ann_frame = fr.copy()
 		for gx1, gy1, gx2, gy2 in grey_boxes:
 			cv2.rectangle(static_ann_frame, (gx1, gy1), (gx2, gy2), (128, 128, 128), -line_thickness)
-							
+
 
 	if hierarchical_mode:
 
@@ -779,15 +929,15 @@ def save_annotation():
 			motion_crop = motion_ann_frame[y1:y2, x1:x2]
 			if motion_crop.size == 0:
 				continue
-			
+
 			# Create cropped image path
 			primary_class_name = primary_classes[primary_cls]
 			secondary_class_name = secondary_classes[secondary_cls]
-			
+
 			# Create target directory (static_class/motion_class)
 			motion_class_dir = os.path.join(
-				motion_cropped_base_dir, 
-				primary_class_name, 
+				motion_cropped_base_dir,
+				primary_class_name,
 				secondary_class_name
 			)
 
@@ -798,24 +948,24 @@ def save_annotation():
 				f"{video_label}_{frame_number}_{x1}_{y1}.jpg"
 			)
 			cv2.imwrite(crop_path, motion_crop)
-			
+
 			####----Static-----
 			# ~ if secondary_cls < len(secondary_static_classes)-1:
 			static_crop = static_ann_frame[y1:y2, x1:x2]
 			if static_crop.size == 0:
 				continue
-			
+
 			# Create cropped image path
 			primary_class_name = primary_classes[primary_cls]
 			secondary_class_name = secondary_classes[secondary_cls]
-			
+
 			# Create target directory (static_class/motion_class)
 			static_class_dir = os.path.join(
-				static_cropped_base_dir, 
-				primary_class_name, 
+				static_cropped_base_dir,
+				primary_class_name,
 				secondary_class_name
 			)
-				
+
 			os.makedirs(static_class_dir, exist_ok=True)
 			# Save image
 			crop_path = os.path.join(
@@ -835,12 +985,12 @@ def save_annotation():
 	mask_content = ""
 	for gx1, gy1, gx2, gy2 in grey_boxes:
 		mask_content += f"{gx1} {gy1} {gx2} {gy2}\n"
-	
+
 	# Write mask files
 	mask_filename = f"{base_filename}.mask.txt"
 	static_mask_path = os.path.join(static_mask_dir, mask_filename)
 	motion_mask_path = os.path.join(motion_mask_dir, mask_filename)
-	
+
 	with open(static_mask_path, 'w') as f:
 		f.write(mask_content)
 	with open(motion_mask_path, 'w') as f:
@@ -848,15 +998,373 @@ def save_annotation():
 
 	print(f"Saved #{annot_count} frame {frame_number} -> {annot_type}")
 
-	annot_count += 1	
-	
+	annot_count += 1
+
+# ---- Prefetch cache ----
+# Stores the precomputed result for the next frame so that transitioning is instant.
+# Structure: {
+#   'video_path': str,
+#   'frame_number': int,
+#   'fr': np.ndarray,           # raw static frame
+#   'motion_image': np.ndarray, # motion false-colour frame
+#   'original_frame': np.ndarray,
+#   'raw_buf': list,            # list of frames for animation buffer
+#   'video_width': int,
+#   'video_height': int,
+#   'total_frames': int,
+# }
+_prefetch_cache = {}
+_prefetch_lock  = threading.Lock()
+_prefetch_thread = None
+
+# ---- Last annotated frame cache (for Shift+Enter to go back) ----
+# Stores the same structure as _prefetch_cache for the frame just saved.
+_last_annotated_cache = {}
+# The next frame that has already been chosen and is being prefetched.
+# Set by load_next_random_frame so the cache lookup is deterministic.
+_prefetched_target = (None, None)  # (video_path, frame_number)
+# Target display size used when computing the prefetch composite.
+# Updated by loop() to match the current canvas size.
+_display_size_hint = (800, 600)
+
+def _compute_frame_data(vpath, fnum):
+	"""
+	Open vpath, seek to fnum, compute static frame + motion image + raw_buf.
+	Returns a dict ready to be stored in _prefetch_cache, or None on failure.
+	This function is designed to run in a background thread — it uses only
+	local variables and does not touch any global state.
+	"""
+	try:
+		cap = cv2.VideoCapture(vpath)
+		if not cap.isOpened():
+			return None
+
+		n_frames   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+		vid_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+		vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+		start_frame = fnum - frameWindow + 1
+		if start_frame < 0:
+			cap.release()
+			return None
+
+		cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+		prev_frames = [None] * 3
+		local_raw_buf = []
+		local_fr = None
+		local_motion = None
+		local_original = None
+		gray = None
+		diffs = None
+		frame_count = 0
+
+		for i in range(frameWindow):
+			ret, raw_frame = cap.read()
+			if not ret:
+				break
+			if frame_count == 0:
+				local_fr = raw_frame.copy()
+				if scale_factor != 1.0:
+					local_fr = cv2.resize(local_fr, (0, 0), fx=scale_factor, fy=scale_factor)
+				local_raw_buf.append(local_fr.copy())
+				gray = cv2.cvtColor(local_fr, cv2.COLOR_BGR2GRAY)
+				if i == 0:
+					prev_frames = [gray.copy()] * 3
+					frame_count += 1
+					if frame_count > frame_skip:
+						frame_count = 0
+					continue
+				diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
+				if strategy == 'exponential':
+					prev_frames[0] = gray
+					prev_frames[1] = cv2.addWeighted(prev_frames[1], expA, gray, 1 - expA, 0)
+					prev_frames[2] = cv2.addWeighted(prev_frames[2], expB, gray, 1 - expB, 0)
+				else:
+					prev_frames[2] = prev_frames[1]
+					prev_frames[1] = prev_frames[0]
+					prev_frames[0] = gray
+			frame_count += 1
+			if frame_count > frame_skip:
+				frame_count = 0
+
+		cap.release()
+
+		if diffs is None or local_fr is None:
+			return None
+
+		if chromatic_tail_only == 'true':
+			tb = cv2.subtract(diffs[0], diffs[1])
+			tr = cv2.subtract(diffs[2], diffs[1])
+			tg = cv2.subtract(diffs[1], diffs[0])
+			blue  = cv2.addWeighted(gray, lum_weight, tb, rgb_multipliers[2], motion_threshold)
+			green = cv2.addWeighted(gray, lum_weight, tg, rgb_multipliers[1], motion_threshold)
+			red   = cv2.addWeighted(gray, lum_weight, tr, rgb_multipliers[0], motion_threshold)
+		else:
+			blue  = cv2.addWeighted(gray, lum_weight, diffs[0], rgb_multipliers[2], motion_threshold)
+			green = cv2.addWeighted(gray, lum_weight, diffs[1], rgb_multipliers[1], motion_threshold)
+			red   = cv2.addWeighted(gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold)
+
+		local_motion   = cv2.merge((blue, green, red)).astype(np.uint8)
+		local_original = local_motion.copy()
+
+		# ---- Precompute the scaled composite for instant display ----
+		# We compute both the motion view and the static view at display size
+		# so redraw() can use them directly without any resize work.
+		disp_w, disp_h = _display_size_hint
+		disp_w = max(1, disp_w)
+		disp_h = max(1, disp_h)
+
+		# Resize both views to display size
+		motion_disp  = cv2.resize(local_motion, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+		static_disp  = cv2.resize(local_fr,     (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+
+		# Build the zoom column (3 panes stacked vertically)
+		widget_size  = max(32, disp_h // 3)
+		zoom_col     = np.zeros((widget_size * 3, widget_size, 3), dtype=np.uint8)
+
+		cx = vid_width  // 2
+		cy = vid_height // 2
+
+		def _quick_crop(src, cx, cy, out_size):
+			"""Centre crop at native resolution then resize — no padding needed for preview."""
+			h, w = src.shape[:2]
+			half = out_size // 2
+			x1 = max(0, cx - half); y1 = max(0, cy - half)
+			x2 = min(w, cx + half); y2 = min(h, cy + half)
+			crop = src[y1:y2, x1:x2]
+			if crop.size == 0:
+				return np.zeros((out_size, out_size, 3), dtype=np.uint8)
+			return cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
+
+		# Top pane: static zoom
+		zoom_col[0:widget_size, 0:widget_size]               = _quick_crop(local_fr,     cx, cy, widget_size)
+		# Mid pane: motion zoom
+		zoom_col[widget_size:widget_size*2, 0:widget_size]   = _quick_crop(local_motion, cx, cy, widget_size)
+		# Bottom pane: blank (animation — cannot be precomputed, changes over time)
+		zoom_col[widget_size*2:widget_size*3, 0:widget_size] = np.zeros((widget_size, widget_size, 3), dtype=np.uint8)
+
+		# Assemble composite (motion view by default — user can toggle with Space)
+		composite_w = disp_w + widget_size
+		composite_h = max(disp_h, widget_size * 3)
+		composite   = np.zeros((composite_h, composite_w, 3), dtype=np.uint8)
+		composite[0:disp_h,      0:disp_w]    = motion_disp
+		composite[0:widget_size*3, disp_w:]   = zoom_col
+
+		# Scale composite to a safe canvas size
+		# (actual canvas size may differ slightly — a final cheap resize in redraw handles it)
+		c_w = composite_w
+		c_h = composite_h
+		scale_w = float(c_w) / float(max(1, composite_w))
+		scale_h = float(c_h) / float(max(1, composite_h))
+		scale   = min(scale_w, scale_h) if scale_w > 0 and scale_h > 0 else 1.0
+
+		scaled_w = max(1, int(round(composite_w * scale)))
+		scaled_h = max(1, int(round(composite_h * scale)))
+		scaled_composite = cv2.resize(composite, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+
+		# Convert to PhotoImage-ready format (RGB numpy array)
+		# We store as numpy RGB rather than PhotoImage because PhotoImage must be
+		# created on the main thread in Tkinter.
+		composite_rgb = cv2.cvtColor(scaled_composite, cv2.COLOR_BGR2RGB)
+
+		return {
+			'video_path':      vpath,
+			'frame_number':    fnum,
+			'fr':              local_fr,
+			'motion_image':    local_motion,
+			'original_frame':  local_original,
+			'raw_buf':         local_raw_buf,
+			'video_width':     vid_width,
+			'video_height':    vid_height,
+			'total_frames':    n_frames,
+			'composite_rgb':   composite_rgb,
+			'composite_scale': scale,
+			'display_size':    (disp_w, disp_h),
+			'widget_size':     widget_size,
+		}
+
+	except Exception as e:
+		print(f"Prefetch error for {vpath} frame {fnum}: {e}")
+		return None
+
+def _start_prefetch(vpath, fnum):
+	"""
+	Launch a background thread to precompute the next frame.
+	Only one prefetch thread runs at a time — if one is already running it is
+	left to finish (we do not cancel it, just let the new result overwrite).
+	"""
+	global _prefetch_thread, _prefetch_cache
+
+	def _worker():
+		result = _compute_frame_data(vpath, fnum)
+		with _prefetch_lock:
+			_prefetch_cache.clear()
+			if result is not None:
+				_prefetch_cache.update(result)
+
+	# Clear stale cache immediately so we don't accidentally use old data
+	with _prefetch_lock:
+		_prefetch_cache.clear()
+
+	_prefetch_thread = threading.Thread(target=_worker, daemon=True)
+	_prefetch_thread.start()
+
+
+def load_next_random_frame(app_instance):
+	"""
+	Transition to the next random unannotated frame.
+	If _prefetched_target matches a ready cache entry, the transition is instant.
+	Otherwise falls back to synchronous loading.
+	After loading, picks the NEXT frame deterministically and starts prefetching it.
+	"""
+	global video_path, capture, frame_number, video_label
+	global total_frames, video_width, video_height, frame_updated
+	global annotated_frames_map, items
+	global fr, original_frame, motion_image, raw_buf
+	global _last_annotated_cache, _prefetched_target
+
+	# Save current frame into the "last annotated" cache before moving on
+	if original_frame is not None and fr is not None:
+		_last_annotated_cache = {
+			'video_path':     video_path,
+			'frame_number':   frame_number,
+			'fr':             fr.copy(),
+			'motion_image':   motion_image.copy() if motion_image is not None else None,
+			'original_frame': original_frame.copy(),
+			'raw_buf':        list(raw_buf),
+			'video_width':    video_width,
+			'video_height':   video_height,
+			'total_frames':   total_frames,
+		}
+
+	# Refresh the annotated pool
+	new_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
+	if not new_unannotated:
+		messagebox.showinfo("All annotated",
+			"Congratulations! All frames have been annotated.")
+		app_instance.root.destroy()
+		return
+
+	# Use the pre-chosen target if it exists, otherwise pick randomly now
+	target_vpath, target_fnum = _prefetched_target
+	if target_vpath is None or (target_vpath, target_fnum) not in set(new_unannotated):
+		# No valid pre-chosen target — pick randomly
+		target_vpath, target_fnum = pick_random_frame(new_unannotated)
+
+	new_video_path  = target_vpath
+	new_frame_number = target_fnum
+
+	# ---- Try to use prefetch cache ----
+	cache_hit = False
+	with _prefetch_lock:
+		cached_vpath  = _prefetch_cache.get('video_path')
+		cached_fnum   = _prefetch_cache.get('frame_number')
+		if cached_vpath == new_video_path and cached_fnum == new_frame_number:
+			fr             = _prefetch_cache['fr']
+			motion_image   = _prefetch_cache['motion_image']
+			original_frame = _prefetch_cache['original_frame']
+			raw_buf.clear()
+			for f in _prefetch_cache['raw_buf']:
+				raw_buf.append(f)
+			cache_hit = True
+			print(f"Cache hit — {os.path.basename(new_video_path)} frame {new_frame_number}")
+
+	if cache_hit:
+		if new_video_path != video_path:
+			capture.release()
+			capture      = cv2.VideoCapture(new_video_path)
+			video_path   = new_video_path
+			video_label  = os.path.splitext(os.path.basename(video_path))[0]
+			app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+
+		# Apply cached video metadata (use cache values, avoid re-reading from capture)
+		with _prefetch_lock:
+			video_width  = _prefetch_cache['video_width']
+			video_height = _prefetch_cache['video_height']
+			total_frames = _prefetch_cache['total_frames']
+
+		app_instance.seek.configure(to=max(0, total_frames - 1))
+		frame_number  = new_frame_number
+		frame_updated = False
+
+		# ---- Instant display using the pre-rendered composite ----
+		with _prefetch_lock:
+			composite_rgb   = _prefetch_cache.get('composite_rgb')
+			cached_scale    = _prefetch_cache.get('composite_scale', 1.0)
+			cached_disp_sz  = _prefetch_cache.get('display_size', (800, 600))
+			cached_widget_sz = _prefetch_cache.get('widget_size', 200)
+
+		if composite_rgb is not None:
+			try:
+				from PIL import Image as PilImage
+				pil_img  = PilImage.fromarray(composite_rgb)
+				tk_photo = ImageTk.PhotoImage(pil_img)
+
+				# Store on app so Tkinter doesn't garbage-collect it
+				app_instance.tk_img = tk_photo
+				app_instance.composite_scale  = cached_scale
+				app_instance.display_size     = cached_disp_sz
+
+				h, w = composite_rgb.shape[:2]
+				app_instance.canvas.config(scrollregion=(0, 0, w, h))
+				app_instance.canvas.delete('all')
+				app_instance.canvas.create_image(0, 0, image=tk_photo, anchor='nw')
+				# Full redraw will follow on the next loop() tick with animation etc.
+			except Exception as e:
+				print(f"Fast display failed: {e}")
+				app_instance.redraw()
+			else:
+				app_instance.redraw()
+
+	else:
+		print(f"Cache miss — loading {os.path.basename(new_video_path)} frame {new_frame_number} synchronously")
+		if new_video_path != video_path:
+			capture.release()
+			capture      = cv2.VideoCapture(new_video_path)
+			total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+			video_width  = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+			video_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+			video_path   = new_video_path
+			video_label  = os.path.splitext(os.path.basename(video_path))[0]
+			app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+			app_instance.seek.configure(to=max(0, total_frames - 1))
+
+		frame_number  = min(max(new_frame_number, frameWindow - 1), total_frames - 1)
+		frame_updated = True
+
+	# Refresh UI
+	items = annotation_index.list_images_labels_and_masks()
+	annotated_frames_map = build_annot_index_map(items)
+	app_instance.seek.set(frame_number)
+	try:
+		app_instance.frame_var.set(f'Frame {frame_number}')
+	except Exception:
+		pass
+	app_instance.draw_seek_ticks()
+
+	# ---- Pick the NEXT target and schedule prefetch with a short delay ----
+	# The delay lets the main thread finish rendering the current frame
+	# before the prefetch thread starts competing for the video decoder.
+	pool_after = get_unannotated_pool(full_frame_pool, annotation_index)
+	pool_after = [(vp, fn) for vp, fn in pool_after
+				  if not (vp == new_video_path and fn == new_frame_number)]
+	if pool_after:
+		next_vpath, next_fnum = pick_random_frame(pool_after)
+		_prefetched_target = (next_vpath, next_fnum)
+		# Delay prefetch by 2 seconds so the UI is responsive first
+		app_instance.root.after(2000, lambda vp=next_vpath, fn=next_fnum: _start_prefetch(vp, fn))
+	else:
+		_prefetched_target = (None, None)
+
 
 # ---------- Tk UI (composite single-image display) ----------
 class AnnotatorTk:
 	def __init__(self, root):
 		self.root = root
 		root.title(f"BehaveAI — {os.path.basename(video_path)}")
-		
+		root.attributes('-fullscreen', True)
+
 		# sensible default window geometry so the main video panel is visible on launch
 		default_w = max(1000, int(video_width * 1.2))
 		default_h = max(700, int(video_height * 1.2))
@@ -880,11 +1388,11 @@ class AnnotatorTk:
 		# --- bottom control bar (seek + grey toggle) ---
 		self.controls = tk.Frame(self.left)
 		self.controls.pack(fill='x', pady=(4, 2))
-		
+
 		# grey toggle (left)
 		self.grey_btn = tk.Button(self.controls, text="Grey (g)", width=10, command=self.toggle_grey)
 		self.grey_btn.pack(side='left', padx=4)
-		
+
 		# frame number label (shows current frame number)
 		self.frame_var = tk.StringVar(value=str(frame_number))
 		self.frame_label = tk.Label(self.controls, textvariable=self.frame_var, width=8, anchor='w')
@@ -893,14 +1401,14 @@ class AnnotatorTk:
 		# container for tickline + seek scale so ticks sit *above* the slider
 		self.seek_container = tk.Frame(self.controls)
 		self.seek_container.pack(side='left', fill='x', expand=True, padx=4)
-		
+
 		# small tick canvas sitting above the actual scale (height can be tuned)
 		self.seek_ticks = tk.Canvas(self.seek_container, height=8, bg=self.controls.cget('bg'), highlightthickness=0)
 		self.seek_ticks.pack(fill='x', padx=0, pady=(0,1))
-		
+
 		self.seek_ticks.bind('<Configure>', lambda e: self.draw_seek_ticks())
 
-		
+
 		# the real seek scale below the tick rail
 		self.seek = ttk.Scale(
 			self.seek_container,
@@ -917,8 +1425,11 @@ class AnnotatorTk:
 		self.primary_buttons = []
 		self.secondary_buttons = []
 
-		# create primary buttons
-		col = 0
+		# Number of buttons per row — controlled via Settings > Display Settings
+		BUTTONS_PER_ROW = buttons_per_row
+
+		# create primary buttons — wrap onto multiple rows when needed
+		btn_position = 0
 		for idx, name in enumerate(primary_classes):
 			if name == '0':
 				continue
@@ -926,25 +1437,32 @@ class AnnotatorTk:
 			if idx < len(primary_colors):
 				bgr = primary_colors[idx]
 				color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+			grid_row = btn_position // BUTTONS_PER_ROW
+			grid_col = btn_position % BUTTONS_PER_ROW
 			btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, primary_classes_info[idx][0]),
 							width=12, relief='raised', command=lambda i=idx: self.select_primary(i))
-			btn.grid(row=0, column=col, padx=2, pady=2)
+			btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 			self.primary_buttons.append((btn, color_hex, idx))
-			col += 1
+			btn_position += 1
 
-		# secondary row
+		# How many grid rows did the primary buttons use?
+		primary_row_count = max(1, (btn_position + BUTTONS_PER_ROW - 1) // BUTTONS_PER_ROW)
+
+		# secondary rows — start after the last primary row
 		if hierarchical_mode:
-			col = 0
+			btn_position = 0
 			for idx, name in enumerate(secondary_classes):
 				color_hex = None
 				if idx < len(secondary_colors):
 					bgr = secondary_colors[idx]
 					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+				grid_row = primary_row_count + (btn_position // BUTTONS_PER_ROW)
+				grid_col = btn_position % BUTTONS_PER_ROW
 				btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, secondary_classes_info[idx][0]),
 								width=12, relief='raised', command=lambda i=idx: self.select_secondary(i))
-				btn.grid(row=1, column=col, padx=2, pady=2)
+				btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 				self.secondary_buttons.append((btn, color_hex, idx))
-				col += 1
+				btn_position += 1
 
 
 		# bind events
@@ -958,7 +1476,7 @@ class AnnotatorTk:
 		# ~ root.bind_all('<Left>', lambda e: self.key_step(-1))
 		# ~ root.bind_all('<Right>', lambda e: self.key_step(1))
 		root.bind_all('<space>', lambda e: self.toggle_show_mode())
-		root.bind_all('<Return>', lambda e: self.key_save())
+		root.bind_all('<Return>', self._on_return_key)
 
 		# drawing/display state
 		# ~ self.display_size = (video_width, video_height)
@@ -967,6 +1485,10 @@ class AnnotatorTk:
 		self.last_mouse = None
 		self.drawing = False
 		self.start_canvas_xy = None
+
+		# Keep the display size hint in sync for the prefetch thread
+		global _display_size_hint
+		_display_size_hint = self.display_size
 
 		# small layout tuning: padding between main and zoom column when composing
 		self._composite_gap = 8
@@ -1033,18 +1555,18 @@ class AnnotatorTk:
 			self.seek_ticks.delete('all')
 		except Exception:
 			return
-	
+
 		w = self.seek_ticks.winfo_width()
 		if w <= 2:
 			# widget not yet realised — try again shortly
 			self.root.after(100, self.draw_seek_ticks)
 			return
-	
+
 		# get annotated frames for this video's video_label
 		ann_set = annotated_frames_map.get(video_label, set())
 		if not ann_set:
 			return
-	
+
 		# draw ticks (color / height are adjustable)
 		for frm in ann_set:
 			if frm < 0 or frm >= max(1, total_frames):
@@ -1053,12 +1575,12 @@ class AnnotatorTk:
 			# short yellow tick (top-down)
 			# ~ self.seek_ticks.create_line(x, 0, x, 6, fill='yellow', width=1)
 			self.seek_ticks.create_line(x, 0, x, 10, fill='red', width=2)
-	
+
 		# draw current-frame cursor
 		cur_x = int(round((frame_number / float(max(1, total_frames - 1))) * (w - 1)))
 		# ~ self.seek_ticks.create_line(cur_x, 0, cur_x, 7, fill='red', width=2)
 		self.seek_ticks.create_line(cur_x, 0, cur_x, 10, fill='black', width=2)
-		
+
 	def refresh_annotation_index_map(self):
 		"""Rebuild global `items` and annotated_frames_map from the shared index."""
 		try:
@@ -1067,7 +1589,7 @@ class AnnotatorTk:
 			annotated_frames_map = build_annot_index_map(items)
 		except Exception:
 			pass
-	
+
 	def jump_to_annotated(self, direction):
 		"""Jump to previous (direction=-1) or next (direction=+1) annotated frame for current video_label.
 		   If none found, do nothing.
@@ -1117,7 +1639,7 @@ class AnnotatorTk:
 			self.draw_seek_ticks()
 		except Exception:
 			pass
-	
+
 
 
 	def canvas_to_video(self, canvas_point):
@@ -1129,28 +1651,28 @@ class AnnotatorTk:
 		cx, cy = canvas_point
 		c_w = self.canvas.winfo_width() or 1
 		c_h = self.canvas.winfo_height() or 1
-	
+
 		# fallback values if redraw hasn't set them yet
 		disp_w, disp_h = getattr(self, 'display_size', (video_width, video_height))
 		scale = getattr(self, 'composite_scale', 1.0)
-	
+
 		# scaled displayed video region (left part of composite)
 		scaled_disp_w = max(1, int(round(disp_w * scale)))
 		scaled_disp_h = max(1, int(round(disp_h * scale)))
-	
+
 		# if click is outside scaled main display, clamp to nearest edge
 		if cx < 0: cx = 0
 		if cy < 0: cy = 0
-	
+
 		# only map if inside scaled main display; if outside we still return nearest edge point
 		# map back to display coords then to video coords
 		display_x = min(cx, scaled_disp_w - 1) / scale
 		display_y = min(cy, scaled_disp_h - 1) / scale
-	
+
 		vx = display_x * (video_width / float(max(1, disp_w)))
 		vy = display_y * (video_height / float(max(1, disp_h)))
 		return (vx, vy)
-	
+
 
 
 	def video_to_canvas(self, vx, vy):
@@ -1235,7 +1757,7 @@ class AnnotatorTk:
 			step = 10 if (event.state & 0x1) else 1
 			self.key_step(step)
 			return
-		
+
 
 		if ch:
 			c_ord = ord(ch)
@@ -1271,6 +1793,13 @@ class AnnotatorTk:
 					self.update_button_states()
 					return
 
+		# Tab — skip current frame without saving, pick next random frame
+		if ks == 'Escape':
+			boxes.clear()
+			grey_boxes.clear()
+			load_next_random_frame(self)
+			return
+
 		if ch == 'u':
 			if grey_mode:
 				if grey_boxes: grey_boxes.pop()
@@ -1283,22 +1812,18 @@ class AnnotatorTk:
 			self.toggle_grey()
 			return
 
+		# Shift+Enter — go back to the last annotated frame
+		if ks == 'Return' and (event.state & 0x1):
+			self._restore_last_annotated()
+			return
+
 		if ks == 'Return':
 			save_annotation()
-			boxes.clear(); grey_boxes.clear()
-			frame_number = min(frame_number + 1, total_frames - 1)
-			frame_updated = True
-			self.seek.set(frame_number)
-			
-			try:
-				# refresh index and redraw ticks immediately
-				self.refresh_annotation_index_map()
-				self.draw_seek_ticks()
-			except Exception:
-				pass
-			self.redraw()
+			boxes.clear()
+			grey_boxes.clear()
+			load_next_random_frame(self)
 			return
-			
+
 		if ks == 'Delete':
 			print("\nWARNING: This will delete ALL files for this frame!")
 			print("Press ENTER to confirm, any other key to cancel...")
@@ -1341,8 +1866,8 @@ class AnnotatorTk:
 			self.root.unbind('<Return>')
 			self.root.unbind('<Escape>')
 			# Prevent the save function from being called
-			return "break"			
-	
+			return "break"
+
 	def key_step(self, delta):
 		global frame_number, frame_updated
 		frame_number = min(max(0, frame_number + delta), total_frames - 1)
@@ -1353,19 +1878,28 @@ class AnnotatorTk:
 		global show_mode
 		show_mode *= -1
 
+	def _on_return_key(self, event):
+			"""
+			Route Return and Shift+Return to the correct handlers.
+			Shift is detected via event.state bit 0x1.
+			This method is bound globally so it must handle both cases explicitly
+			rather than relying on on_key_all, which is bypassed by bind_all.
+			"""
+			# Ignore Return while a delete confirmation is pending — confirm_delete handles it
+			if getattr(self, 'delete_pending', False):
+				return
+
+			if event.state & 0x1:  # Shift is held
+				self._restore_last_annotated()
+			else:
+				self.key_save()
+
 	def key_save(self):
 		save_annotation()
-		boxes.clear(); grey_boxes.clear()
-		global frame_number, frame_updated
-		frame_number = min(frame_number + 1, total_frames - 1)
-		frame_updated = True
-		self.seek.set(frame_number)
-		try:
-			self.refresh_annotation_index_map()
-			self.draw_seek_ticks()
-		except Exception:
-			pass
-	
+		boxes.clear()
+		grey_boxes.clear()
+		load_next_random_frame(self)
+
 
 	def redraw(self, temp_rect=None):
 		"""
@@ -1375,41 +1909,41 @@ class AnnotatorTk:
 		scaled composite so canvas coords match.
 		"""
 		global original_frame, fr, motion_image, last_mouse_move
-	
+
 		if original_frame is None:
 			return
-	
+
 		# pick base image depending on current view mode (native video pixels)
 		if show_mode == -1:
 			base = fr.copy() if fr is not None else np.zeros((video_height, video_width, 3), dtype=np.uint8)
 		else:
 			base = motion_image.copy() if motion_image is not None else np.zeros((video_height, video_width, 3), dtype=np.uint8)
-	
+
 		# draw boxes/grey boxes onto base (works in video/native coords)
 		display = draw_boxes_on_image(base)
-	
+
 		# initial desired main display size (before final uniform scaling)
 		disp_w = max(1, int(self.display_size[0]))
 		disp_h = max(1, int(self.display_size[1]))
-	
+
 		# resize main display (native composite size)
 		disp_resized = cv2.resize(display, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
-	
+
 		# --- prepare zoom panes (native size) ---
 		MAG = 2.0
 		MAG_ANIM = 1.0
-	
+
 		widget_size = max(32, int(disp_h / 3))
-	
+
 		display_scale = float(video_width) / float(max(1, disp_w))
 		crop_vid = max(2, int(round(widget_size * display_scale / MAG)))
 		crop_vid_anim = max(2, int(round(widget_size * display_scale / MAG_ANIM)))
-	
+
 		# prevent absurdly large crop sizes (memory blowouts).
 		MAX_ZOOM_CROP = 2048
 		crop_vid = min(crop_vid, MAX_ZOOM_CROP)
 		crop_vid_anim = min(crop_vid_anim, MAX_ZOOM_CROP)
-	
+
 		# ~ def padded_crop(src, cx, cy, crop_size):
 			# ~ h, w = src.shape[:2]
 			# ~ x1 = cx - crop_size // 2
@@ -1460,7 +1994,7 @@ class AnnotatorTk:
 
 				out[dst_y1:dst_y2, dst_x1:dst_x2] = src[sy1:sy2, sx1:sx2]
 			return out, (x1, y1, x2, y2)
-	
+
 		# center of interest in video coords
 		if self.last_mouse is not None:
 			try:
@@ -1471,7 +2005,7 @@ class AnnotatorTk:
 				cx, cy = video_width // 2, video_height // 2
 		else:
 			cx, cy = video_width // 2, video_height // 2
-	
+
 		# ~ # top zoom (static)
 		z_top = None
 		if fr is not None:
@@ -1484,7 +2018,7 @@ class AnnotatorTk:
 				cv2.line(z_top, (0, zy), (widget_size-1, zy), (255,255,255), 1)
 				cv2.line(z_top, (zx, 0), (zx, widget_size-1), (255,255,255), 1)
 			cv2.rectangle(z_top, (0, 0), (widget_size-1, widget_size-1), (0, 0, 0), 1)
-		
+
 		# mid zoom (motion)
 		z_mid = None
 		if original_frame is not None:
@@ -1513,21 +2047,21 @@ class AnnotatorTk:
 		gap = 0
 		right_col_w = widget_size
 		right_col_h = widget_size * 3  # no extra gap used here
-		
+
 		# composite size: main display + immediate right column
 		composite_h = max(disp_h, right_col_h)
 		composite_w = disp_w + right_col_w
 		composite = np.zeros((composite_h, composite_w, 3), dtype=np.uint8)
-		
+
 		# place main display at top-left (no horizontal gap)
 		composite[0:disp_h, 0:disp_w] = disp_resized
-		
+
 		# zoom column starts immediately after the main display
 		zoom_x_off = disp_w
 		zoom_y_off = 0
-					
 
-	
+
+
 		def place_zoom(zi, x_off, y_off):
 			if zi is None:
 				return
@@ -1540,11 +2074,11 @@ class AnnotatorTk:
 			use_w = min(zi_w, w_rem)
 			zi_crop = zi[0:use_h, 0:use_w]
 			composite[y_off:y_off+use_h, x_off:x_off+use_w] = zi_crop
-	
+
 		place_zoom(z_top, zoom_x_off, zoom_y_off)
 		place_zoom(z_mid, zoom_x_off, zoom_y_off + widget_size + gap)
 		place_zoom(z_bot, zoom_x_off, zoom_y_off + 2 * (widget_size + gap))
-	
+
 		# --- scale composite to fit canvas ---
 		c_w = self.canvas.winfo_width() or 1
 		c_h = self.canvas.winfo_height() or 1
@@ -1553,7 +2087,7 @@ class AnnotatorTk:
 		scale = min(scale_w, scale_h) if (scale_w > 0 and scale_h > 0) else 1.0
 		# store for mapping functions
 		self.composite_scale = scale
-	
+
 		scaled_w = max(1, int(round(composite_w * scale)))
 		scaled_h = max(1, int(round(composite_h * scale)))
 		scaled = cv2.resize(composite, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
@@ -1562,20 +2096,20 @@ class AnnotatorTk:
 		# draw crosshair — but *limit* it to the main display area so it doesn't cross into the zoom column
 		scaled_disp_w = max(1, int(round(disp_w * scale)))
 		scaled_disp_h = max(1, int(round(disp_h * scale)))
-		
+
 		if self.last_mouse is not None:
 			mx, my = self.last_mouse
 			# only draw if the mouse is inside the scaled main-display region
 			if 0 <= mx < scaled_disp_w and 0 <= my < scaled_disp_h:
 				cv2.line(scaled, (int(mx), 0), (int(mx), scaled_disp_h), (255,255,255), max(1, line_thickness))
 				cv2.line(scaled, (0, int(my)), (scaled_disp_w, int(my)), (255,255,255), max(1, line_thickness))
-		
-	
+
+
 		# determine temporary rectangle to draw (if drawing and no explicit temp_rect provided)
 		if temp_rect is None and getattr(self, 'drawing', False):
 			if self.start_canvas_xy is not None and self.last_mouse is not None:
 				temp_rect = (self.start_canvas_xy, self.last_mouse)
-	
+
 		# draw temporary rect (coordinates are canvas coords; draw onto scaled image)
 		if temp_rect is not None:
 			(sx, sy), (ex, ey) = temp_rect
@@ -1583,7 +2117,7 @@ class AnnotatorTk:
 			rx1 = max(0, min(sx, scaled_w-1)); ry1 = max(0, min(sy, scaled_h-1))
 			rx2 = max(0, min(ex, scaled_w-1)); ry2 = max(0, min(ey, scaled_h-1))
 			cv2.rectangle(scaled, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (255,255,255), max(1, line_thickness))
-	
+
 		# convert and display
 		self.tk_img = cv2_to_photoimage(scaled)
 		try:
@@ -1597,8 +2131,8 @@ class AnnotatorTk:
 			self.draw_seek_ticks()
 		except Exception:
 			pass
-		
-	
+
+
 
 	def loop(self):
 		global frame_updated, fr, original_frame, motion_image, raw_buf, last_mouse_move, last_anim_draw, boxes, grey_boxes
@@ -1665,14 +2199,14 @@ class AnnotatorTk:
 						red = cv2.addWeighted(gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold)
 					motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
 					original_frame = motion_image.copy()
-					
+
 
 					try:
 						base = f"{video_label}_{frame_number}"
 						boxes, grey_boxes = annotation_index.load_labels_for_basename(base, fr, original_frame)
 					except Exception as e:
 						print("Error loading saved annotations for", f"{video_label}_{frame_number},", e)
-				
+
 					if boxes or grey_boxes:
 						# ~ print('Annotations found')
 						pass
@@ -1681,7 +2215,7 @@ class AnnotatorTk:
 							auto_annotate_local()
 						need_ = True
 						last_anim_draw = time.time()
-					
+
 		else:
 			if (now - last_mouse_move) > ANIM_STILL_THRESHOLD and (now - last_anim_draw) >= ANIM_DT:
 				last_anim_draw = now
@@ -1710,9 +2244,81 @@ class AnnotatorTk:
 
 		self.root.after(30, self.loop)
 
+	def _restore_last_annotated(self):
+			"""
+			Restore the frame that was displayed just before the last save.
+			Allows the user to go back and correct a mistake (Shift+Enter).
+			"""
+			global video_path, capture, frame_number, video_label
+			global total_frames, video_width, video_height, frame_updated
+			global fr, original_frame, motion_image, raw_buf
+
+			if not _last_annotated_cache:
+				print("No previous frame in cache to restore.")
+				return
+
+			cache = _last_annotated_cache
+
+			# Switch video if needed
+			if cache['video_path'] != video_path:
+				capture.release()
+				capture        = cv2.VideoCapture(cache['video_path'])
+				video_path     = cache['video_path']
+				video_label    = os.path.splitext(os.path.basename(video_path))[0]
+				total_frames   = cache['total_frames']
+				video_width    = cache['video_width']
+				video_height   = cache['video_height']
+				self.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+				self.seek.configure(to=max(0, total_frames - 1))
+
+			# Restore frame data from cache
+			fr             = cache['fr'].copy()
+			motion_image   = cache['motion_image'].copy() if cache['motion_image'] is not None else None
+			original_frame = cache['original_frame'].copy()
+			raw_buf.clear()
+			for f in cache['raw_buf']:
+				raw_buf.append(f)
+
+			frame_number  = cache['frame_number']
+			frame_updated = False  # data already loaded, no need to recompute
+
+			# Clear any boxes drawn on the new frame — user is back on the old one
+			boxes.clear()
+			grey_boxes.clear()
+
+			# Load existing annotations for this frame if they exist
+			try:
+				base = f"{video_label}_{frame_number}"
+				loaded_boxes, loaded_grey = annotation_index.load_labels_for_basename(
+					base, fr, original_frame)
+				boxes.extend(loaded_boxes)
+				grey_boxes.extend(loaded_grey)
+			except Exception as e:
+				print(f"Could not reload annotations for restored frame: {e}")
+
+			self.seek.set(frame_number)
+			try:
+				self.frame_var.set(f'Frame {frame_number}')
+			except Exception:
+				pass
+			self.draw_seek_ticks()
+			self.redraw()
+			print(f"Restored frame {frame_number} from {os.path.basename(video_path)}")
+
 # Launch app
 root = tk.Tk()
 app = AnnotatorTk(root)
+
+# Pick the first prefetch target deterministically and remember it
+_initial_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
+_initial_unannotated = [(vp, fn) for vp, fn in _initial_unannotated
+						if not (vp == video_path and fn == frame_number)]
+if _initial_unannotated:
+	_next_vpath, _next_fnum = pick_random_frame(_initial_unannotated)
+	_prefetched_target = (_next_vpath, _next_fnum)
+	# Delay so the first frame loads without competing with the prefetch thread
+	root.after(3000, lambda vp=_next_vpath, fn=_next_fnum: _start_prefetch(vp, fn))
+
 root.mainloop()
 
 capture.release()
