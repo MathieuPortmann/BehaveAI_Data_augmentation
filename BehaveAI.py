@@ -20,6 +20,7 @@ import re
 import base64
 from pathlib import Path
 import configparser
+from BehaveAI_augmentation import load_augmentation_config
 
 # -------------------------- utils --------------------------
 
@@ -130,6 +131,7 @@ class ScriptRunnerApp:
 			("Settings", "BehaveAI_settings_gui.py"),
 			("Annotate", "BehaveAI_annotation.py"),
 			("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
+			("Augment Dataset", "BehaveAI_augmentation.py"),
 			("Train & batch classify", "BehaveAI_classify_track.py"),
 			("Live", "BehaveAI_live.py"),
 		]
@@ -211,6 +213,15 @@ class ScriptRunnerApp:
 		for script_name, btn in self.buttons.items():
 			if script_name == settings_script:
 				btn.config(state='normal')
+			elif script_name == "BehaveAI_augmentation.py":
+				# Special handling for Augment Dataset button
+				# Check aug_global_probability from settings file
+				aug_config = load_augmentation_config(self.current_project / 'BehaveAI_settings.ini')
+				if aug_config is None:
+					# aug_global_probability is 0, so disable the button
+					btn.config(state='disabled')
+				else:
+					btn.config(state='normal')
 			else:
 				# enable if settings are populated
 				ok = self.is_settings_populated(self.current_project)
