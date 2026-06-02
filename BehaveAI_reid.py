@@ -54,9 +54,13 @@ class ReIDRegistry:
 	"""
 
 	def __init__(self, method="histogram", similarity_threshold=0.75,
+				 histogram_min_similarity=0.60,
 				 max_position_distance=500.0, max_disappeared_frames=900):
 		self.method = method
+		# similarity_threshold gates the embedding (cosine) method; histogram scores
+		# live on a different scale, so the histogram method has its own gate.
 		self.similarity_threshold = float(similarity_threshold)
+		self.histogram_min_similarity = float(histogram_min_similarity)
 		self.max_position_distance = float(max_position_distance)
 		self.max_disappeared_frames = int(max_disappeared_frames)
 
@@ -213,7 +217,15 @@ class ReIDRegistry:
 					if sim > best_sim:
 						best_sim, best_tid = sim, tid
 
-		if best_tid is not None and best_sim >= self.similarity_threshold:
+		# Pick the appearance threshold for the active descriptor type. Histogram
+		# scores and embedding cosine scores are not on the same scale, so each
+		# method has its own calibrated gate.
+		if self.method == "histogram":
+			appearance_threshold = self.histogram_min_similarity
+		else:  # "embedding"
+			appearance_threshold = self.similarity_threshold
+
+		if best_tid is not None and best_sim >= appearance_threshold:
 			chosen = best_tid
 			self.last_match_score = best_sim
 		else:

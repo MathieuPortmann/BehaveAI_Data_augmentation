@@ -672,8 +672,11 @@ drone_correction_fallback_smoothing = true
 reid_enabled = true
 # Appearance descriptor: histogram (no torch) | embedding (needs torch).
 reid_method = histogram
-# Appearance similarity gate (cosine); weak tie-breaker only.
+# Embedding appearance similarity gate (cosine; weak tie-breaker).
 reid_similarity_threshold = 0.75
+# Histogram-specific minimum similarity (0..1) to accept an appearance match;
+# below this, appearance is ignored and only the spatio-temporal gate decides.
+reid_histogram_min_similarity = 0.60
 # Registry pruning guard in seconds (NOT a hard match limit).
 reid_max_disappeared_seconds = 180.0
 # Spatial plausibility gate in px (primary matching signal).

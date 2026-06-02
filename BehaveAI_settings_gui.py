@@ -516,6 +516,7 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_enabled_var          = tk.BooleanVar(value=True)
 		self.reid_method_var           = tk.StringVar(value='histogram')
 		self.reid_similarity_var       = tk.DoubleVar(value=0.75)
+		self.reid_histogram_min_var    = tk.DoubleVar(value=0.60)
 		self.reid_max_disappeared_var  = tk.DoubleVar(value=180.0)
 		self.reid_max_position_var     = tk.DoubleVar(value=500.0)
 		self.ab_min_classified_var     = tk.IntVar(value=5)
@@ -1044,8 +1045,17 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
 			textvariable=self.reid_similarity_var, width=6, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Appearance similarity gate (cosine); only a weak tie-breaker.',
+		ttk.Label(tab_reid, text='Embedding appearance similarity gate (cosine); only a weak tie-breaker.',
 			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		ttk.Label(tab_reid, text='Histogram min similarity').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
+			textvariable=self.reid_histogram_min_var, width=6, command=self._set_dirty).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='Histogram method only: minimum colour-histogram similarity (0..1) to accept an '
+			'appearance match. Below this, identity relies on position/time only. Ignored when method = embedding.',
+			font=_help_font, foreground='grey', wraplength=420, justify='left').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
 		ttk.Label(tab_reid, text='Max disappeared (seconds)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
@@ -1394,6 +1404,7 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_enabled_var.set(self._str_to_bool(d.get('reid_enabled', fallback='true')))
 		self.reid_method_var.set(d.get('reid_method', fallback='histogram'))
 		self.reid_similarity_var.set(float(d.get('reid_similarity_threshold', fallback='0.75')))
+		self.reid_histogram_min_var.set(float(d.get('reid_histogram_min_similarity', fallback='0.60')))
 		self.reid_max_disappeared_var.set(float(d.get('reid_max_disappeared_seconds', fallback='180.0')))
 		self.reid_max_position_var.set(float(d.get('reid_max_position_distance', fallback='500.0')))
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
@@ -1879,6 +1890,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['reid_enabled'] = str(self.reid_enabled_var.get()).lower()
 		new_default['reid_method'] = self.reid_method_var.get()
 		new_default['reid_similarity_threshold'] = str(self.reid_similarity_var.get())
+		new_default['reid_histogram_min_similarity'] = str(self.reid_histogram_min_var.get())
 		new_default['reid_max_disappeared_seconds'] = str(self.reid_max_disappeared_var.get())
 		new_default['reid_max_position_distance'] = str(self.reid_max_position_var.get())
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())

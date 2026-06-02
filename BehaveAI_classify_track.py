@@ -321,6 +321,7 @@ try:
 	reid_enabled = config['DEFAULT'].get('reid_enabled', 'false').lower() == 'true'
 	reid_method = config['DEFAULT'].get('reid_method', 'histogram')
 	reid_similarity_threshold = float(config['DEFAULT'].get('reid_similarity_threshold', '0.75'))
+	reid_histogram_min_similarity = float(config['DEFAULT'].get('reid_histogram_min_similarity', '0.60'))
 	reid_max_disappeared_seconds = float(config['DEFAULT'].get('reid_max_disappeared_seconds', '180.0'))
 	reid_max_position_distance = float(config['DEFAULT'].get('reid_max_position_distance', '500.0'))
 	centroid_merge_thresh = float(config['DEFAULT'].get('centroid_merge_thresh', '50'))
@@ -916,6 +917,7 @@ if __name__ == '__main__':
 				reid_registry = ReIDRegistry(
 					method=reid_method,
 					similarity_threshold=reid_similarity_threshold,
+					histogram_min_similarity=reid_histogram_min_similarity,
 					max_position_distance=reid_max_position_distance,
 					max_disappeared_frames=_max_disappeared_frames)
 				print(f"Intra-video Re-ID enabled (method={reid_registry.method}).")
