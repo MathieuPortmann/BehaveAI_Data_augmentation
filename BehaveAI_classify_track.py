@@ -842,13 +842,17 @@ if __name__ == '__main__':
 		prev_frames, frame_idx = None, 0
 		csv_file = open(os.path.join(output_folder, base + "_tracking.csv"), 'w', newline='')
 		csv_writer = csv.writer(csv_file)
-		# Updated CSV header with four streams
+		# Updated CSV header with four streams.
+		# The first 12 columns keep their original order/meaning; the bounding-box
+		# geometry (x1, y1, x2, y2) is appended additively so downstream tools that
+		# only read the first 12 columns (e.g. activity budget) are unaffected.
 		csv_writer.writerow([
 			"frame", "id", "x", "y",
 			"primary_static_class", "primary_static_conf",
 			"primary_motion_class", "primary_motion_conf",
 			"secondary_static_class", "secondary_static_conf",
-			"secondary_motion_class", "secondary_motion_conf"
+			"secondary_motion_class", "secondary_motion_conf",
+			"x1", "y1", "x2", "y2"
 		])
 
 		print(f"Processing video: {file}")
@@ -1211,13 +1215,16 @@ if __name__ == '__main__':
 					        cv2.circle(frame, (int(next_x), int(next_y)), 3, light_color, -line_thickness)
 					        cv2.circle(frame, (int(cx), int(cy)), 3, primary_col, -line_thickness)
 
-					# Write to CSV
+					# Write to CSV. The bounding box (x1, y1, x2, y2) comes straight
+					# from det['coords'] (unpacked above) and is appended after the
+					# original 12 columns so the legacy column layout is preserved.
 					csv_writer.writerow([
 						frame_idx, tid, cx, cy,
 						ps_class, f"{ps_conf:.3f}",
 						pm_class, f"{pm_conf:.3f}",
 						ss_class, f"{ss_conf:.3f}",
-						sm_class, f"{sm_conf:.3f}"
+						sm_class, f"{sm_conf:.3f}",
+						x1, y1, x2, y2
 					])
 
 
