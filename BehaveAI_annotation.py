@@ -4,6 +4,7 @@
 import os
 import sys
 import time
+import argparse
 import cv2
 import numpy as np
 import configparser
@@ -55,6 +56,18 @@ if not os.path.exists(config_path):
 	except Exception:
 		print(f"Configuration file not found: {config_path}")
 	sys.exit(1)
+
+# Parse the optional annotation start-mode flags passed by the launcher.
+# parse_known_args is used so the existing positional project/INI path handling
+# above (sys.argv[1]) keeps working unchanged.
+_arg_parser = argparse.ArgumentParser(add_help=False)
+_arg_parser.add_argument('project_path', nargs='?', default=None)
+_arg_parser.add_argument('--annotation-mode', type=int, default=0, dest='annotation_mode')
+_arg_parser.add_argument('--annotation-extra', type=str, default=None, dest='annotation_extra')
+_parsed_args, _ = _arg_parser.parse_known_args(sys.argv[1:])
+
+annotation_mode  = _parsed_args.annotation_mode   # 0, 1, or 2
+annotation_extra = _parsed_args.annotation_extra  # str or None
 
 project_dir = os.path.dirname(config_path)
 os.chdir(project_dir)
@@ -383,6 +396,77 @@ def pick_random_frame(unannotated_pool):
 		return None, None
 	return random.choice(unannotated_pool)
 
+
+# ---- Timecode queue (annotation start mode 2) ----
+# List of (video_path, frame_number) tuples loaded from CSV (mode 2 only).
+# Consumed in order; on exhaustion falls back to random selection.
+_timecode_queue = []          # type: list[tuple[str, int]]
+_timecode_queue_index = 0     # current position in the queue
+
+
+def _load_timecode_csv(csv_path, frame_pool, fps_hint=25.0):
+	"""
+	Read a CSV of timecodes and return a list of (video_path, frame_number) tuples
+	matched against frame_pool.
+
+	CSV columns (case-insensitive):
+	  - 'frame'    (int)   — frame number, takes priority over timecode
+	  - 'timecode' (MM:SS) — converted to frame number using fps_hint
+	  - 'video'    (str)   — optional video stem to restrict matching
+
+	Only rows whose resolved frame_number exists in frame_pool are included.
+	Rows that cannot be matched are skipped with a warning.
+	"""
+	import csv as _csv
+
+	results = []
+	pool_by_frame = {}
+	for vp, fn in frame_pool:
+		pool_by_frame.setdefault(fn, []).append((vp, fn))
+
+	try:
+		with open(csv_path, newline='', encoding='utf-8-sig') as f:
+			reader = _csv.DictReader(f)
+			for row_num, row in enumerate(reader, start=2):
+				row_lower = {k.lower(): v for k, v in row.items()}
+
+				frame_num = None
+				if 'frame' in row_lower:
+					try:
+						frame_num = int(row_lower['frame'])
+					except (ValueError, TypeError):
+						pass
+				if frame_num is None and 'timecode' in row_lower:
+					tc = (row_lower['timecode'] or '').strip()
+					parts = tc.split(':')
+					if len(parts) == 2:
+						try:
+							minutes, seconds = int(parts[0]), int(parts[1])
+							frame_num = int((minutes * 60 + seconds) * fps_hint)
+						except ValueError:
+							pass
+
+				if frame_num is None:
+					print(f"  CSV row {row_num}: could not parse timecode/frame — skipped.")
+					continue
+
+				video_stem = (row_lower.get('video', '') or '').strip()
+				candidates = pool_by_frame.get(frame_num, [])
+				if video_stem:
+					candidates = [
+						(vp, fn) for vp, fn in candidates
+						if os.path.splitext(os.path.basename(vp))[0].lower() == video_stem.lower()
+					]
+
+				if candidates:
+					results.append(candidates[0])
+				else:
+					print(f"  CSV row {row_num}: frame {frame_num} not found in pool — skipped.")
+	except Exception as e:
+		print(f"Error reading timecode CSV '{csv_path}': {e}")
+
+	return results
+
 # frameWindow logic
 frameWindow = 4
 if strategy == 'exponential':
@@ -426,7 +510,31 @@ if not unannotated_pool:
 	root_tmp.destroy()
 	sys.exit(0)
 
-video_path, _initial_frame = pick_random_frame(unannotated_pool)
+# --- Initial frame selection honouring the launcher's start mode ---
+if annotation_mode == 1 and annotation_extra is not None:
+	# Mode 1: jump to a specific frame (already converted to a frame number).
+	_target_frame = int(annotation_extra)
+	_matched = [(vp, fn) for vp, fn in full_frame_pool if fn == _target_frame]
+	if _matched:
+		video_path, _initial_frame = _matched[0]
+	else:
+		video_path, _initial_frame = min(
+			full_frame_pool, key=lambda x: abs(x[1] - _target_frame)
+		)
+	print(f"Annotation mode 1: jumping to frame {_initial_frame} "
+		  f"in {os.path.basename(video_path)}")
+elif annotation_mode == 2 and annotation_extra is not None:
+	# Mode 2: consume a queue of timecodes loaded from a CSV file.
+	_timecode_queue = _load_timecode_csv(annotation_extra, full_frame_pool, fps_hint=25.0)
+	if _timecode_queue:
+		video_path, _initial_frame = _timecode_queue[0]
+		_timecode_queue_index = 0
+		print(f"Annotation mode 2: loaded {len(_timecode_queue)} timecodes from CSV.")
+	else:
+		print("Annotation mode 2: CSV contained no valid timecodes — falling back to random.")
+		video_path, _initial_frame = pick_random_frame(unannotated_pool)
+else:
+	video_path, _initial_frame = pick_random_frame(unannotated_pool)
 
 
 capture = cv2.VideoCapture(video_path)
@@ -1223,6 +1331,7 @@ def load_next_random_frame(app_instance):
 	global annotated_frames_map, items
 	global fr, original_frame, motion_image, raw_buf
 	global _last_annotated_cache, _prefetched_target
+	global _timecode_queue_index
 
 	# Save current frame into the "last annotated" cache before moving on
 	if original_frame is not None and fr is not None:
@@ -1246,11 +1355,28 @@ def load_next_random_frame(app_instance):
 		app_instance.root.destroy()
 		return
 
-	# Use the pre-chosen target if it exists, otherwise pick randomly now
-	target_vpath, target_fnum = _prefetched_target
-	if target_vpath is None or (target_vpath, target_fnum) not in set(new_unannotated):
-		# No valid pre-chosen target — pick randomly
-		target_vpath, target_fnum = pick_random_frame(new_unannotated)
+	# In mode 2 we walk the timecode queue in order; otherwise use the pre-chosen
+	# (prefetched) random target, falling back to a fresh random pick.
+	if annotation_mode == 2 and _timecode_queue:
+		_timecode_queue_index += 1
+		if _timecode_queue_index < len(_timecode_queue):
+			target_vpath, target_fnum = _timecode_queue[_timecode_queue_index]
+			print(f"Queue position {_timecode_queue_index + 1}/{len(_timecode_queue)}: "
+				  f"frame {target_fnum} in {os.path.basename(target_vpath)}")
+		else:
+			print("Timecode queue exhausted — switching to random selection.")
+			target_vpath, target_fnum = pick_random_frame(new_unannotated) \
+				if new_unannotated else (None, None)
+			if target_vpath is None:
+				messagebox.showinfo("All annotated",
+					"Congratulations! All frames have been annotated.")
+				app_instance.root.destroy()
+				return
+	else:
+		target_vpath, target_fnum = _prefetched_target
+		if target_vpath is None or (target_vpath, target_fnum) not in set(new_unannotated):
+			# No valid pre-chosen target — pick randomly
+			target_vpath, target_fnum = pick_random_frame(new_unannotated)
 
 	new_video_path  = target_vpath
 	new_frame_number = target_fnum
@@ -1343,6 +1469,11 @@ def load_next_random_frame(app_instance):
 		pass
 	app_instance.draw_seek_ticks()
 
+	# Update the queue position label (mode 2 only)
+	if annotation_mode == 2 and _timecode_queue:
+		pos = min(_timecode_queue_index + 1, len(_timecode_queue))
+		app_instance.queue_label_var.set(f"Queue: {pos} / {len(_timecode_queue)}")
+
 	# ---- Pick the NEXT target and schedule prefetch with a short delay ----
 	# The delay lets the main thread finish rendering the current frame
 	# before the prefetch thread starts competing for the video decoder.
@@ -1418,6 +1549,16 @@ class AnnotatorTk:
 			command=self.on_seek
 		)
 		self.seek.pack(fill='x', expand=True)
+
+		# Queue position label (annotation mode 2 only) — sits to the right of the
+		# seek bar and shows how far through the timecode queue we are.
+		self.queue_label_var = tk.StringVar(value='')
+		if annotation_mode == 2:
+			self.queue_label = tk.Label(self.controls, textvariable=self.queue_label_var,
+										width=14, anchor='e')
+			self.queue_label.pack(side='right', padx=(6, 4))
+			if _timecode_queue:
+				self.queue_label_var.set(f"Queue: 1 / {len(_timecode_queue)}")
 
 		self.buttons_frame = tk.Frame(self.left)
 		self.buttons_frame.pack(side='bottom', fill='x', pady=(4,4))

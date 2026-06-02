@@ -10,7 +10,7 @@ BehaveAI Launcher (project-aware)
 
 """
 import tkinter as tk
-from tkinter import scrolledtext, Button, Frame, ttk, simpledialog, messagebox
+from tkinter import scrolledtext, Button, Frame, ttk, simpledialog, messagebox, filedialog
 import subprocess
 import threading
 import queue
@@ -668,10 +668,190 @@ secondary_static_hotkeys = 0
 		if self.current_project is None:
 			messagebox.showwarning("No project", "Please select or create a project first.")
 			return
-		# run in background thread
-		threading.Thread(target=self.execute_script, args=(script_name,), daemon=True).start()
 
-	def execute_script(self, script_name):
+		# The annotation tool gets a start-mode dialog so the user can choose how the
+		# first frame is selected (random / specific timecode / CSV of timecodes).
+		if script_name == "BehaveAI_annotation.py":
+			mode, extra = self._ask_annotation_start_mode()
+			if mode is None:
+				return  # user cancelled
+			threading.Thread(
+				target=self.execute_script,
+				args=(script_name,),
+				kwargs={'annotation_mode': mode, 'annotation_extra': extra},
+				daemon=True
+			).start()
+		else:
+			# run in background thread
+			threading.Thread(target=self.execute_script, args=(script_name,), daemon=True).start()
+
+	# --------------------- annotation start-mode dialog ---------------------
+
+	def _center_window_over_root(self, win):
+		"""Centre a Toplevel window over the launcher's main window."""
+		try:
+			self.root.update_idletasks()
+			rx = self.root.winfo_rootx()
+			ry = self.root.winfo_rooty()
+			rw = self.root.winfo_width()
+			rh = self.root.winfo_height()
+			ww = win.winfo_width()
+			wh = win.winfo_height()
+			x = rx + (rw - ww) // 2
+			y = ry + (rh - wh) // 2
+			win.geometry(f"+{max(0, x)}+{max(0, y)}")
+		except Exception:
+			pass
+
+	def _prompt_for_timecode(self, parent):
+		"""
+		Prompt for a timecode (MM:SS) or a bare frame number, re-prompting on invalid
+		input. A timecode is converted to a frame number using a best-guess FPS of 25
+		(the exact FPS is unknown in the launcher). Returns the frame number as an int,
+		or None if the user cancels the prompt.
+		"""
+		FPS_GUESS = 25
+		while True:
+			answer = simpledialog.askstring(
+				"Timecode",
+				"Enter timecode (MM:SS) or frame number:",
+				parent=parent
+			)
+			if answer is None:
+				return None  # cancelled
+			answer = answer.strip()
+			if not answer:
+				messagebox.showerror("Invalid input",
+					"Please enter a timecode or frame number.", parent=parent)
+				continue
+			# Bare integer -> frame number
+			if ':' not in answer:
+				try:
+					return int(answer)
+				except ValueError:
+					messagebox.showerror("Invalid input",
+						"Enter a whole frame number, or a timecode as MM:SS.", parent=parent)
+					continue
+			# MM:SS -> frame number using the best-guess FPS
+			parts = answer.split(':')
+			if len(parts) == 2:
+				try:
+					minutes, seconds = int(parts[0]), int(parts[1])
+					if minutes < 0 or seconds < 0 or seconds >= 60:
+						raise ValueError
+					return int((minutes * 60 + seconds) * FPS_GUESS)
+				except ValueError:
+					pass
+			messagebox.showerror("Invalid input",
+				"Timecode must be MM:SS (e.g. 01:30), or a bare frame number.", parent=parent)
+
+	def _prompt_for_timecode_csv(self, parent):
+		"""
+		Open a file dialog for a CSV of timecodes and validate it. The file must be
+		readable and contain a column named 'timecode' or 'frame' (case-insensitive).
+		Re-prompts on an invalid file. Returns the absolute CSV path, or None if the
+		user cancels the file dialog.
+		"""
+		while True:
+			csv_path = filedialog.askopenfilename(
+				title="Select timecode CSV",
+				filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+				parent=parent
+			)
+			if not csv_path:
+				return None  # cancelled -> caller returns to the dialog
+			csv_path = os.path.abspath(csv_path)
+			# Validate readability and the presence of a 'timecode' or 'frame' column
+			try:
+				with open(csv_path, newline='', encoding='utf-8-sig') as f:
+					reader = csv.DictReader(f)
+					fieldnames = [fn.lower().strip() for fn in (reader.fieldnames or [])]
+			except Exception as e:
+				messagebox.showerror("Unreadable CSV",
+					f"Could not read the CSV file:\n{e}", parent=parent)
+				continue
+			if 'timecode' not in fieldnames and 'frame' not in fieldnames:
+				messagebox.showerror("Invalid CSV",
+					"The CSV must contain a 'timecode' or 'frame' column "
+					"(case-insensitive).", parent=parent)
+				continue
+			return csv_path
+
+	def _ask_annotation_start_mode(self):
+		"""
+		Show a modal dialog asking how the first annotation frame should be selected.
+
+		Returns a tuple (mode, extra):
+		  - mode 0 -> random unannotated frame; extra is None
+		  - mode 1 -> specific timecode; extra is the target frame number as a string
+		  - mode 2 -> CSV of timecodes; extra is the absolute path to the CSV file
+		Returns (None, None) if the user cancels.
+		"""
+		dialog = tk.Toplevel(self.root)
+		dialog.title("Annotation start mode")
+		dialog.transient(self.root)
+		dialog.resizable(False, False)
+
+		result = {'mode': None, 'extra': None}
+		mode_var = tk.IntVar(value=0)
+
+		tk.Label(dialog,
+				 text="How would you like to select the first frame to annotate?",
+				 wraplength=360, justify='left').pack(anchor='w', padx=16, pady=(16, 10))
+
+		options = [
+			(0, "Random unannotated frame"),
+			(1, "Go to a specific timecode"),
+			(2, "Load a list of timecodes from a CSV file"),
+		]
+		for val, text in options:
+			tk.Radiobutton(dialog, text=text, variable=mode_var,
+						   value=val).pack(anchor='w', padx=24)
+
+		btn_row = tk.Frame(dialog)
+		btn_row.pack(fill='x', padx=16, pady=16)
+
+		def _on_continue():
+			chosen = mode_var.get()
+			if chosen == 0:
+				result['mode'] = 0
+				result['extra'] = None
+				dialog.destroy()
+			elif chosen == 1:
+				frame_num = self._prompt_for_timecode(dialog)
+				if frame_num is None:
+					return  # stay in the dialog (sub-prompt cancelled)
+				result['mode'] = 1
+				result['extra'] = str(frame_num)
+				dialog.destroy()
+			elif chosen == 2:
+				csv_path = self._prompt_for_timecode_csv(dialog)
+				if csv_path is None:
+					return  # stay in the dialog (file selection cancelled)
+				result['mode'] = 2
+				result['extra'] = csv_path
+				dialog.destroy()
+
+		def _on_cancel():
+			result['mode'] = None
+			result['extra'] = None
+			dialog.destroy()
+
+		tk.Button(btn_row, text="Continue", width=10,
+				  command=_on_continue).pack(side='right')
+		tk.Button(btn_row, text="Cancel", width=10,
+				  command=_on_cancel).pack(side='right', padx=(0, 8))
+
+		# Centre the dialog over the launcher window, then make it modal.
+		dialog.update_idletasks()
+		self._center_window_over_root(dialog)
+		dialog.grab_set()
+		dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
+		self.root.wait_window(dialog)
+
+		return result['mode'], result['extra']
+
+	def execute_script(self, script_name, annotation_mode=None, annotation_extra=None):
 		# script path is relative to this launcher file
 		launcher_dir = Path(__file__).resolve().parent
 		script_path = launcher_dir / script_name
@@ -683,9 +863,17 @@ secondary_static_hotkeys = 0
 		env['PYTHONUNBUFFERED'] = '1'
 		env['BEHAVEAI_PROJECT'] = str(self.current_project)
 
+		# Build the command. The annotation start-mode flags are only appended when
+		# set, so every other script is launched exactly as before.
+		cmd = [sys.executable, '-u', str(script_path), str(self.current_project)]
+		if annotation_mode is not None:
+			cmd += ['--annotation-mode', str(annotation_mode)]
+		if annotation_extra is not None:
+			cmd += ['--annotation-extra', str(annotation_extra)]
+
 		# run with project's cwd so outputs and generation happen inside project folder
 		try:
-			proc = subprocess.Popen([sys.executable, '-u', str(script_path), str(self.current_project)],
+			proc = subprocess.Popen(cmd,
 									stdout=subprocess.PIPE,
 									stderr=subprocess.PIPE,
 									bufsize=0,
