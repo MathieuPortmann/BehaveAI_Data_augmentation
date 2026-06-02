@@ -458,6 +458,15 @@ class SettingsEditorApp(tk.Tk):
 		self.foal_size_ratio_var       = tk.DoubleVar(value=0.7)
 		self.body_len_ref_scope_var    = tk.StringVar(value='video')
 
+		# Interaction features / graph parameters
+		self.complex_max_dist_var       = tk.DoubleVar(value=400.0)
+		self.complex_min_duration_var   = tk.IntVar(value=10)
+		self.complex_contact_iou_var    = tk.DoubleVar(value=0.05)
+		self.complex_contact_dist_var   = tk.DoubleVar(value=1.5)
+		self.complex_window_var         = tk.IntVar(value=30)
+		self.interaction_granularity_var = tk.StringVar(value='per_interaction')
+		self.interaction_weight_var     = tk.StringVar(value='duration')
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -1004,6 +1013,60 @@ class SettingsEditorApp(tk.Tk):
 			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
 		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
 
+		# TAB: Interaction features / graph (TASK 4 primary output)
+		tab_int = ttk.Frame(notebook)
+		notebook.add(tab_int, text='Interaction')
+		ir = 0
+		ttk.Label(tab_int, text='Interaction features & graph',
+			font=('TkDefaultFont', 10, 'bold')).grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); ir += 1
+		ttk.Label(tab_int, text='Per-frame dyadic/group features aggregated into the interaction graph (edges/nodes CSVs).',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
+
+		ttk.Label(tab_int, text='Max interaction distance (px)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=1.0, to=100000.0, increment=10.0,
+			textvariable=self.complex_max_dist_var, width=8, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+		ttk.Label(tab_int, text='Pairs farther apart than this are not treated as interacting.',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
+
+		ttk.Label(tab_int, text='Min interaction duration (frames)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=1, to=100000,
+			textvariable=self.complex_min_duration_var, width=8, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+
+		ttk.Label(tab_int, text='Contact IoU threshold').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=0.0, to=1.0, increment=0.01,
+			textvariable=self.complex_contact_iou_var, width=6, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+
+		ttk.Label(tab_int, text='Contact distance (body lengths)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=0.0, to=50.0, increment=0.1,
+			textvariable=self.complex_contact_dist_var, width=6, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+
+		ttk.Label(tab_int, text='Window length (frames)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=1, to=100000,
+			textvariable=self.complex_window_var, width=8, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+
+		ttk.Label(tab_int, text='Edge granularity').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_int, values=['per_interaction', 'per_segment', 'per_frame'],
+			textvariable=self.interaction_granularity_var, state='readonly', width=16).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+		ttk.Label(tab_int, text='Changing this regenerates and overwrites the edges file.',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
+		self.interaction_granularity_var.trace_add('write', lambda *a: self._set_dirty())
+
+		ttk.Label(tab_int, text='Edge weight metric').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_int, values=['duration', 'proximity', 'combined'],
+			textvariable=self.interaction_weight_var, state='readonly', width=16).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+		self.interaction_weight_var.trace_add('write', lambda *a: self._set_dirty())
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -1184,6 +1247,15 @@ class SettingsEditorApp(tk.Tk):
 		self.subgroup_min_stable_var.set(int(float(d.get('subgroup_min_stable_frames', fallback='10'))))
 		self.foal_size_ratio_var.set(float(d.get('foal_size_ratio_thresh', fallback='0.7')))
 		self.body_len_ref_scope_var.set(d.get('body_len_ref_scope', fallback='video'))
+
+		# interaction features / graph
+		self.complex_max_dist_var.set(float(d.get('complex_max_interaction_distance', fallback='400')))
+		self.complex_min_duration_var.set(int(float(d.get('complex_min_duration_frames', fallback='10'))))
+		self.complex_contact_iou_var.set(float(d.get('complex_contact_iou_thresh', fallback='0.05')))
+		self.complex_contact_dist_var.set(float(d.get('complex_contact_dist_bodylen', fallback='1.5')))
+		self.complex_window_var.set(int(float(d.get('complex_window_frames', fallback='30'))))
+		self.interaction_granularity_var.set(d.get('interaction_edge_granularity', fallback='per_interaction'))
+		self.interaction_weight_var.set(d.get('interaction_weight_metric', fallback='duration'))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1637,6 +1709,15 @@ class SettingsEditorApp(tk.Tk):
 		new_default['subgroup_min_stable_frames'] = str(self.subgroup_min_stable_var.get())
 		new_default['foal_size_ratio_thresh'] = str(self.foal_size_ratio_var.get())
 		new_default['body_len_ref_scope'] = self.body_len_ref_scope_var.get()
+
+		# interaction features / graph
+		new_default['complex_max_interaction_distance'] = str(self.complex_max_dist_var.get())
+		new_default['complex_min_duration_frames'] = str(self.complex_min_duration_var.get())
+		new_default['complex_contact_iou_thresh'] = str(self.complex_contact_iou_var.get())
+		new_default['complex_contact_dist_bodylen'] = str(self.complex_contact_dist_var.get())
+		new_default['complex_window_frames'] = str(self.complex_window_var.get())
+		new_default['interaction_edge_granularity'] = self.interaction_granularity_var.get()
+		new_default['interaction_weight_metric'] = self.interaction_weight_var.get()
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:

@@ -688,6 +688,24 @@ foal_size_ratio_thresh = 0.7
 # Reference body-length scope: video | segment (segment recomputes on scale drift).
 body_len_ref_scope = video
 
+# === Complex behaviours / interaction features ===
+# Pairs farther apart than this (px) are ignored as interactions.
+complex_max_interaction_distance = 400
+# Minimum length (frames) of an interaction episode (per_segment granularity).
+complex_min_duration_frames = 10
+# Box IoU above this counts as contact.
+complex_contact_iou_thresh = 0.05
+# Distance (in body lengths) below this counts as contact.
+complex_contact_dist_bodylen = 1.5
+# Window length (frames) for aggregating features for the model.
+complex_window_frames = 30
+
+# === Interaction graph (primary output) ===
+# Edge granularity: per_interaction | per_segment | per_frame.
+interaction_edge_granularity = per_interaction
+# Edge weight metric: duration | proximity | combined.
+interaction_weight_metric = duration
+
 """
 
 			ini_path.write_text(ini_template)
