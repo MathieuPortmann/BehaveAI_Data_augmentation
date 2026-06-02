@@ -444,6 +444,14 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_window_var  = tk.IntVar(value=7)
 		self.drone_fallback_smoothing_var = tk.BooleanVar(value=True)
 
+		# Intra-video Re-Identification parameters
+		self.reid_enabled_var          = tk.BooleanVar(value=True)
+		self.reid_method_var           = tk.StringVar(value='histogram')
+		self.reid_similarity_var       = tk.DoubleVar(value=0.75)
+		self.reid_max_disappeared_var  = tk.DoubleVar(value=180.0)
+		self.reid_max_position_var     = tk.DoubleVar(value=500.0)
+		self.ab_min_classified_var     = tk.IntVar(value=5)
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -890,6 +898,61 @@ class SettingsEditorApp(tk.Tk):
 			variable=self.drone_fallback_smoothing_var, command=self._set_dirty).grid(
 			row=17, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
 
+		# TAB: Re-Identification (intra-video) — placed after Tracking, before Display
+		tab_reid = ttk.Frame(notebook)
+		notebook.add(tab_reid, text='Re-Identification')
+
+		_help_font = ('TkDefaultFont', 8, 'italic')
+		rr = 0
+
+		ttk.Checkbutton(tab_reid, text='Enable intra-video Re-ID',
+			variable=self.reid_enabled_var, command=self._set_dirty).grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); rr += 1
+		ttk.Label(tab_reid, text='Give a horse the same id after it reappears within the same video.',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		ttk.Label(tab_reid, text='Appearance method').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_reid, values=['histogram', 'embedding'],
+			textvariable=self.reid_method_var, state='readonly', width=12).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='histogram = colour, no torch; embedding needs torch (falls back to histogram).',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+		self.reid_method_var.trace_add('write', lambda *a: self._set_dirty())
+
+		ttk.Label(tab_reid, text='Similarity threshold').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
+			textvariable=self.reid_similarity_var, width=6, command=self._set_dirty).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='Appearance similarity gate (cosine); only a weak tie-breaker.',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		ttk.Label(tab_reid, text='Max disappeared (seconds)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
+			textvariable=self.reid_max_disappeared_var, width=10, command=self._set_dirty).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='Registry pruning guard only — NOT a hard match limit.',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		ttk.Label(tab_reid, text='Max position distance (px)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
+			textvariable=self.reid_max_position_var, width=10, command=self._set_dirty).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='Spatial plausibility gate — the primary matching signal.',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		ttk.Label(tab_reid, text='Min classified frames (group member)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_reid, from_=0, to=100000,
+			textvariable=self.ab_min_classified_var, width=8, command=self._set_dirty).grid(
+			row=rr, column=1, sticky='w', padx=8); rr += 1
+		ttk.Label(tab_reid, text='Activity budget: min frames with a known behaviour to be a group_member (0 = skip).',
+			font=_help_font, foreground='grey').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -1056,6 +1119,14 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_var.set(d.get('drone_correction_smoothing', fallback='savgol'))
 		self.drone_smoothing_window_var.set(int(float(d.get('drone_correction_smoothing_window', fallback='7'))))
 		self.drone_fallback_smoothing_var.set(self._str_to_bool(d.get('drone_correction_fallback_smoothing', fallback='true')))
+
+		# intra-video re-identification
+		self.reid_enabled_var.set(self._str_to_bool(d.get('reid_enabled', fallback='true')))
+		self.reid_method_var.set(d.get('reid_method', fallback='histogram'))
+		self.reid_similarity_var.set(float(d.get('reid_similarity_threshold', fallback='0.75')))
+		self.reid_max_disappeared_var.set(float(d.get('reid_max_disappeared_seconds', fallback='180.0')))
+		self.reid_max_position_var.set(float(d.get('reid_max_position_distance', fallback='500.0')))
+		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1495,6 +1566,14 @@ class SettingsEditorApp(tk.Tk):
 		new_default['drone_correction_smoothing'] = self.drone_smoothing_var.get()
 		new_default['drone_correction_smoothing_window'] = str(self.drone_smoothing_window_var.get())
 		new_default['drone_correction_fallback_smoothing'] = str(self.drone_fallback_smoothing_var.get()).lower()
+
+		# intra-video re-identification
+		new_default['reid_enabled'] = str(self.reid_enabled_var.get()).lower()
+		new_default['reid_method'] = self.reid_method_var.get()
+		new_default['reid_similarity_threshold'] = str(self.reid_similarity_var.get())
+		new_default['reid_max_disappeared_seconds'] = str(self.reid_max_disappeared_var.get())
+		new_default['reid_max_position_distance'] = str(self.reid_max_position_var.get())
+		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:

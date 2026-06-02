@@ -41,6 +41,11 @@ def load_activity_budget_config(config_path):
         'group_type_separator':  d.get('ab_group_type_separator',  '_'),
         'group_type_field_index': int(d.get('ab_group_type_field_index', '4')),
         'analysis_duration_s':   float(d.get('ab_analysis_duration_s',  '0')),
+        # Minimum number of classified (behavior != 'unknown') frames a track
+        # needs to count as a group_member (0 = skip this criterion). The fallback
+        # is 0 so projects whose INI predates this key behave exactly as before;
+        # the new-project template / settings GUI default it to 5.
+        'min_classified_frames': int(float(d.get('ab_min_classified_frames', '0'))),
     }
 
 
@@ -191,9 +196,17 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
 
 def flag_strangers(tracks, max_frame, video_width, video_height,
                    min_presence_ratio, border_zone_ratio,
-                   manual_exclude_ids):
+                   manual_exclude_ids, min_classified_frames=0):
     """
     Decide for each track_id whether it is a group_member or a stranger.
+
+    A group_member must satisfy all of:
+      1. presence_ratio >= min_presence_ratio,
+      2. first appearance NOT in the border zone (when combined with short presence),
+      3. at least min_classified_frames frames with behavior != 'unknown'
+         (0 = skip this criterion).
+
+    This is intra-video only — there is no inter-video / cross-session logic.
 
     Returns a dict: track_id -> {'individual_type': str,
                                   'auto_flagged': bool,
@@ -221,6 +234,12 @@ def flag_strangers(tracks, max_frame, video_width, video_height,
             in_border = (fx < bx or fx > video_width - bx or
                          fy < by or fy > video_height - by)
 
+        # Count classified frames (behavior != 'unknown') for criterion 3.
+        n_classified = sum(1 for r in rows
+                           if r.get('behavior') and r['behavior'] != 'unknown')
+        is_unclassified = (min_classified_frames > 0
+                           and n_classified < min_classified_frames)
+
         # Determine flag reason
         is_manual   = tid in manual_exclude_ids
         is_short    = presence_ratio < min_presence_ratio
@@ -232,11 +251,13 @@ def flag_strangers(tracks, max_frame, video_width, video_height,
             reason = 'short_presence+border_entry'
         elif is_short:
             reason = 'short_presence'
+        elif is_unclassified:
+            reason = 'insufficient_classified_frames'
         else:
             reason = ''
 
-        is_stranger  = is_manual or is_short
-        auto_flagged = (is_short or is_border) and not is_manual
+        is_stranger  = is_manual or is_short or is_unclassified
+        auto_flagged = (is_short or is_border or is_unclassified) and not is_manual
 
         results[tid] = {
             'individual_type': 'stranger' if is_stranger else 'group_member',
@@ -495,7 +516,7 @@ def run_activity_budget(config_path, fps_default=30.0):
         flag_info = flag_strangers(
             tracks, max_frame, video_width, video_height,
             cfg['min_presence_ratio'], cfg['border_zone_ratio'],
-            manual_exclude
+            manual_exclude, min_classified_frames=cfg['min_classified_frames']
         )
 
         # Compute individual budgets

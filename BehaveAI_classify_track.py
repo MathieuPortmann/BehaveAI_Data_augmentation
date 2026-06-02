@@ -313,6 +313,14 @@ try:
 	secondary_conf_thresh = float(config['DEFAULT'].get('secondary_conf_thresh', '0.5'))
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
+
+	# Intra-video Re-Identification parameters (TASK 2). reid_enabled=false ->
+	# original tracker behaviour exactly.
+	reid_enabled = config['DEFAULT'].get('reid_enabled', 'true').lower() == 'true'
+	reid_method = config['DEFAULT'].get('reid_method', 'histogram')
+	reid_similarity_threshold = float(config['DEFAULT'].get('reid_similarity_threshold', '0.75'))
+	reid_max_disappeared_seconds = float(config['DEFAULT'].get('reid_max_disappeared_seconds', '180.0'))
+	reid_max_position_distance = float(config['DEFAULT'].get('reid_max_position_distance', '500.0'))
 	centroid_merge_thresh = float(config['DEFAULT'].get('centroid_merge_thresh', '50'))
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
@@ -633,12 +641,17 @@ if __name__ == '__main__':
 
 	# --- TRACKER CLASS -------------------------------------------------------
 	class KalmanTracker:
-		def __init__(self, dist_thresh, max_missed):
+		def __init__(self, dist_thresh, max_missed, reid_registry=None):
 			self.next_id = 1
 			self.tracks = {}  # tid -> {'kf': KalmanFilter, 'missed': int}
 			self.prev_positions = {}  # Track previous positions
 			self.dist_thresh = dist_thresh
 			self.max_missed = max_missed
+			# Optional intra-video Re-ID. When None, the tracker behaves exactly
+			# as before. last_known_crops keeps the most recent BGR crop per active
+			# id so a descriptor can be computed at deletion time only.
+			self.reid_registry = reid_registry
+			self.last_known_crops = {}
 
 		def _create_kf(self, initial_pt):
 
@@ -700,10 +713,24 @@ if __name__ == '__main__':
 			for tid in to_drop:
 				del self.tracks[tid]
 
-		def update(self, detections):
+		def update(self, detections, detection_crops=None, frame_number=None):
 
 			#detections: list of (x, y) centroids
+			#detection_crops: optional list of BGR crops aligned with detections (Re-ID)
+			#frame_number: current frame index (required for Re-ID register/prune)
 			#Returns a dict: detection_index -> track_id
+
+			# Re-ID is only active when a registry, crops and a frame number are all
+			# provided; otherwise every block below is skipped and behaviour is unchanged.
+			reid_on = (self.reid_registry is not None
+					   and detection_crops is not None
+					   and frame_number is not None)
+
+			def _remember_crop(tid, det_index):
+				if detection_crops is not None and det_index < len(detection_crops):
+					crop = detection_crops[det_index]
+					if crop is not None:
+						self.last_known_crops[tid] = crop
 
 			# 1) Predict all tracks forward one step
 			preds = self.predict_all()  # list of (tid, (px, py))
@@ -743,6 +770,7 @@ if __name__ == '__main__':
 
 					# Update previous position
 					self.prev_positions[tid] = (dpt[0], dpt[1])
+					_remember_crop(tid, c)
 
 			# 4) Process unassigned detections
 			for i, dpt in enumerate(detections):
@@ -765,16 +793,40 @@ if __name__ == '__main__':
 					# Update previous position
 					self.prev_positions[best_tid] = (dpt[0], dpt[1])
 					matched_tracks.add(best_tid)  # Add to matched tracks
+					_remember_crop(best_tid, i)
 
 				else:
-					# New track
-					tid = self.next_id
-					kf = self._create_kf(dpt)
-					self.tracks[tid] = {'kf': kf, 'missed': 0}
-					assigned_detects[i] = tid
-					self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
-					matched_tracks.add(tid)  # Add to matched tracks
-					self.next_id += 1
+					# Before creating a brand-new id, try to recover a lost track
+					# via intra-video Re-ID (spatio-temporal gate + appearance).
+					reid_id = None
+					crop = None
+					if reid_on and i < len(detection_crops):
+						crop = detection_crops[i]
+						descriptor = self.reid_registry.extract_descriptor(crop)
+						reid_id = self.reid_registry.find_match(descriptor, dpt, frame_number)
+
+					if reid_id is not None:
+						# Recover the old id (do NOT consume next_id).
+						tid = reid_id
+						kf = self._create_kf(dpt)
+						self.tracks[tid] = {'kf': kf, 'missed': 0}
+						assigned_detects[i] = tid
+						self.prev_positions[tid] = (dpt[0], dpt[1])
+						matched_tracks.add(tid)
+						if crop is not None:
+							self.last_known_crops[tid] = crop
+						print(f"Re-ID: track {tid} recovered at frame {frame_number} "
+							  f"(score={self.reid_registry.last_match_score:.3f})")
+					else:
+						# New track
+						tid = self.next_id
+						kf = self._create_kf(dpt)
+						self.tracks[tid] = {'kf': kf, 'missed': 0}
+						assigned_detects[i] = tid
+						self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
+						matched_tracks.add(tid)  # Add to matched tracks
+						_remember_crop(tid, i)
+						self.next_id += 1
 
 			# 5) Handle unmatched tracks
 			for tid in list(self.tracks.keys()):
@@ -791,9 +843,24 @@ if __name__ == '__main__':
 
 					# Remove track if missed too many times
 					if self.tracks[tid]['missed'] > self.max_missed:
+						# Register the lost track for possible Re-ID before deleting it.
+						if reid_on:
+							pos = self.prev_positions.get(tid)
+							if pos is not None:
+								crop = self.last_known_crops.get(tid)
+								desc = (self.reid_registry.extract_descriptor(crop)
+										if crop is not None else None)
+								self.reid_registry.register_lost_track(
+									tid, desc, pos, frame_number)
 						del self.tracks[tid]
 						if tid in self.prev_positions:
 							del self.prev_positions[tid]
+						if tid in self.last_known_crops:
+							del self.last_known_crops[tid]
+
+			# Prune the Re-ID registry once per frame (pruning guard only).
+			if reid_on:
+				self.reid_registry.prune_old_entries(frame_number)
 
 			return assigned_detects
 
@@ -837,7 +904,25 @@ if __name__ == '__main__':
 				model_motion = YOLO(primary_motion_model_path)
 
 
-		tracker = KalmanTracker(match_distance_thresh, delete_after_missed)
+		# Build the optional Re-ID registry. max_disappeared is a pruning guard
+		# (in frames) derived from the per-video fps; it is NOT a hard match limit.
+		reid_registry = None
+		if reid_enabled:
+			try:
+				from BehaveAI_reid import ReIDRegistry
+				_max_disappeared_frames = int(reid_max_disappeared_seconds * (fps if fps and fps > 0 else 25.0))
+				reid_registry = ReIDRegistry(
+					method=reid_method,
+					similarity_threshold=reid_similarity_threshold,
+					max_position_distance=reid_max_position_distance,
+					max_disappeared_frames=_max_disappeared_frames)
+				print(f"Intra-video Re-ID enabled (method={reid_registry.method}).")
+			except Exception as e:
+				print(f"Re-ID unavailable ({e}); continuing without Re-ID.")
+				reid_registry = None
+
+		tracker = KalmanTracker(match_distance_thresh, delete_after_missed,
+								reid_registry=reid_registry)
 
 		prev_frames, frame_idx = None, 0
 		csv_file = open(os.path.join(output_folder, base + "_tracking.csv"), 'w', newline='')
@@ -1119,7 +1204,22 @@ if __name__ == '__main__':
 
 				# Prepare for tracking
 				cents = [d['centroid'] for d in processed_detections]
-				assignment = tracker.update(cents)
+
+				# Build BGR crops (from the static frame) aligned with the detections,
+				# used only for Re-ID descriptors. Skip crops smaller than 10x10 px.
+				det_crops = None
+				if reid_registry is not None:
+					det_crops = []
+					for d in processed_detections:
+						cx1, cy1, cx2, cy2 = d['coords']
+						cx1 = max(0, cx1); cy1 = max(0, cy1)
+						if (cx2 - cx1) >= 10 and (cy2 - cy1) >= 10:
+							crop = frame[cy1:cy2, cx1:cx2]
+							det_crops.append(crop.copy() if crop.size > 0 else None)
+						else:
+							det_crops.append(None)
+
+				assignment = tracker.update(cents, detection_crops=det_crops, frame_number=frame_idx)
 
 				# ~ frame = motion_image ## enable this line ot save the motion video instead of static
 

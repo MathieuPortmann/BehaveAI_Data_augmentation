@@ -664,6 +664,20 @@ drone_correction_smoothing_window = 7
 # If static features are persistently too few, smooth-only (no optical-flow correction).
 drone_correction_fallback_smoothing = true
 
+# === Intra-video Re-Identification ===
+# Master switch for re-identifying horses that reappear within the same video.
+reid_enabled = true
+# Appearance descriptor: histogram (no torch) | embedding (needs torch).
+reid_method = histogram
+# Appearance similarity gate (cosine); weak tie-breaker only.
+reid_similarity_threshold = 0.75
+# Registry pruning guard in seconds (NOT a hard match limit).
+reid_max_disappeared_seconds = 180.0
+# Spatial plausibility gate in px (primary matching signal).
+reid_max_position_distance = 500.0
+# Min classified frames for group_member in the activity budget (0 = skip).
+ab_min_classified_frames = 5
+
 """
 
 			ini_path.write_text(ini_template)
