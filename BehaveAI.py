@@ -646,6 +646,24 @@ secondary_static_classes = 0
 secondary_static_colors = 0
 secondary_static_hotkeys = 0
 
+# === Drone motion correction ===
+# Master switch; off = no behaviour change.
+drone_correction_enabled = false
+# Global background-motion model: affine | homography.
+drone_correction_model = affine
+# Box dilation (fraction of box size) when masking horses out of the background.
+drone_correction_box_dilation = 0.20
+# Minimum background features required to trust the estimated transform.
+drone_correction_min_features = 30
+# Residual flow std (px) above which a frame is flagged 'uncertain'.
+drone_correction_uncertain_std = 8.0
+# Centroid smoothing before differentiating: savgol | moving_average | none.
+drone_correction_smoothing = savgol
+# Odd window length for the smoothing filter.
+drone_correction_smoothing_window = 7
+# If static features are persistently too few, smooth-only (no optical-flow correction).
+drone_correction_fallback_smoothing = true
+
 """
 
 			ini_path.write_text(ini_template)

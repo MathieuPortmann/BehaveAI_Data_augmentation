@@ -1281,3 +1281,14 @@ if __name__ == '__main__':
 		import traceback
 		print(f"Activity budget analysis failed: {e}")
 		traceback.print_exc()
+
+	# Auto-launch drone motion correction when enabled (disabled -> no behaviour change)
+	try:
+		if config['DEFAULT'].get('drone_correction_enabled', 'false').lower() == 'true':
+			from BehaveAI_drone_correction import run_drone_correction
+			print("\nLaunching drone motion correction...")
+			run_drone_correction(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Drone motion correction failed: {e}")
+		traceback.print_exc()

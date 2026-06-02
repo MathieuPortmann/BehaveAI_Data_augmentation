@@ -434,6 +434,16 @@ class SettingsEditorApp(tk.Tk):
 		self.ab_group_type_separator_var  = tk.StringVar(value='_')
 		self.ab_group_type_field_index_var = tk.IntVar(value=4)
 
+		# Drone motion correction parameters
+		self.drone_enabled_var           = tk.BooleanVar(value=False)
+		self.drone_model_var             = tk.StringVar(value='affine')
+		self.drone_box_dilation_var      = tk.DoubleVar(value=0.20)
+		self.drone_min_features_var      = tk.IntVar(value=30)
+		self.drone_uncertain_std_var     = tk.DoubleVar(value=8.0)
+		self.drone_smoothing_var         = tk.StringVar(value='savgol')
+		self.drone_smoothing_window_var  = tk.IntVar(value=7)
+		self.drone_fallback_smoothing_var = tk.BooleanVar(value=True)
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -836,6 +846,50 @@ class SettingsEditorApp(tk.Tk):
 		self.kalman_meas_var = tk.DoubleVar(value=0.2)
 		ttk.Entry(tab4, textvariable=self.kalman_meas_var).grid(row=7, column=1, sticky='w', padx=8)
 
+		# Drone motion correction subsection (post-processing on the tracking CSV)
+		ttk.Separator(tab4, orient='horizontal').grid(
+			row=8, column=0, columnspan=2, sticky='ew', padx=8, pady=(12, 6))
+		ttk.Label(tab4, text='Drone motion correction').grid(row=9, column=0, sticky='w', padx=8)
+		ttk.Checkbutton(tab4, text='Enable drone correction',
+			variable=self.drone_enabled_var, command=self._set_dirty).grid(
+			row=10, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
+
+		ttk.Label(tab4, text='Transform model').grid(row=11, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab4, values=['affine', 'homography'],
+			textvariable=self.drone_model_var, state='readonly', width=12).grid(
+			row=11, column=1, sticky='w', padx=8)
+		self.drone_model_var.trace_add('write', lambda *a: self._set_dirty())
+
+		ttk.Label(tab4, text='Box dilation (fraction)').grid(row=12, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab4, from_=0.0, to=1.0, increment=0.05,
+			textvariable=self.drone_box_dilation_var, width=6, command=self._set_dirty).grid(
+			row=12, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab4, text='Min background features').grid(row=13, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab4, from_=1, to=100000,
+			textvariable=self.drone_min_features_var, width=8, command=self._set_dirty).grid(
+			row=13, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab4, text='Uncertain residual std (px)').grid(row=14, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab4, from_=0.0, to=1000.0, increment=0.5,
+			textvariable=self.drone_uncertain_std_var, width=8, command=self._set_dirty).grid(
+			row=14, column=1, sticky='w', padx=8)
+
+		ttk.Label(tab4, text='Smoothing').grid(row=15, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab4, values=['savgol', 'moving_average', 'none'],
+			textvariable=self.drone_smoothing_var, state='readonly', width=14).grid(
+			row=15, column=1, sticky='w', padx=8)
+		self.drone_smoothing_var.trace_add('write', lambda *a: self._set_dirty())
+
+		ttk.Label(tab4, text='Smoothing window (odd)').grid(row=16, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab4, from_=3, to=99, increment=2,
+			textvariable=self.drone_smoothing_window_var, width=6, command=self._set_dirty).grid(
+			row=16, column=1, sticky='w', padx=8)
+
+		ttk.Checkbutton(tab4, text='Fallback to smoothing-only when features scarce',
+			variable=self.drone_fallback_smoothing_var, command=self._set_dirty).grid(
+			row=17, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -992,6 +1046,16 @@ class SettingsEditorApp(tk.Tk):
 		self.delete_after_var.set(int(d.get('delete_after_missed', fallback='5')))
 		self.centroid_merge_var.set(int(d.get('centroid_merge_thresh', fallback='50')))
 		self.iou_var.set(float(d.get('iou_thresh', fallback='0.4')))
+
+		# drone motion correction
+		self.drone_enabled_var.set(self._str_to_bool(d.get('drone_correction_enabled', fallback='false')))
+		self.drone_model_var.set(d.get('drone_correction_model', fallback='affine'))
+		self.drone_box_dilation_var.set(float(d.get('drone_correction_box_dilation', fallback='0.20')))
+		self.drone_min_features_var.set(int(float(d.get('drone_correction_min_features', fallback='30'))))
+		self.drone_uncertain_std_var.set(float(d.get('drone_correction_uncertain_std', fallback='8.0')))
+		self.drone_smoothing_var.set(d.get('drone_correction_smoothing', fallback='savgol'))
+		self.drone_smoothing_window_var.set(int(float(d.get('drone_correction_smoothing_window', fallback='7'))))
+		self.drone_fallback_smoothing_var.set(self._str_to_bool(d.get('drone_correction_fallback_smoothing', fallback='true')))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1421,6 +1485,16 @@ class SettingsEditorApp(tk.Tk):
 		new_default['delete_after_missed'] = str(self.delete_after_var.get())
 		new_default['centroid_merge_thresh'] = str(self.centroid_merge_var.get())
 		new_default['iou_thresh'] = str(self.iou_var.get())
+
+		# drone motion correction
+		new_default['drone_correction_enabled'] = str(self.drone_enabled_var.get()).lower()
+		new_default['drone_correction_model'] = self.drone_model_var.get()
+		new_default['drone_correction_box_dilation'] = str(self.drone_box_dilation_var.get())
+		new_default['drone_correction_min_features'] = str(self.drone_min_features_var.get())
+		new_default['drone_correction_uncertain_std'] = str(self.drone_uncertain_std_var.get())
+		new_default['drone_correction_smoothing'] = self.drone_smoothing_var.get()
+		new_default['drone_correction_smoothing_window'] = str(self.drone_smoothing_window_var.get())
+		new_default['drone_correction_fallback_smoothing'] = str(self.drone_fallback_smoothing_var.get()).lower()
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
