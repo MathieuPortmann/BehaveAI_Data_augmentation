@@ -137,6 +137,7 @@ class ScriptRunnerApp:
 			("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
 			("Augment Dataset", "BehaveAI_augmentation.py"),
 			("Train & batch classify", "BehaveAI_classify_track.py"),
+			("Train complex model", "BehaveAI_complex_model.py"),
 			("Live", "BehaveAI_live.py"),
 		]
 		for (label_text, script_name) in btn_names:
