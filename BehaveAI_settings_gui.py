@@ -384,6 +384,74 @@ class ClassListEditor(ttk.Frame):
 		return out
 
 
+# ----------------------- Complex-behaviour label editor -----------------------
+
+class ComplexLabelEditor(ttk.Frame):
+	"""Compact editor for the single user-editable complex-behaviour list.
+
+	Each row is a behaviour name + a single-character hotkey (no colour/secondary,
+	unlike ClassListEditor). get() returns a list of (name, hotkey) tuples.
+	"""
+
+	def __init__(self, master, on_change=None, *args, **kwargs):
+		super().__init__(master, *args, **kwargs)
+		self.on_change = on_change
+		self.rows = []
+
+		header = ttk.Frame(self)
+		header.pack(fill='x')
+		ttk.Label(header, text='Complex behaviours (dyadic & group)',
+				  font=('TkDefaultFont', 9, 'bold')).pack(side='left')
+		ttk.Button(header, text='Add', command=lambda: self.add_row()).pack(side='right')
+		ttk.Button(header, text='Clear', command=self.clear).pack(side='right', padx=(0, 6))
+
+		cols = ttk.Frame(self); cols.pack(fill='x', pady=(2, 0))
+		ttk.Label(cols, text='name', width=24).pack(side='left')
+		ttk.Label(cols, text='hotkey', width=8).pack(side='left')
+
+		self.rows_frame = ttk.Frame(self)
+		self.rows_frame.pack(fill='x')
+
+	def add_row(self, name='', hotkey=''):
+		row = ttk.Frame(self.rows_frame)
+		name_var = tk.StringVar(value=name)
+		hk_var = tk.StringVar(value=hotkey)
+		name_e = ttk.Entry(row, textvariable=name_var, width=24)
+		hk_e = ttk.Entry(row, textvariable=hk_var, width=8)
+		name_e.pack(side='left', padx=(0, 4))
+		hk_e.pack(side='left', padx=(0, 4))
+
+		def _remove():
+			if entry in self.rows:
+				self.rows.remove(entry)
+			row.destroy()
+			if self.on_change:
+				self.on_change()
+
+		ttk.Button(row, text='Remove', command=_remove).pack(side='left')
+		row.pack(fill='x', pady=1, anchor='w')
+		entry = (name_var, hk_var)
+		self.rows.append(entry)
+		if self.on_change:
+			self.on_change()
+
+	def clear(self):
+		for child in list(self.rows_frame.winfo_children()):
+			child.destroy()
+		self.rows = []
+		if self.on_change:
+			self.on_change()
+
+	def get(self):
+		"""Return [(name, hotkey), ...] skipping rows with an empty name."""
+		out = []
+		for name_var, hk_var in self.rows:
+			name = name_var.get().strip()
+			hk = hk_var.get().strip()
+			if name:
+				out.append((name, hk))
+		return out
+
 
 # ----------------------- Main app -----------------------
 
@@ -466,6 +534,10 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_window_var         = tk.IntVar(value=30)
 		self.interaction_granularity_var = tk.StringVar(value='per_interaction')
 		self.interaction_weight_var     = tk.StringVar(value='duration')
+
+		# Complex-behaviour model selectors
+		self.complex_model_type_var        = tk.StringVar(value='baseline')
+		self.complex_baseline_clf_var      = tk.StringVar(value='random_forest')
 
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
@@ -571,6 +643,29 @@ class SettingsEditorApp(tk.Tk):
 			return False, "\n\n".join(errors)
 
 		return True, ""
+
+	def _validate_complex_hotkeys(self):
+		"""Validate complex-behaviour hotkeys: a provided hotkey must be a single
+		character, unique among complex behaviours, and not reserved. An empty
+		hotkey is allowed (auto-assigned by the annotation tool). Returns a list
+		of error strings."""
+		errors = []
+		used = {}
+		for name, hk in self.complex_editor.get():
+			if not hk:
+				continue  # empty -> auto-assigned later
+			if len(hk) != 1:
+				errors.append(f"Hotkey '{hk}' for complex behaviour '{name}' must be a single character.")
+				continue
+			lk = hk.lower()
+			if lk in RESERVED_HOTKEYS:
+				errors.append(f"Hotkey '{hk}' for complex behaviour '{name}' is reserved.")
+				continue
+			if lk in used:
+				errors.append(f"Hotkey '{hk}' is used by both '{used[lk]}' and '{name}'.")
+			else:
+				used[lk] = name
+		return errors
 
 	def _confirm_modify_structure(self):
 		"""
@@ -1067,6 +1162,34 @@ class SettingsEditorApp(tk.Tk):
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 		self.interaction_weight_var.trace_add('write', lambda *a: self._set_dirty())
 
+		# TAB: Complex Behaviours (label list + model selectors)
+		tab_cb = ttk.Frame(notebook)
+		notebook.add(tab_cb, text='Complex Behaviours')
+
+		self.complex_editor = ComplexLabelEditor(tab_cb, on_change=self._set_dirty)
+		self.complex_editor.pack(fill='x', padx=8, pady=(10, 4), anchor='w')
+		ttk.Label(tab_cb,
+			text='Single user-editable list of dyadic AND group behaviours; each needs a '
+				 'unique single-character hotkey.',
+			font=_help_font, foreground='grey').pack(anchor='w', padx=8, pady=(0, 8))
+
+		mdl = ttk.Frame(tab_cb); mdl.pack(fill='x', padx=8, pady=(4, 0))
+		ttk.Label(mdl, text='Model type').grid(row=0, column=0, sticky='w', pady=(4, 0))
+		ttk.Combobox(mdl, values=['baseline', 'lstm', 'transformer'],
+			textvariable=self.complex_model_type_var, state='readonly', width=16).grid(
+			row=0, column=1, sticky='w', padx=8)
+		ttk.Label(mdl, text='Baseline classifier').grid(row=1, column=0, sticky='w', pady=(6, 0))
+		ttk.Combobox(mdl, values=['random_forest', 'hist_gradient_boosting'],
+			textvariable=self.complex_baseline_clf_var, state='readonly', width=20).grid(
+			row=1, column=1, sticky='w', padx=8)
+		self.complex_model_type_var.trace_add('write', lambda *a: self._set_dirty())
+		self.complex_baseline_clf_var.trace_add('write', lambda *a: self._set_dirty())
+		ttk.Label(tab_cb,
+			text="baseline = scikit-learn classifier; lstm/transformer need torch. "
+				 "Interaction & sub-grouping thresholds are on the 'Interaction' and "
+				 "'Sub-grouping' tabs.",
+			font=_help_font, foreground='grey').pack(anchor='w', padx=8, pady=(8, 0))
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -1256,6 +1379,16 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_window_var.set(int(float(d.get('complex_window_frames', fallback='30'))))
 		self.interaction_granularity_var.set(d.get('interaction_edge_granularity', fallback='per_interaction'))
 		self.interaction_weight_var.set(d.get('interaction_weight_metric', fallback='duration'))
+
+		# complex behaviours list + model selectors
+		self.complex_model_type_var.set(d.get('complex_model_type', fallback='baseline'))
+		self.complex_baseline_clf_var.set(d.get('complex_baseline_classifier', fallback='random_forest'))
+		cb_names = parse_list_field(d.get('complex_behaviours', fallback=''))
+		cb_hotkeys = parse_list_field(d.get('complex_behaviours_hotkeys', fallback=''))
+		self.complex_editor.clear()
+		for i, nm in enumerate(cb_names):
+			hk = cb_hotkeys[i] if i < len(cb_hotkeys) else ''
+			self.complex_editor.add_row(name=nm, hotkey=hk)
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1580,6 +1713,12 @@ class SettingsEditorApp(tk.Tk):
 			return
 
 		# Add secondary class validation
+		complex_hk_errors = self._validate_complex_hotkeys()
+		if complex_hk_errors:
+			messagebox.showwarning("Invalid complex-behaviour hotkeys",
+				"\n".join(complex_hk_errors))
+			return
+
 		secondary_valid, secondary_error = self._validate_secondary_classes()
 		if not secondary_valid:
 			messagebox.showwarning(
@@ -1718,6 +1857,13 @@ class SettingsEditorApp(tk.Tk):
 		new_default['complex_window_frames'] = str(self.complex_window_var.get())
 		new_default['interaction_edge_granularity'] = self.interaction_granularity_var.get()
 		new_default['interaction_weight_metric'] = self.interaction_weight_var.get()
+
+		# complex behaviours list + model selectors
+		cb_items = self.complex_editor.get()
+		new_default['complex_behaviours'] = list_to_field([n for n, _ in cb_items])
+		new_default['complex_behaviours_hotkeys'] = list_to_field([h for _, h in cb_items])
+		new_default['complex_model_type'] = self.complex_model_type_var.get()
+		new_default['complex_baseline_classifier'] = self.complex_baseline_clf_var.get()
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:

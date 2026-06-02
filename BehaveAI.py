@@ -133,6 +133,7 @@ class ScriptRunnerApp:
 		btn_names = [
 			("Settings", "BehaveAI_settings_gui.py"),
 			("Annotate", "BehaveAI_annotation.py"),
+			("Annotate complex", "BehaveAI_annotation_complex.py"),
 			("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
 			("Augment Dataset", "BehaveAI_augmentation.py"),
 			("Train & batch classify", "BehaveAI_classify_track.py"),
@@ -689,6 +690,14 @@ foal_size_ratio_thresh = 0.7
 body_len_ref_scope = video
 
 # === Complex behaviours / interaction features ===
+# Comma-separated, user-editable list of dyadic AND group behaviours.
+complex_behaviours =
+# Parallel comma-separated single-char hotkeys for the behaviours above.
+complex_behaviours_hotkeys =
+# Complex-behaviour model: baseline | lstm | transformer.
+complex_model_type = baseline
+# Baseline classifier: random_forest | hist_gradient_boosting.
+complex_baseline_classifier = random_forest
 # Pairs farther apart than this (px) are ignored as interactions.
 complex_max_interaction_distance = 400
 # Minimum length (frames) of an interaction episode (per_segment granularity).
