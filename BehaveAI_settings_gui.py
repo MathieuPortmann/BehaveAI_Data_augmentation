@@ -452,6 +452,12 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_max_position_var     = tk.DoubleVar(value=500.0)
 		self.ab_min_classified_var     = tk.IntVar(value=5)
 
+		# Sub-grouping (fission-fusion) parameters
+		self.subgroup_eps_bodylen_var  = tk.DoubleVar(value=4.0)
+		self.subgroup_min_stable_var   = tk.IntVar(value=10)
+		self.foal_size_ratio_var       = tk.DoubleVar(value=0.7)
+		self.body_len_ref_scope_var    = tk.StringVar(value='video')
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -953,6 +959,51 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
+		# TAB: Sub-grouping (fission-fusion) — observed spatial clusters per frame
+		tab_sg = ttk.Frame(notebook)
+		notebook.add(tab_sg, text='Sub-grouping')
+		sr = 0
+
+		ttk.Label(tab_sg, text='Sub-grouping (fission-fusion)',
+			font=('TkDefaultFont', 10, 'bold')).grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); sr += 1
+		ttk.Label(tab_sg, text='Partition co-present horses into spatial sub-groups, stable in time.',
+			font=_help_font, foreground='grey').grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); sr += 1
+
+		ttk.Label(tab_sg, text='DBSCAN radius (body lengths)').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_sg, from_=0.5, to=50.0, increment=0.5,
+			textvariable=self.subgroup_eps_bodylen_var, width=6, command=self._set_dirty).grid(
+			row=sr, column=1, sticky='w', padx=8); sr += 1
+		ttk.Label(tab_sg, text='Clustering radius in reference body lengths (not pixels).',
+			font=_help_font, foreground='grey').grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
+
+		ttk.Label(tab_sg, text='Min stable frames').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_sg, from_=1, to=100000,
+			textvariable=self.subgroup_min_stable_var, width=8, command=self._set_dirty).grid(
+			row=sr, column=1, sticky='w', padx=8); sr += 1
+		ttk.Label(tab_sg, text='A sub-group change must persist this many frames (anti-flicker).',
+			font=_help_font, foreground='grey').grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
+
+		ttk.Label(tab_sg, text='Foal size ratio threshold').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_sg, from_=0.0, to=1.0, increment=0.05,
+			textvariable=self.foal_size_ratio_var, width=6, command=self._set_dirty).grid(
+			row=sr, column=1, sticky='w', padx=8); sr += 1
+		ttk.Label(tab_sg, text='body_len / reference below this flags a likely foal.',
+			font=_help_font, foreground='grey').grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
+
+		ttk.Label(tab_sg, text='Body-length reference scope').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_sg, values=['video', 'segment'],
+			textvariable=self.body_len_ref_scope_var, state='readonly', width=12).grid(
+			row=sr, column=1, sticky='w', padx=8); sr += 1
+		ttk.Label(tab_sg, text='video = one reference; segment = recompute on altitude/zoom drift.',
+			font=_help_font, foreground='grey').grid(
+			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
+		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -1127,6 +1178,12 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_max_disappeared_var.set(float(d.get('reid_max_disappeared_seconds', fallback='180.0')))
 		self.reid_max_position_var.set(float(d.get('reid_max_position_distance', fallback='500.0')))
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
+
+		# sub-grouping (fission-fusion)
+		self.subgroup_eps_bodylen_var.set(float(d.get('subgroup_eps_bodylen', fallback='4.0')))
+		self.subgroup_min_stable_var.set(int(float(d.get('subgroup_min_stable_frames', fallback='10'))))
+		self.foal_size_ratio_var.set(float(d.get('foal_size_ratio_thresh', fallback='0.7')))
+		self.body_len_ref_scope_var.set(d.get('body_len_ref_scope', fallback='video'))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1574,6 +1631,12 @@ class SettingsEditorApp(tk.Tk):
 		new_default['reid_max_disappeared_seconds'] = str(self.reid_max_disappeared_var.get())
 		new_default['reid_max_position_distance'] = str(self.reid_max_position_var.get())
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
+
+		# sub-grouping (fission-fusion)
+		new_default['subgroup_eps_bodylen'] = str(self.subgroup_eps_bodylen_var.get())
+		new_default['subgroup_min_stable_frames'] = str(self.subgroup_min_stable_var.get())
+		new_default['foal_size_ratio_thresh'] = str(self.foal_size_ratio_var.get())
+		new_default['body_len_ref_scope'] = self.body_len_ref_scope_var.get()
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:

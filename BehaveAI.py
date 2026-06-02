@@ -678,6 +678,16 @@ reid_max_position_distance = 500.0
 # Min classified frames for group_member in the activity budget (0 = skip).
 ab_min_classified_frames = 5
 
+# === Sub-grouping (fission-fusion) ===
+# DBSCAN radius in reference body lengths.
+subgroup_eps_bodylen = 4.0
+# Persistence (frames) required to accept a sub-group change (anti-flicker).
+subgroup_min_stable_frames = 10
+# body_len_i / body_len_ref below this flags a likely foal.
+foal_size_ratio_thresh = 0.7
+# Reference body-length scope: video | segment (segment recomputes on scale drift).
+body_len_ref_scope = video
+
 """
 
 			ini_path.write_text(ini_template)
