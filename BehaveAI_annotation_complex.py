@@ -403,10 +403,15 @@ class ComplexAnnotator:
 			tk.Radiobutton(conf, text=lvl, value=lvl, variable=self.confidence).pack(side='left')
 
 		tk.Button(right, text="Save segment", command=self._save_segment).pack(fill='x', padx=8, pady=(12, 2))
-		# Deferred to PHASE 10 (TASK 5): pre-populated reviewable candidates.
-		self.load_candidates_btn = tk.Button(right, text="Load candidates (coming soon)",
-											  state='disabled')
+		# Candidate review (TASK 5): pre-populated reviewable segments.
+		self.load_candidates_btn = tk.Button(right, text="Load candidates",
+											 command=self._load_candidates)
 		self.load_candidates_btn.pack(fill='x', padx=8, pady=2)
+		self.cand_list = tk.Listbox(right, height=4)
+		self.cand_list.pack(fill='x', padx=8)
+		tk.Button(right, text="Review selected candidate",
+				  command=self._review_candidate).pack(fill='x', padx=8, pady=2)
+		self.candidates = []
 
 		tk.Label(right, text="Saved segments", font=('TkDefaultFont', 9, 'bold')).pack(anchor='w', padx=8, pady=(10, 0))
 		self.rows_list = tk.Listbox(right, height=8)
@@ -519,6 +524,46 @@ class ComplexAnnotator:
 
 	def _on_row_select(self, event):
 		pass  # selection handled on explicit Edit/Delete
+
+	# ---- Candidate review (TASK 5) ----
+	def _load_candidates(self):
+		"""Load <video>_complex_candidates.csv (heuristic + active-learning proposals)."""
+		path = complex_csv_path(self.output_dir, self.video['stem']).replace(
+			'_complex_behaviours.csv', '_complex_candidates.csv')
+		self.candidates = read_complex_rows(path)
+		self.cand_list.delete(0, 'end')
+		if not self.candidates:
+			self.messagebox.showinfo("No candidates",
+				f"No candidate file found:\n{os.path.basename(path)}\n\nRun "
+				"'Propose candidates' first.")
+			return
+		for r in self.candidates:
+			self.cand_list.insert(
+				'end', f"{r.get('behaviour','')} [{r.get('start_frame','')}-{r.get('end_frame','')}] "
+				f"ids={r.get('track_ids','')} ({r.get('annotator_confidence','')})")
+
+	def _review_candidate(self):
+		"""Load the selected candidate into the editor for confirm/correct (does
+		not consume it; saving appends the corrected version to the behaviours CSV)."""
+		sel = self.cand_list.curselection()
+		if not sel or sel[0] >= len(self.candidates):
+			return
+		r = self.candidates[sel[0]]
+		self.selection = [t for t in str(r.get('track_ids', '')).split(';') if t]
+		try:
+			self.start_frame = int(r.get('start_frame'))
+			self.end_frame = int(r.get('end_frame'))
+		except (ValueError, TypeError):
+			self.start_frame = self.end_frame = None
+		beh = r.get('behaviour', '')
+		if beh in self.behaviours:
+			self.behaviour_combo.current(self.behaviours.index(beh))
+		self._refresh_selection_list()
+		self._refresh_range()
+		if self.start_frame is not None:
+			self.frame_number = self.start_frame
+			self.seek.set(self.frame_number)
+		self.redraw()
 
 	def _delete_row(self):
 		sel = self.rows_list.curselection()

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Videos
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.MP4
+*.AVI
+*.MOV
+*.MKV
+
+# Model directories and weights (never commit trained models)
+model_*/
+*.pt
+*.joblib
+
+# Pooled crop directories
+annot_motion_crop/
+annot_static_crop/
+
+# Generated CSV outputs (additive pipeline artifacts)
+*_tracking.csv
+*_tracking_corrected.csv
+*_subgroups.csv
+*_interaction_edges.csv
+*_interaction_nodes.csv
+*_complex_behaviours.csv
+*_complex_predictions.csv
+*_complex_candidates.csv
+activity_budget_individual.csv
+activity_budget_suspects.csv
+
+# Generated project data and training runs
+projects/
+runs/

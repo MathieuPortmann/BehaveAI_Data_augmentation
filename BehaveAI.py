@@ -138,6 +138,7 @@ class ScriptRunnerApp:
 			("Augment Dataset", "BehaveAI_augmentation.py"),
 			("Train & batch classify", "BehaveAI_classify_track.py"),
 			("Train complex model", "BehaveAI_complex_model.py"),
+			("Propose candidates", "BehaveAI_complex_candidates.py"),
 			("Live", "BehaveAI_live.py"),
 		]
 		for (label_text, script_name) in btn_names:
@@ -709,6 +710,20 @@ complex_contact_iou_thresh = 0.05
 complex_contact_dist_bodylen = 1.5
 # Window length (frames) for aggregating features for the model.
 complex_window_frames = 30
+# Min true-vs-predicted confusion rate to flag a class pair as a merge suggestion.
+complex_confusion_merge_rate = 0.20
+# Minimum predicted probability to emit a complex-behaviour prediction.
+complex_predict_min_proba = 0.5
+# Candidate heuristics (body lengths / frame): speeds below 'low' count as ~still.
+complex_speed_low_bodylen = 0.05
+# Speeds above 'high' count as fast (gallop/chase).
+complex_speed_high_bodylen = 0.25
+# Sub-group polarisation above this counts as aligned (trek/stampede).
+complex_polarisation_high = 0.7
+# Behavioural synchrony above this counts as synchronised.
+complex_synchrony_high = 0.7
+# Number of most-uncertain windows surfaced by active learning.
+complex_candidate_topk = 50
 
 # === Interaction graph (primary output) ===
 # Edge granularity: per_interaction | per_segment | per_frame.

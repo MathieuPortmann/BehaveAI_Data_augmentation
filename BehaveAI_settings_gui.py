@@ -539,6 +539,15 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_model_type_var        = tk.StringVar(value='baseline')
 		self.complex_baseline_clf_var      = tk.StringVar(value='random_forest')
 
+		# Complex-behaviour model thresholds + candidate heuristics
+		self.complex_confusion_merge_rate_var = tk.DoubleVar(value=0.20)
+		self.complex_predict_min_proba_var    = tk.DoubleVar(value=0.5)
+		self.complex_speed_low_var            = tk.DoubleVar(value=0.05)
+		self.complex_speed_high_var           = tk.DoubleVar(value=0.25)
+		self.complex_polarisation_high_var    = tk.DoubleVar(value=0.7)
+		self.complex_synchrony_high_var       = tk.DoubleVar(value=0.7)
+		self.complex_candidate_topk_var       = tk.IntVar(value=50)
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -1190,6 +1199,30 @@ class SettingsEditorApp(tk.Tk):
 				 "'Sub-grouping' tabs.",
 			font=_help_font, foreground='grey').pack(anchor='w', padx=8, pady=(8, 0))
 
+		# Model + candidate-heuristic thresholds
+		thr = ttk.LabelFrame(tab_cb, text='Model & candidate thresholds')
+		thr.pack(fill='x', padx=8, pady=(10, 4))
+		def _thr_row(rownum, label, var, lo, hi, inc, helptext):
+			ttk.Label(thr, text=label).grid(row=rownum * 2, column=0, sticky='w', padx=6, pady=(4, 0))
+			ttk.Spinbox(thr, from_=lo, to=hi, increment=inc, textvariable=var, width=8,
+				command=self._set_dirty).grid(row=rownum * 2, column=1, sticky='w', padx=6)
+			ttk.Label(thr, text=helptext, font=_help_font, foreground='grey').grid(
+				row=rownum * 2 + 1, column=0, columnspan=2, sticky='w', padx=24)
+		_thr_row(0, 'Confusion merge rate', self.complex_confusion_merge_rate_var, 0.0, 1.0, 0.05,
+				 'Confusion >= this flags a class pair as a merge suggestion.')
+		_thr_row(1, 'Predict min probability', self.complex_predict_min_proba_var, 0.0, 1.0, 0.05,
+				 'Minimum probability to emit a complex-behaviour prediction.')
+		_thr_row(2, 'Speed ~still (body len/frame)', self.complex_speed_low_var, 0.0, 5.0, 0.01,
+				 'Speeds below this count as ~stationary in the candidate heuristics.')
+		_thr_row(3, 'Speed fast (body len/frame)', self.complex_speed_high_var, 0.0, 10.0, 0.05,
+				 'Speeds above this count as fast (gallop / chase).')
+		_thr_row(4, 'Polarisation high', self.complex_polarisation_high_var, 0.0, 1.0, 0.05,
+				 'Sub-group alignment above this suggests trek/stampede.')
+		_thr_row(5, 'Synchrony high', self.complex_synchrony_high_var, 0.0, 1.0, 0.05,
+				 'Behavioural synchrony above this suggests synchronised rest/graze.')
+		_thr_row(6, 'Active-learning top-K', self.complex_candidate_topk_var, 1, 100000, 1,
+				 'Number of most-uncertain windows surfaced as candidates.')
+
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
@@ -1389,6 +1422,13 @@ class SettingsEditorApp(tk.Tk):
 		for i, nm in enumerate(cb_names):
 			hk = cb_hotkeys[i] if i < len(cb_hotkeys) else ''
 			self.complex_editor.add_row(name=nm, hotkey=hk)
+		self.complex_confusion_merge_rate_var.set(float(d.get('complex_confusion_merge_rate', fallback='0.20')))
+		self.complex_predict_min_proba_var.set(float(d.get('complex_predict_min_proba', fallback='0.5')))
+		self.complex_speed_low_var.set(float(d.get('complex_speed_low_bodylen', fallback='0.05')))
+		self.complex_speed_high_var.set(float(d.get('complex_speed_high_bodylen', fallback='0.25')))
+		self.complex_polarisation_high_var.set(float(d.get('complex_polarisation_high', fallback='0.7')))
+		self.complex_synchrony_high_var.set(float(d.get('complex_synchrony_high', fallback='0.7')))
+		self.complex_candidate_topk_var.set(int(float(d.get('complex_candidate_topk', fallback='50'))))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -1864,6 +1904,13 @@ class SettingsEditorApp(tk.Tk):
 		new_default['complex_behaviours_hotkeys'] = list_to_field([h for _, h in cb_items])
 		new_default['complex_model_type'] = self.complex_model_type_var.get()
 		new_default['complex_baseline_classifier'] = self.complex_baseline_clf_var.get()
+		new_default['complex_confusion_merge_rate'] = str(self.complex_confusion_merge_rate_var.get())
+		new_default['complex_predict_min_proba'] = str(self.complex_predict_min_proba_var.get())
+		new_default['complex_speed_low_bodylen'] = str(self.complex_speed_low_var.get())
+		new_default['complex_speed_high_bodylen'] = str(self.complex_speed_high_var.get())
+		new_default['complex_polarisation_high'] = str(self.complex_polarisation_high_var.get())
+		new_default['complex_synchrony_high'] = str(self.complex_synchrony_high_var.get())
+		new_default['complex_candidate_topk'] = str(self.complex_candidate_topk_var.get())
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
