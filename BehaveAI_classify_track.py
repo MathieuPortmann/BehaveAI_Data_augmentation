@@ -315,8 +315,10 @@ try:
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
 
 	# Intra-video Re-Identification parameters (TASK 2). reid_enabled=false ->
-	# original tracker behaviour exactly.
-	reid_enabled = config['DEFAULT'].get('reid_enabled', 'true').lower() == 'true'
+	# original tracker behaviour exactly. The execution fallback is 'false' so a
+	# project whose INI predates this key tracks identically to before; the
+	# new-project template / settings GUI default it to 'true' (feature on).
+	reid_enabled = config['DEFAULT'].get('reid_enabled', 'false').lower() == 'true'
 	reid_method = config['DEFAULT'].get('reid_method', 'histogram')
 	reid_similarity_threshold = float(config['DEFAULT'].get('reid_similarity_threshold', '0.75'))
 	reid_max_disappeared_seconds = float(config['DEFAULT'].get('reid_max_disappeared_seconds', '180.0'))
