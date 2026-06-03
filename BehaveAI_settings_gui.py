@@ -1348,12 +1348,6 @@ class SettingsEditorApp(tk.Tk):
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
 
-		# activity budget
-		self.ab_min_presence_ratio_var.set(float(d.get('ab_min_presence_ratio', fallback='0.10')))
-		self.ab_border_zone_ratio_var.set(float(d.get('ab_border_zone_ratio', fallback='0.15')))
-		self.ab_group_type_separator_var.set(d.get('ab_group_type_separator', fallback='_'))
-		self.ab_group_type_field_index_var.set(int(d.get('ab_group_type_field_index', fallback='4')))
-
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
