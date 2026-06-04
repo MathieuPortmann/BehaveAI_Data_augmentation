@@ -320,6 +320,19 @@ try:
 	# new-project template / settings GUI default it to 'true' (feature on).
 	reid_enabled = config['DEFAULT'].get('reid_enabled', 'false').lower() == 'true'
 	reid_method = config['DEFAULT'].get('reid_method', 'histogram')
+	# Appearance descriptor layout / foreground source. Defaults reproduce the
+	# legacy single-histogram behaviour exactly for INIs predating these keys.
+	reid_descriptor = config['DEFAULT'].get('reid_descriptor', 'global')
+	reid_grid = config['DEFAULT'].get('reid_grid', '3x3')
+	reid_foreground = config['DEFAULT'].get('reid_foreground', 'hsv')
+	reid_orient = config['DEFAULT'].get('reid_orient', 'false').lower() == 'true'
+	reid_backbone = config['DEFAULT'].get('reid_backbone', 'T-224')
+	# Optional fine-tuned MegaDescriptor checkpoint (BehaveAI_reid_finetune.py).
+	# Empty -> auto-detect the conventional project path if it exists.
+	reid_checkpoint = config['DEFAULT'].get('reid_checkpoint', '').strip()
+	if not reid_checkpoint:
+		_auto_ckpt = os.path.join(project_dir, 'model_reid', 'megadescriptor_finetuned.pt')
+		reid_checkpoint = _auto_ckpt if os.path.isfile(_auto_ckpt) else ''
 	reid_similarity_threshold = float(config['DEFAULT'].get('reid_similarity_threshold', '0.75'))
 	reid_histogram_min_similarity = float(config['DEFAULT'].get('reid_histogram_min_similarity', '0.60'))
 	reid_max_disappeared_seconds = float(config['DEFAULT'].get('reid_max_disappeared_seconds', '180.0'))
@@ -919,7 +932,13 @@ if __name__ == '__main__':
 					similarity_threshold=reid_similarity_threshold,
 					histogram_min_similarity=reid_histogram_min_similarity,
 					max_position_distance=reid_max_position_distance,
-					max_disappeared_frames=_max_disappeared_frames)
+					max_disappeared_frames=_max_disappeared_frames,
+					descriptor=reid_descriptor,
+					grid=reid_grid,
+					foreground=reid_foreground,
+					orient=reid_orient,
+					backbone=reid_backbone,
+					checkpoint=(reid_checkpoint or None))
 				print(f"Intra-video Re-ID enabled (method={reid_registry.method}).")
 			except Exception as e:
 				print(f"Re-ID unavailable ({e}); continuing without Re-ID.")
