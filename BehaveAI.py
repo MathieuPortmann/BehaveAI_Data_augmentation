@@ -637,8 +637,21 @@ class ScriptRunnerApp:
 			(target / "clips").mkdir(exist_ok=True)
 			(target / "input").mkdir(exist_ok=True)
 			(target / "output").mkdir(exist_ok=True)
+			(target / "timecodes").mkdir(exist_ok=True)
 			# ~ (target / "models").mkdir(exist_ok=True)
 			# ~ (target / "yamls").mkdir(exist_ok=True)
+
+			# starter example CSV for the time-code navigation feature
+			(target / "timecodes" / "example_timecodes.csv").write_text(
+				"# BehaveAI - list of time-codes to annotate.\n"
+				"# video_filename : name of the video file in clips/ (with or without extension).\n"
+				"# timecode       : integer frame index (e.g. 1530) OR mm:ss (e.g. 01:02) or hh:mm:ss.\n"
+				"# behaviour      : optional memo column (ignored by the tool).\n"
+				"video_filename,timecode,behaviour\n"
+				"my_video_01.mp4,1530,grazing\n"
+				"my_video_01.mp4,02:15,walking\n"
+				"my_video_02.mp4,00:42,fighting\n",
+				encoding="utf-8")
 
 			# create a starter BehaveAI_settings.ini in the project dir
 			ini_path = target / "BehaveAI_settings.ini"

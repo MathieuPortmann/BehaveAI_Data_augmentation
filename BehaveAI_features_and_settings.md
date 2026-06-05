@@ -1,5 +1,7 @@
 # BehaveAI — Features, Settings & Methods Reference
 
+**Document version: 2.1** — updated 2026-06-05. Adds **CSV time-code navigation** in the annotation tool: a *Source* button lets you annotate a random frame or step through specific frames/events listed in a CSV (by integer frame or mm:ss time-code), with a per-project timecodes/ folder and example template (§3.1, §13).
+
 **Document version: 2.0** — updated 2026-06-05. Adds intra-video **Re-Identification** with a part-based appearance descriptor (foreground-masked, optionally body-axis-aligned grid), an optional **MegaDescriptor** backbone, and **self-supervised auto-training** (Re-ID embedding from tracker IDs + whole-horse/body-part segmentation), none of which require manual identity or part labels (§6.6–6.8).
 
 A combined **user guide**, **README**, and **Materials & Methods source** for BehaveAI: a project-based pipeline for annotating video, training YOLO detectors/classifiers on a dual **static (RGB)** \+ **motion (false-colour)** representation, tracking individuals, and computing per-individual activity budgets, in batch or live.
@@ -41,7 +43,7 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 ### 1.1 Project management
 
 - **\[Technical\]**  
-  - *How it works:* Projects live under a sibling projects/ directory. Each project is a self-contained workspace holding its settings, datasets, models, and I/O. Creating a project scaffolds clips/, input/, output/ and a default BehaveAI\_settings.ini. A combobox enumerates project folders; selection triggers loading and statistics computation. Refresh rescans the directory.  
+  - *How it works:* Projects live under a sibling projects/ directory. Each project is a self-contained workspace holding its settings, datasets, models, and I/O. Creating a project scaffolds clips/, input/, output/, timecodes/ (with an example\_timecodes.csv template) and a default BehaveAI\_settings.ini. A combobox enumerates project folders; selection triggers loading and statistics computation. Refresh rescans the directory.  
   - *Purpose:* Isolate independent experiments/datasets so settings, annotations, and weights never collide.  
   - *Parameters:* project\_path (absolute root, written into the INI); folder layout is fixed by convention.  
   - *Implementation:* pathlib.Path, os, configparser for INI scaffolding; tkinter.ttk.Combobox, simpledialog, messagebox for the UI.  
@@ -193,17 +195,17 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 
 ## 3\. ANNOTATION TOOL (BehaveAI\_annotation.py)
 
-### 3.1 Frame-pool & random sampling
+### 3.1 Frame-pool, random sampling & CSV time-code navigation
 
 - **\[Technical\]**  
-  - *How it works:* Recursively scans clips\_dir and builds a pool of annotatable frames (those with enough preceding frames for the motion window). Already-annotated frames are excluded via the AnnotationIndex. Launch and each save/skip draw a new random unannotated frame; exits when the pool is empty.  
-  - *Purpose:* Spread annotation uniformly at random across all clips to avoid temporal bias.  
-  - *Parameters:* frame\_window (derived from expA/strategy), frame\_skip, clips\_dir.  
-  - *Implementation:* build\_frame\_pool(), get\_unannotated\_pool(), pick\_random\_frame(), \_scan\_videos\_recursive(); random, cv2, AnnotationIndex.  
+  - *How it works:* Recursively scans clips\_dir and builds a pool of annotatable frames (those with enough preceding frames for the motion window). Already-annotated frames are excluded via the AnnotationIndex. The tool supports two navigation modes selectable at any time from a **Source** button in the control bar: **(1) Random** — launch and each save/skip draw a new random unannotated frame; exits when the pool is empty. **(2) CSV time-codes** — load a CSV listing specific frames of interest; each save/skip then advances through those frames *in CSV order* (revisiting already-annotated frames is allowed, e.g. to verify a behaviour), automatically switching video as needed; when the list is exhausted the tool reverts to Random mode. The CSV may target many videos: a *video* column (video\_filename / video / filename) is matched against the pool on the filename stem (case-insensitive), and a *time* column (frame / timecode / time / start\_frame) is read either as an integer frame index or as an mm:ss / hh:mm:ss time-code converted via the video fps. Out-of-range frames are clamped; duplicates are dropped while preserving order. The Source button label shows progress (Source: CSV (i/N)). CSV files live in the project's timecodes/ folder; an example\_timecodes.csv template is created there on first use.  
+  - *Purpose:* Spread annotation uniformly at random across all clips to avoid temporal bias (Random), or steer annotation toward specific behaviours/events recorded elsewhere — e.g. tracker outputs or hand-made event lists (CSV time-codes).  
+  - *Parameters:* frame\_window (derived from expA/strategy), frame\_skip, clips\_dir; CSV mode adds the timecodes/ CSV file (no INI setting — chosen at runtime).  
+  - *Implementation:* build\_frame\_pool(), get\_unannotated\_pool(), pick\_random\_frame() (Random); parse\_timecode\_csv(), \_parse\_frame\_value(), go\_to\_frame(), load\_next\_target(), AnnotatorTk.open\_source\_menu()/set\_nav\_mode() (CSV); \_scan\_videos\_recursive(); random, csv, re, cv2, AnnotationIndex.  
 - **\[Plain\]**  
-  - *How it works:* The tool lists every frame that can be labelled across all clips, removes those already done, and shows you a random remaining one each time you save or skip.  
-  - *Purpose:* Pick frames evenly at random rather than in order.  
-  - *Parameters:* the motion-window length, frame skipping, and the clips folder.
+  - *How it works:* The tool lists every frame that can be labelled across all clips and removes those already done. A **Source** button lets you choose how the next frame is picked: *Random frames* shows a random remaining one each time you save or skip; *Load a time-code CSV* instead walks through a list of specific moments you provide in a CSV file (by frame number or by mm:ss time), jumping to the right video automatically and showing how far through the list you are. CSV files are kept in the project's timecodes/ folder, where a ready-to-edit example is created for you.  
+  - *Purpose:* Either label evenly at random, or go straight to particular behaviours you already noted down.  
+  - *Parameters:* the motion-window length, frame skipping, the clips folder, and (for CSV mode) the time-code CSV you load.
 
 ### 3.2 Prefetch system
 
@@ -249,10 +251,10 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 ### 3.6 Annotation controls
 
 - **\[Technical\]**  
-  - *How it works:* Left-drag draws a box; right-click deletes the innermost box/mask under the cursor; class hotkeys select primary/secondary class; g toggles grey-mask mode; u undoes; Space toggles view; Enter saves and advances; Shift+Enter returns to the previous frame; Escape skips; Delete deletes all files for the frame (Enter confirm / Escape cancel); arrows step ±1, Shift\+arrows ±10, Ctrl\+arrows jump between annotated frames.  
+  - *How it works:* Left-drag draws a box; right-click deletes the innermost box/mask under the cursor; class hotkeys select primary/secondary class; g toggles grey-mask mode; u undoes; Space toggles view; Enter saves and advances; Shift+Enter returns to the previous frame; Escape skips; Delete deletes all files for the frame (Enter confirm / Escape cancel); arrows step ±1, Shift\+arrows ±10, Ctrl\+arrows jump between annotated frames. Enter/Escape advance to the next frame according to the active **Source** mode (random or CSV time-codes, §3.1).  
   - *Purpose:* Full keyboard-driven box/mask editing and navigation.  
   - *Parameters:* per-class \*\_hotkeys; reserved u, g.  
-  - *Implementation:* Tk event bindings; AnnotatorTk; non\_max\_suppression(), iou() for overlap handling.  
+  - *Implementation:* Tk event bindings; AnnotatorTk; load\_next\_target() routes advancement by Source mode; non\_max\_suppression(), iou() for overlap handling.  
 - **\[Plain\]**  
   - *How it works:* Drag to draw a box, right-click to remove one, press a category's key to choose it, g for grey cover, u to undo, Space to switch views, Enter to save and move on, and arrow keys to step through frames.  
   - *Purpose:* Label and move around entirely from the keyboard.  
@@ -745,6 +747,9 @@ projects/
 
     ├── clips/                          ← training videos
 
+    ├── timecodes/                      ← time-code CSVs for targeted annotation
+    │                                      (example\_timecodes.csv template)
+
     ├── input/                          ← batch input videos
 
     ├── output/                         ← \*\_detected.mp4, \*\_tracking.csv,
@@ -808,7 +813,7 @@ projects/
 - **\[Technical\]**  
   - *Acquisition:* video clips (optionally captured live via OpenCV/picamera2) stored per project.  
   - *Representation:* each frame is encoded as (i) a static RGB image and (ii) a false-colour motion image from temporal frame differencing — exponential multi-timescale decay (expA, expB) or sequential differencing, blended with luminance (lum\_weight) and per-channel amplification (rgb\_multipliers), optionally differential (chromatic\_tail\_only).  
-  - *Annotation:* random-frame sampling, dual-stream YOLO-format boxes, optional hierarchical secondary crops, optional cross-stream grey masking, train/val split \= val\_frequency.  
+  - *Annotation:* random-frame sampling or CSV-driven time-code navigation (targeted annotation of specific frames/events, by integer frame or mm:ss), dual-stream YOLO-format boxes, optional hierarchical secondary crops, optional cross-stream grey masking, train/val split \= val\_frequency.  
   - *Augmentation:* offline, per-image probabilistic photometric/geometric transforms (PIL, cv2); motion images restricted to geometry/texture; geometric label correction.  
   - *Models:* separate primary YOLO detectors per stream (Ultralytics; configurable backbone/epochs), optional per-primary-class secondary YOLO classifiers (224 px), optional NCNN export; transfer learning on dataset growth.  
   - *Inference:* dual detection → centroid/IOU merge with dominant\_source rule → secondary classification → constant-velocity Kalman tracking with Hungarian assignment (scipy).  
@@ -816,5 +821,5 @@ projects/
   - *Analysis:* per-individual activity budgets (time/frequency/percentage per behaviour) and rule-based stranger flagging (ab\_min\_presence\_ratio, ab\_border\_zone\_ratio).  
   - *Reproducibility:* per-model saved\_settings.ini, train\_count.txt, model backups (\*\_backupN), and Regenerate\_annotations.py for settings-consistent image rebuilds. Cite exact values from §11.  
 - **\[Plain\]**  
-  - Videos are recorded and stored per study. Each frame is kept in two forms: the normal photo and a colour image that shows movement. Frames are labelled at random across all clips, with optional finer categories. The dataset can be enlarged with modified copies. Two detectors are trained — one per form — plus optional finer classifiers, then used together: both forms are searched, duplicates are merged, finer categories are added, and each individual is tracked over time. Finally, the system measures how long and how often each individual did each behaviour and flags likely strangers. Exact settings used should be reported from the table in §11.
+  - Videos are recorded and stored per study. Each frame is kept in two forms: the normal photo and a colour image that shows movement. Frames are labelled either at random across all clips or by following a list of specific moments supplied in a CSV (by frame number or mm:ss time), with optional finer categories. The dataset can be enlarged with modified copies. Two detectors are trained — one per form — plus optional finer classifiers, then used together: both forms are searched, duplicates are merged, finer categories are added, and each individual is tracked over time. Finally, the system measures how long and how often each individual did each behaviour and flags likely strangers. Exact settings used should be reported from the table in §11.
 

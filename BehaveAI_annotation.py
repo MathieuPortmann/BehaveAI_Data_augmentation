@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 import configparser
 import random
+import csv
+import re
 from collections import deque
 import threading
 import copy
@@ -383,6 +385,147 @@ def pick_random_frame(unannotated_pool):
 		return None, None
 	return random.choice(unannotated_pool)
 
+
+# ---------- CSV time-code navigation ----------
+
+_TIMECODE_RE = re.compile(r'^\s*(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)\s*$')
+
+
+def _parse_frame_value(raw, fps):
+	"""
+	Convert a raw CSV time-code cell into a frame number.
+
+	Accepts either a plain integer frame index ("1530") or an mm:ss /
+	hh:mm:ss time-code ("02:15", "01:02:03") which is turned into a frame
+	using the video fps.  Returns an int frame number, or None if the value
+	cannot be understood.
+	"""
+	if raw is None:
+		return None
+	s = str(raw).strip()
+	if not s:
+		return None
+
+	# Plain integer frame index
+	try:
+		return int(s)
+	except ValueError:
+		pass
+
+	# mm:ss or hh:mm:ss time-code
+	m = _TIMECODE_RE.match(s)
+	if m and fps and fps > 0:
+		hours   = int(m.group(1)) if m.group(1) else 0
+		minutes = int(m.group(2))
+		seconds = float(m.group(3))
+		total_seconds = hours * 3600 + minutes * 60 + seconds
+		return int(round(total_seconds * fps))
+
+	return None
+
+
+def parse_timecode_csv(csv_path, full_pool, frame_window):
+	"""
+	Parse a CSV listing frames / time-codes to annotate and return an ordered
+	list of (video_path, frame_number) targets.
+
+	Expected columns (case-insensitive, first match wins):
+	  - video : 'video_filename' | 'video' | 'filename'
+	  - time  : 'frame' | 'timecode' | 'time' | 'start_frame'
+
+	Each time-code cell may be a plain frame index or an mm:ss / hh:mm:ss
+	value (converted via the video fps).  Video names are matched against the
+	pool on their stem (filename without extension), case-insensitively.
+	Out-of-range frames are clamped; duplicates are removed while preserving
+	CSV order.  Returns [] on any structural problem.
+	"""
+	# Map  stem(lower) -> video_path  from the known pool
+	stem_to_path = {}
+	for vpath, _fn in full_pool:
+		stem = os.path.splitext(os.path.basename(vpath))[0].lower()
+		stem_to_path.setdefault(stem, vpath)
+
+	# Per-video (fps, total_frames) memo so we open each file at most once
+	video_meta = {}
+
+	def _meta(vpath):
+		if vpath not in video_meta:
+			cap = cv2.VideoCapture(vpath)
+			fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 0.0
+			nfr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+			cap.release()
+			video_meta[vpath] = (fps, nfr)
+		return video_meta[vpath]
+
+	targets = []
+	seen = set()
+
+	try:
+		with open(csv_path, 'r', newline='', encoding='utf-8-sig') as f:
+			# Skip blank lines and comment lines starting with '#'
+			rows = [ln for ln in f if ln.strip() and not ln.lstrip().startswith('#')]
+		if not rows:
+			print("CSV time-codes: file is empty.")
+			return []
+
+		reader = csv.DictReader(rows)
+		if not reader.fieldnames:
+			print("CSV time-codes: no header row found.")
+			return []
+
+		# Resolve column names (case-insensitive)
+		lower_map = {name.lower().strip(): name for name in reader.fieldnames}
+
+		def _pick(*candidates):
+			for c in candidates:
+				if c in lower_map:
+					return lower_map[c]
+			return None
+
+		video_col = _pick('video_filename', 'video', 'filename')
+		time_col  = _pick('frame', 'timecode', 'time', 'start_frame')
+
+		if video_col is None or time_col is None:
+			print("CSV time-codes: could not find a video column "
+				  "(video_filename/video/filename) and a time column "
+				  "(frame/timecode/time/start_frame).")
+			return []
+
+		for row in reader:
+			vname = (row.get(video_col) or '').strip()
+			if not vname:
+				continue
+			stem = os.path.splitext(os.path.basename(vname))[0].lower()
+			vpath = stem_to_path.get(stem)
+			if vpath is None:
+				print(f"CSV time-codes: video '{vname}' not found in project, skipping.")
+				continue
+
+			fps, total = _meta(vpath)
+			fnum = _parse_frame_value(row.get(time_col), fps)
+			if fnum is None:
+				print(f"CSV time-codes: unreadable time value "
+					  f"'{row.get(time_col)}' for {vname}, skipping.")
+				continue
+
+			# Clamp into the annotatable range for this video
+			lo = max(0, frame_window - 1)
+			hi = max(lo, total - 1) if total > 0 else fnum
+			fnum = min(max(fnum, lo), hi)
+
+			key = (vpath, fnum)
+			if key in seen:
+				continue
+			seen.add(key)
+			targets.append(key)
+
+	except Exception as e:
+		print(f"CSV time-codes: failed to parse '{csv_path}': {e}")
+		return []
+
+	print(f"CSV time-codes: loaded {len(targets)} target frame(s) from {os.path.basename(csv_path)}.")
+	return targets
+
 # frameWindow logic
 frameWindow = 4
 if strategy == 'exponential':
@@ -448,6 +591,14 @@ grey_boxes = []
 original_frame = None
 fr = None
 motion_image = None
+
+# Frame-source navigation state.
+#   nav_mode    : 'random' (default behaviour) or 'csv' (walk through CSV time-codes)
+#   csv_targets : ordered list of (video_path, frame_number) parsed from a CSV
+#   csv_cursor  : index of the next CSV target to present
+nav_mode = 'random'
+csv_targets = []
+csv_cursor = 0
 
 video_label = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -1211,6 +1362,84 @@ def _start_prefetch(vpath, fnum):
 	_prefetch_thread.start()
 
 
+def go_to_frame(app_instance, target_vpath, target_fnum):
+	"""
+	Jump to an explicit (video_path, frame_number) target, switching video if
+	needed.  Used by the CSV time-code navigation mode.  Loads synchronously
+	(no prefetch) and refreshes the UI / seek bar / annotation ticks.
+	"""
+	global video_path, capture, frame_number, video_label
+	global total_frames, video_width, video_height, frame_updated
+	global annotated_frames_map, items
+	global fr, original_frame, motion_image, raw_buf
+	global _last_annotated_cache
+
+	# Save current frame into the "last annotated" cache before moving on
+	if original_frame is not None and fr is not None:
+		_last_annotated_cache = {
+			'video_path':     video_path,
+			'frame_number':   frame_number,
+			'fr':             fr.copy(),
+			'motion_image':   motion_image.copy() if motion_image is not None else None,
+			'original_frame': original_frame.copy(),
+			'raw_buf':        list(raw_buf),
+			'video_width':    video_width,
+			'video_height':   video_height,
+			'total_frames':   total_frames,
+		}
+
+	# Switch video if the target lives in a different file
+	if target_vpath != video_path:
+		capture.release()
+		capture      = cv2.VideoCapture(target_vpath)
+		total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+		video_width  = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+		video_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+		video_path   = target_vpath
+		video_label  = os.path.splitext(os.path.basename(video_path))[0]
+		app_instance.root.title(f"BehaveAI — {os.path.basename(video_path)}")
+		app_instance.seek.configure(to=max(0, total_frames - 1))
+
+	frame_number  = min(max(target_fnum, frameWindow - 1), total_frames - 1)
+	frame_updated = True
+
+	# Refresh UI
+	items = annotation_index.list_images_labels_and_masks()
+	annotated_frames_map = build_annot_index_map(items)
+	app_instance.seek.set(frame_number)
+	try:
+		app_instance.frame_var.set(f'Frame {frame_number}')
+	except Exception:
+		pass
+	app_instance.draw_seek_ticks()
+
+
+def load_next_target(app_instance):
+	"""
+	Advance to the next frame according to the active navigation mode.
+
+	In 'csv' mode, walk the parsed CSV targets in order via go_to_frame();
+	when the list is exhausted, fall back to random navigation.  In 'random'
+	mode (the default), defer to load_next_random_frame().
+	"""
+	global csv_cursor
+
+	if nav_mode == 'csv' and csv_targets:
+		if csv_cursor >= len(csv_targets):
+			messagebox.showinfo("CSV finished",
+				"All time-codes from the CSV have been visited. Switching back to random mode.")
+			app_instance.set_nav_mode('random')
+			load_next_random_frame(app_instance)
+			return
+		vpath, fnum = csv_targets[csv_cursor]
+		csv_cursor += 1
+		go_to_frame(app_instance, vpath, fnum)
+		# Update the button label so progress (i/N) stays in sync
+		app_instance.update_source_button()
+	else:
+		load_next_random_frame(app_instance)
+
+
 def load_next_random_frame(app_instance):
 	"""
 	Transition to the next random unannotated frame.
@@ -1393,6 +1622,11 @@ class AnnotatorTk:
 		self.grey_btn = tk.Button(self.controls, text="Grey (g)", width=10, command=self.toggle_grey)
 		self.grey_btn.pack(side='left', padx=4)
 
+		# frame-source selector (random frames vs CSV time-codes)
+		self.source_btn = tk.Button(self.controls, text="Source: Random", width=18,
+									command=self.open_source_menu)
+		self.source_btn.pack(side='left', padx=4)
+
 		# frame number label (shows current frame number)
 		self.frame_var = tk.StringVar(value=str(frame_number))
 		self.frame_label = tk.Label(self.controls, textvariable=self.frame_var, width=8, anchor='w')
@@ -1525,6 +1759,88 @@ class AnnotatorTk:
 		global grey_mode
 		grey_mode = not grey_mode
 		self.update_button_states()
+
+	# ---- Frame-source selection (random vs CSV time-codes) ----
+	def update_source_button(self):
+		"""Refresh the Source button label to reflect the active nav mode."""
+		try:
+			if nav_mode == 'csv' and csv_targets:
+				self.source_btn.config(
+					text=f"Source: CSV ({min(csv_cursor, len(csv_targets))}/{len(csv_targets)})")
+			else:
+				self.source_btn.config(text="Source: Random")
+		except Exception:
+			pass
+
+	def set_nav_mode(self, mode):
+		global nav_mode
+		nav_mode = mode if mode in ('random', 'csv') else 'random'
+		self.update_source_button()
+
+	def _project_timecodes_dir(self):
+		"""
+		Return the project's timecodes/ directory (creating it and a starter
+		example CSV on first use), derived from clips_dir's parent.
+		"""
+		try:
+			project_dir = os.path.dirname(os.path.normpath(clips_dir))
+			tc_dir = os.path.join(project_dir, 'timecodes')
+			os.makedirs(tc_dir, exist_ok=True)
+			example = os.path.join(tc_dir, 'example_timecodes.csv')
+			if not os.path.exists(example):
+				with open(example, 'w', newline='', encoding='utf-8') as f:
+					f.write(
+						"# BehaveAI - list of time-codes to annotate.\n"
+						"# video_filename : name of the video file in clips/ (with or without extension).\n"
+						"# timecode       : integer frame index (e.g. 1530) OR mm:ss (e.g. 01:02) or hh:mm:ss.\n"
+						"# behaviour      : optional memo column (ignored by the tool).\n"
+						"video_filename,timecode,behaviour\n"
+						"my_video_01.mp4,1530,grazing\n"
+						"my_video_01.mp4,02:15,walking\n"
+						"my_video_02.mp4,00:42,fighting\n"
+					)
+			return tc_dir
+		except Exception as e:
+			print(f"Could not prepare timecodes folder: {e}")
+			return None
+
+	def open_source_menu(self):
+		"""Popup letting the user pick the frame source: random or a CSV of time-codes."""
+		global csv_targets, csv_cursor
+		menu = tk.Menu(self.root, tearoff=0)
+		menu.add_command(label="Random frames",
+						 command=lambda: self.set_nav_mode('random'))
+		menu.add_command(label="Load a time-code CSV…",
+						 command=self._load_csv_source)
+		try:
+			x = self.source_btn.winfo_rootx()
+			y = self.source_btn.winfo_rooty() + self.source_btn.winfo_height()
+			menu.tk_popup(x, y)
+		finally:
+			menu.grab_release()
+
+	def _load_csv_source(self):
+		global csv_targets, csv_cursor
+		initial = self._project_timecodes_dir() or os.path.dirname(os.path.normpath(clips_dir))
+		path = filedialog.askopenfilename(
+			title="Choose a time-code CSV",
+			initialdir=initial,
+			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+		if not path:
+			return
+		targets = parse_timecode_csv(path, full_frame_pool, frameWindow)
+		if not targets:
+			messagebox.showerror(
+				"Invalid CSV",
+				"No usable time-code was found in this CSV.\n"
+				"Check the columns (video_filename + frame/timecode) and that the "
+				"video names match the project's files.")
+			return
+		csv_targets = targets
+		csv_cursor = 0
+		self.set_nav_mode('csv')
+		# Jump straight to the first target
+		load_next_target(self)
 
 	def update_button_states(self):
 		for btn, col, cls in self.primary_buttons:
@@ -1793,11 +2109,11 @@ class AnnotatorTk:
 					self.update_button_states()
 					return
 
-		# Tab — skip current frame without saving, pick next random frame
+		# Tab — skip current frame without saving, advance to next frame
 		if ks == 'Escape':
 			boxes.clear()
 			grey_boxes.clear()
-			load_next_random_frame(self)
+			load_next_target(self)
 			return
 
 		if ch == 'u':
@@ -1821,7 +2137,7 @@ class AnnotatorTk:
 			save_annotation()
 			boxes.clear()
 			grey_boxes.clear()
-			load_next_random_frame(self)
+			load_next_target(self)
 			return
 
 		if ks == 'Delete':
@@ -1898,7 +2214,7 @@ class AnnotatorTk:
 		save_annotation()
 		boxes.clear()
 		grey_boxes.clear()
-		load_next_random_frame(self)
+		load_next_target(self)
 
 
 	def redraw(self, temp_rect=None):
