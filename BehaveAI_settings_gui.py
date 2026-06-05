@@ -18,6 +18,10 @@ import time
 from pathlib import Path
 import re
 
+from BehaveAI_settings_help import (
+    PARAM_HELP, Tooltip, apply_theme, tooltip_text, help_label, help_line,
+)
+
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
 
 CLASS_GROUPS = [
@@ -460,7 +464,9 @@ class SettingsEditorApp(tk.Tk):
 	def __init__(self, ini_path=INI_DEFAULT_PATH):
 		super().__init__()
 		self.title('BehaveAI Settings Editor')
-		self.geometry('700x600')
+		apply_theme(self)
+		self.geometry('920x740')
+		self.minsize(820, 640)
 		self.ini_path = ini_path
 		self.dirty = False
 
@@ -696,34 +702,79 @@ class SettingsEditorApp(tk.Tk):
 			return messagebox.askyesno("Warning: existing annotations detected", msg)
 		return True
 
+	def _scroll_tab(self, notebook, title):
+		"""Create a vertically-scrollable notebook tab and return the inner frame
+		to populate. Used for tabs that grow tall once help lines are added, so
+		content is never clipped."""
+		parent = ttk.Frame(notebook)
+		notebook.add(parent, text=title)
+		canvas = tk.Canvas(parent, highlightthickness=0)
+		vsb = ttk.Scrollbar(parent, orient='vertical', command=canvas.yview)
+		inner = ttk.Frame(canvas)
+		inner_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+		inner.bind('<Configure>',
+			lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+		canvas.bind('<Configure>',
+			lambda e: canvas.itemconfigure(inner_id, width=e.width))
+		canvas.configure(yscrollcommand=vsb.set)
+		canvas.pack(side='left', fill='both', expand=True)
+		vsb.pack(side='right', fill='y')
+
+		def _wheel(e):
+			canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+		inner.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _wheel))
+		inner.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+		return inner
+
 	def _build_ui(self):
 		# top toolbar: load file
 		toolbar = ttk.Frame(self)
-		toolbar.pack(side='top', fill='x', padx=8, pady=6)
+		toolbar.pack(side='top', fill='x', padx=8, pady=(8, 0))
+
+		ttk.Label(toolbar,
+			text=('Hover the  ' + 'ⓘ' + '  icons for what each setting does and how it '
+			      'affects results. The grey line under each field is a quick reminder.'),
+			style='Hint.TLabel', wraplength=880, justify='left').pack(
+			side='left', anchor='w')
 
 		notebook = ttk.Notebook(self)
 		notebook.pack(fill='both', expand=True, padx=8, pady=6)
 
 		# TAB 1: Model structure
-		tab1 = ttk.Frame(notebook)
-		notebook.add(tab1, text='Model structure')
+		tab1 = self._scroll_tab(notebook, 'Model structure')
+
+		ttk.Label(tab1, text='Model structure', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 0))
+		ttk.Label(tab1,
+			text=('Define the behaviour classes for each stream. Each class needs a name, a '
+			      'colour (display only) and a unique single-character hotkey. Changing classes '
+			      'after annotating may require rebuilding the dataset.'),
+			style='Help.TLabel', wraplength=700, justify='left').pack(anchor='w', padx=8, pady=(0, 6))
 
 		self.class_editors = {}
 		for key, title in CLASS_GROUPS:
 			# Create the ClassListEditor which draws its own (bold) title internally.
 			editor = ClassListEditor(tab1, title=title, on_change=self._set_dirty, confirm_modify=self._confirm_modify_structure)
-			editor.pack(fill='x', pady=(6,6), anchor='w')
+			editor.pack(fill='x', pady=(6,6), anchor='w', padx=8)
 			self.class_editors[key] = editor
 
 		self.motion_blocks_static_var = tk.BooleanVar(value=False)
-		ttk.Checkbutton(tab1, text='Motion blocks static', variable=self.motion_blocks_static_var, command=self._set_dirty).pack(anchor='w', pady=(8,0))
+		cb_mbs = ttk.Checkbutton(tab1, text='Motion blocks static  ' + 'ⓘ', variable=self.motion_blocks_static_var, command=self._set_dirty)
+		cb_mbs.pack(anchor='w', padx=8, pady=(8,0))
+		Tooltip(cb_mbs, tooltip_text('motion_blocks_static'))
+		ttk.Label(tab1, text=PARAM_HELP['motion_blocks_static']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
 		self.static_blocks_motion_var = tk.BooleanVar(value=False)
-		ttk.Checkbutton(tab1, text='Static blocks motion', variable=self.static_blocks_motion_var, command=self._set_dirty).pack(anchor='w')
+		cb_sbm = ttk.Checkbutton(tab1, text='Static blocks motion  ' + 'ⓘ', variable=self.static_blocks_motion_var, command=self._set_dirty)
+		cb_sbm.pack(anchor='w', padx=8)
+		Tooltip(cb_sbm, tooltip_text('static_blocks_motion'))
+		ttk.Label(tab1, text=PARAM_HELP['static_blocks_motion']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
 
 
 		# TAB 1.2: Project paths
 		tab_paths = ttk.Frame(notebook)
 		notebook.add(tab_paths, text='Video paths')
+
+		ttk.Label(tab_paths, text='Video paths', style='Section.TLabel').grid(
+			row=0, column=0, columnspan=3, sticky='w', padx=8, pady=(10, 6))
 
 		def _browse_dir(var):
 			path = filedialog.askdirectory(
@@ -734,16 +785,17 @@ class SettingsEditorApp(tk.Tk):
 				var.set(path)
 				self._set_dirty()
 
-		def _path_row(parent, label, var, row):
-			ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', padx=8, pady=6)
-			ttk.Entry(parent, textvariable=var, width=60).grid(row=row, column=1, sticky='we', padx=8)
-			ttk.Button(parent, text='Select…', command=lambda: _browse_dir(var)).grid(row=row, column=2, padx=8)
+		def _path_row(parent, label, var, row, key):
+			help_label(parent, label, key).grid(row=row, column=0, sticky='w', padx=8, pady=(6, 0))
+			ttk.Entry(parent, textvariable=var, width=60).grid(row=row, column=1, sticky='we', padx=8, pady=(6, 0))
+			ttk.Button(parent, text='Select…', command=lambda: _browse_dir(var)).grid(row=row, column=2, padx=8, pady=(6, 0))
+			help_line(parent, key).grid(row=row + 1, column=0, columnspan=3, sticky='w', padx=24, pady=(0, 4))
 
 		tab_paths.columnconfigure(1, weight=1)
 
-		_path_row(tab_paths, 'Training video clips directory',  self.clips_dir_var, 0)
-		_path_row(tab_paths, 'Batch video input directory',  self.input_dir_var, 1)
-		_path_row(tab_paths, 'Batch video output directory', self.output_dir_var, 2)
+		_path_row(tab_paths, 'Training video clips directory',  self.clips_dir_var, 1, 'clips_dir')
+		_path_row(tab_paths, 'Batch video input directory',  self.input_dir_var, 3, 'input_dir')
+		_path_row(tab_paths, 'Batch video output directory', self.output_dir_var, 5, 'output_dir')
 
 		# TAB 2: Video sampling parameters
 		tab6 = ttk.Frame(notebook)
@@ -767,7 +819,7 @@ class SettingsEditorApp(tk.Tk):
 				  font=('TkDefaultFont', 9, 'bold')).grid(
 			row=r, column=0, columnspan=4, sticky='w', padx=8, pady=(10, 0))
 		r += 1
-		ttk.Label(aug_inner, text='Classes to augment').grid(
+		help_label(aug_inner, 'Classes to augment', 'aug_target_classes').grid(
 			row=r, column=0, sticky='w', padx=8, pady=4)
 		ttk.Entry(aug_inner, textvariable=self.aug_target_classes_var, width=40).grid(
 			row=r, column=1, columnspan=3, sticky='w', padx=8)
@@ -783,18 +835,21 @@ class SettingsEditorApp(tk.Tk):
 		r += 1
 
 		# --- Global probability ---
-		ttk.Label(aug_inner, text='Global augmentation probability').grid(
+		help_label(aug_inner, 'Global augmentation probability', 'aug_global_probability').grid(
 			row=r, column=0, sticky='w', padx=8, pady=6)
 		ttk.Spinbox(aug_inner, from_=0.0, to=1.0, increment=0.05,
 					textvariable=self.aug_global_prob_var, width=8,
 					command=self._set_dirty).grid(row=r, column=1, sticky='w', padx=8)
 		r += 1
+		help_line(aug_inner, 'aug_global_probability').grid(
+			row=r, column=0, columnspan=4, sticky='w', padx=24, pady=(0, 4))
+		r += 1
 
 		# Helper: one parameter row  (label | range entry | prob label | prob spinbox)
 		# Range entry is wider (width=35) to accommodate multi-segment syntax like
 		#   0.5,0.8 | 1.0 | 1.2,1.6
-		def _aug_row(parent, row, label, range_var, prob_var):
-			ttk.Label(parent, text=f'{label} (range)').grid(
+		def _aug_row(parent, row, label, range_var, prob_var, key=None):
+			help_label(parent, f'{label} (range)', key).grid(
 				row=row, column=0, sticky='w', padx=8, pady=4)
 			ttk.Entry(parent, textvariable=range_var, width=35).grid(
 				row=row, column=1, sticky='w', padx=8)
@@ -817,18 +872,18 @@ class SettingsEditorApp(tk.Tk):
 			row=r+1, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 8))
 		r += 2
 
-		_aug_row(aug_inner, r, 'Brightness',   self.aug_brightness_range_var,   self.aug_brightness_prob_var);   r += 1
-		_aug_row(aug_inner, r, 'Contrast',     self.aug_contrast_range_var,     self.aug_contrast_prob_var);     r += 1
-		_aug_row(aug_inner, r, 'Saturation',   self.aug_saturation_range_var,   self.aug_saturation_prob_var);   r += 1
-		_aug_row(aug_inner, r, 'Hue',          self.aug_hue_range_var,          self.aug_hue_prob_var);          r += 1
-		_aug_row(aug_inner, r, 'Sharpness',    self.aug_sharpness_range_var,    self.aug_sharpness_prob_var);    r += 1
-		_aug_row(aug_inner, r, 'Blur',         self.aug_blur_range_var,         self.aug_blur_prob_var);         r += 1
-		_aug_row(aug_inner, r, 'Noise',        self.aug_noise_range_var,        self.aug_noise_prob_var);        r += 1
-		_aug_row(aug_inner, r, 'Shear',        self.aug_shear_range_var,        self.aug_shear_prob_var);        r += 1
-		_aug_row(aug_inner, r, 'Temperature',  self.aug_temperature_range_var,  self.aug_temperature_prob_var);  r += 1
+		_aug_row(aug_inner, r, 'Brightness',   self.aug_brightness_range_var,   self.aug_brightness_prob_var,   'aug_brightness');   r += 1
+		_aug_row(aug_inner, r, 'Contrast',     self.aug_contrast_range_var,     self.aug_contrast_prob_var,     'aug_contrast');     r += 1
+		_aug_row(aug_inner, r, 'Saturation',   self.aug_saturation_range_var,   self.aug_saturation_prob_var,   'aug_saturation');   r += 1
+		_aug_row(aug_inner, r, 'Hue',          self.aug_hue_range_var,          self.aug_hue_prob_var,          'aug_hue');          r += 1
+		_aug_row(aug_inner, r, 'Sharpness',    self.aug_sharpness_range_var,    self.aug_sharpness_prob_var,    'aug_sharpness');    r += 1
+		_aug_row(aug_inner, r, 'Blur',         self.aug_blur_range_var,         self.aug_blur_prob_var,         'aug_blur');         r += 1
+		_aug_row(aug_inner, r, 'Noise',        self.aug_noise_range_var,        self.aug_noise_prob_var,        'aug_noise');        r += 1
+		_aug_row(aug_inner, r, 'Shear',        self.aug_shear_range_var,        self.aug_shear_prob_var,        'aug_shear');        r += 1
+		_aug_row(aug_inner, r, 'Temperature',  self.aug_temperature_range_var,  self.aug_temperature_prob_var,  'aug_temperature');  r += 1
 
 		# Flip H — options field (not a range, kept as-is)
-		ttk.Label(aug_inner, text='Horizontal Flip (options)').grid(
+		help_label(aug_inner, 'Horizontal Flip (options)', 'aug_flip_h').grid(
 			row=r, column=0, sticky='w', padx=8, pady=4)
 		ttk.Entry(aug_inner, textvariable=self.aug_flip_h_options_var, width=14).grid(
 			row=r, column=1, sticky='w', padx=8)
@@ -840,7 +895,7 @@ class SettingsEditorApp(tk.Tk):
 		r += 1
 
 		# Flip V
-		ttk.Label(aug_inner, text='Vertical Flip (options)').grid(
+		help_label(aug_inner, 'Vertical Flip (options)', 'aug_flip_v').grid(
 			row=r, column=0, sticky='w', padx=8, pady=4)
 		ttk.Entry(aug_inner, textvariable=self.aug_flip_v_options_var, width=14).grid(
 			row=r, column=1, sticky='w', padx=8)
@@ -859,80 +914,111 @@ class SettingsEditorApp(tk.Tk):
 		).grid(row=r, column=0, columnspan=2, sticky='w', padx=8, pady=(16, 4))
 
 		# TAB 2: Motion-from-colour strategy
-		tab2 = ttk.Frame(notebook)
-		notebook.add(tab2, text='Motion strategy')
+		tab2 = self._scroll_tab(notebook, 'Motion strategy')
 
-		ttk.Label(tab2, text='Strategy').grid(row=0, column=0, sticky='w', padx=8, pady=(8,0))
+		ttk.Label(tab2, text='Motion strategy', style='Section.TLabel').grid(
+			row=0, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0))
+		ttk.Label(tab2,
+			text='How movement is encoded into the colour image the model is trained on. '
+			     'Changing these regenerates the motion images.',
+			style='Help.TLabel', wraplength=640, justify='left').grid(
+			row=1, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6))
+		m = 2
+
+		help_label(tab2, 'Strategy', 'strategy').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.strategy_var = tk.StringVar(value='exponential')
-		ttk.Combobox(tab2, values=['sequential', 'exponential'], textvariable=self.strategy_var, state='readonly').grid(row=0, column=1, sticky='w', padx=8, pady=(8,0))
+		ttk.Combobox(tab2, values=['sequential', 'exponential'], textvariable=self.strategy_var, state='readonly', width=14).grid(row=m, column=1, sticky='w', padx=8, pady=(6, 0)); m += 1
 		self.strategy_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab2, 'strategy').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
 		self.chromatic_tail_only_var = tk.BooleanVar(value=False)
-		ttk.Checkbutton(tab2, text='Chromatic tail only', variable=self.chromatic_tail_only_var, command=self._set_dirty).grid(row=1, column=0, sticky='w', padx=8, pady=(6,0))
+		cb_ct = ttk.Checkbutton(tab2, text='Chromatic tail only  ' + 'ⓘ', variable=self.chromatic_tail_only_var, command=self._set_dirty)
+		cb_ct.grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0)); m += 1
+		Tooltip(cb_ct, tooltip_text('chromatic_tail_only'))
+		help_line(tab2, 'chromatic_tail_only').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
-		ttk.Label(tab2, text='Green decay (expA)').grid(row=2, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab2, 'Green decay (expA)', 'expA').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.expA_var = tk.DoubleVar(value=0.5)
-		ttk.Spinbox(tab2, from_=0.0, to=0.99, increment=0.01, textvariable=self.expA_var, width=6, command=self._set_dirty).grid(row=2, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab2, from_=0.0, to=0.99, increment=0.01, textvariable=self.expA_var, width=6, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
+		help_line(tab2, 'expA').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
-		ttk.Label(tab2, text='Red decay (expB)').grid(row=3, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab2, 'Red decay (expB)', 'expB').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.expB_var = tk.DoubleVar(value=0.8)
-		ttk.Spinbox(tab2, from_=0.0, to=0.99, increment=0.01, textvariable=self.expB_var, width=6, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab2, from_=0.0, to=0.99, increment=0.01, textvariable=self.expB_var, width=6, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
+		help_line(tab2, 'expB').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
-		ttk.Label(tab2, text='Lum weight').grid(row=4, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab2, 'Lum weight', 'lum_weight').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.lum_weight_var = tk.DoubleVar(value=0.5)
-		ttk.Spinbox(tab2, from_=0.0, to=1.0, increment=0.01, textvariable=self.lum_weight_var, width=6, command=self._set_dirty).grid(row=4, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab2, from_=0.0, to=1.0, increment=0.01, textvariable=self.lum_weight_var, width=6, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
+		help_line(tab2, 'lum_weight').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
-		ttk.Label(tab2, text='RGB multipliers (r,g,b)').grid(row=5, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab2, 'RGB multipliers (r,g,b)', 'rgb_multipliers').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.rgb_mult_var = tk.StringVar(value='4,4,4')
-		ttk.Entry(tab2, textvariable=self.rgb_mult_var).grid(row=5, column=1, sticky='w', padx=8)
+		ttk.Entry(tab2, textvariable=self.rgb_mult_var).grid(row=m, column=1, sticky='w', padx=8); m += 1
 		self.rgb_mult_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab2, 'rgb_multipliers').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
-		ttk.Label(tab2, text='Frame skip').grid(row=6, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab2, 'Frame skip', 'frame_skip').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.frame_skip_var = tk.IntVar(value=0)
-		ttk.Spinbox(tab2, from_=0, to=10000, textvariable=self.frame_skip_var, width=8, command=self._set_dirty).grid(row=6, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab2, from_=0, to=10000, textvariable=self.frame_skip_var, width=8, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
+		help_line(tab2, 'frame_skip').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
 		# TAB 4: Model type
-		tab3 = ttk.Frame(notebook)
-		notebook.add(tab3, text='Model type')
+		tab3 = self._scroll_tab(notebook, 'Model type')
 
-		ttk.Label(tab3, text='Validation frequency').grid(row=0, column=0, sticky='w', padx=8, pady=(8,0))
+		ttk.Label(tab3, text='Model type & training', style='Section.TLabel').grid(
+			row=0, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 6))
+		t = 1
+
+		help_label(tab3, 'Validation frequency', 'val_frequency').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.val_frequency_var = tk.DoubleVar(value=0.2)
-		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.val_frequency_var, width=6, command=self._set_dirty).grid(row=0, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.val_frequency_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'val_frequency').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Primary classifier').grid(row=1, column=0, sticky='w', padx=8, pady=(8,0))
+		help_label(tab3, 'Primary classifier', 'primary_classifier').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.primary_classifier_var = tk.StringVar(value='yolo26n.pt')
-		ttk.Combobox(tab3, values=CLASSIFIER_OPTIONS, textvariable=self.primary_classifier_var).grid(row=1, column=1, sticky='w', padx=8, pady=(8,0))
+		ttk.Combobox(tab3, values=CLASSIFIER_OPTIONS, textvariable=self.primary_classifier_var).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		self.primary_classifier_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'primary_classifier').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Primary epochs').grid(row=2, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab3, 'Primary epochs', 'primary_epochs').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.primary_epochs_var = tk.IntVar(value=100)
-		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.primary_epochs_var, width=8, command=self._set_dirty).grid(row=2, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.primary_epochs_var, width=8, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'primary_epochs').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Secondary classifier').grid(row=3, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab3, 'Secondary classifier', 'secondary_classifier').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.secondary_classifier_var = tk.StringVar(value='yolo26n-cls.pt')
-		secondary_opts = [m.replace('.pt','-cls.pt') for m in CLASSIFIER_OPTIONS if m.startswith('yolo')]
-		ttk.Combobox(tab3, values=secondary_opts, textvariable=self.secondary_classifier_var).grid(row=3, column=1, sticky='w', padx=8)
+		secondary_opts = [mm.replace('.pt','-cls.pt') for mm in CLASSIFIER_OPTIONS if mm.startswith('yolo')]
+		ttk.Combobox(tab3, values=secondary_opts, textvariable=self.secondary_classifier_var).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		self.secondary_classifier_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'secondary_classifier').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Secondary epochs').grid(row=4, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab3, 'Secondary epochs', 'secondary_epochs').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.secondary_epochs_var = tk.IntVar(value=100)
-		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.secondary_epochs_var, width=8, command=self._set_dirty).grid(row=4, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.secondary_epochs_var, width=8, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'secondary_epochs').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
 		self.use_ncnn_var = tk.BooleanVar(value=False)
-		ttk.Checkbutton(tab3, text='use_ncnn', variable=self.use_ncnn_var, command=self._set_dirty).grid(row=5, column=0, sticky='w', padx=8, pady=(8,0))
+		cb_ncnn = ttk.Checkbutton(tab3, text='use_ncnn  ' + 'ⓘ', variable=self.use_ncnn_var, command=self._set_dirty)
+		cb_ncnn.grid(row=t, column=0, sticky='w', padx=8, pady=(8, 0)); t += 1
+		Tooltip(cb_ncnn, tooltip_text('use_ncnn'))
+		help_line(tab3, 'use_ncnn').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Primary confidence thresh').grid(row=6, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab3, 'Primary confidence thresh', 'primary_conf_thresh').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.primary_conf_var = tk.DoubleVar(value=0.5)
-		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.primary_conf_var, width=6, command=self._set_dirty).grid(row=6, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.primary_conf_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'primary_conf_thresh').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Secondary confidence thresh').grid(row=7, column=0, sticky='w', padx=8, pady=(6,0))
+		help_label(tab3, 'Secondary confidence thresh', 'secondary_conf_thresh').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.secondary_conf_var = tk.DoubleVar(value=0.5)
-		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.secondary_conf_var, width=6, command=self._set_dirty).grid(row=7, column=1, sticky='w', padx=8)
+		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.secondary_conf_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'secondary_conf_thresh').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		ttk.Label(tab3, text='Dominant source').grid(row=8, column=0, sticky='w', padx=8, pady=(8,0))
+		help_label(tab3, 'Dominant source', 'dominant_source').grid(row=t, column=0, sticky='w', padx=8, pady=(8, 0))
 		self.dominant_source_var = tk.StringVar(value='confidence')
-		ttk.Combobox(tab3, values=['confidence', 'motion', 'static'], textvariable=self.dominant_source_var, state='readonly').grid(row=8, column=1, sticky='w', padx=8, pady=(8,0))
+		ttk.Combobox(tab3, values=['confidence', 'motion', 'static'], textvariable=self.dominant_source_var, state='readonly').grid(row=t, column=1, sticky='w', padx=8); t += 1
 		self.dominant_source_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'dominant_source').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
 		# Activity budget parameters
 		self.ab_min_presence_ratio_var = tk.DoubleVar(value=0.10)
@@ -941,98 +1027,111 @@ class SettingsEditorApp(tk.Tk):
 		self.ab_group_type_field_index_var = tk.IntVar(value=4)
 
 		# TAB 5: Tracking
-		tab4 = ttk.Frame(notebook)
-		notebook.add(tab4, text='Tracking')
+		tab4 = self._scroll_tab(notebook, 'Tracking')
+		k = 0
 
-		ttk.Label(tab4, text='Match distance thresh').grid(row=0, column=0, sticky='w', padx=8, pady=(8,0))
+		ttk.Label(tab4, text='Tracking & identity', style='Section.TLabel').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 6)); k += 1
+
+		def _track_spin(label, key, var, lo, hi, inc=None, width=8):
+			nonlocal k
+			help_label(tab4, label, key).grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
+			kw = {} if inc is None else {'increment': inc}
+			ttk.Spinbox(tab4, from_=lo, to=hi, textvariable=var, width=width,
+				command=self._set_dirty, **kw).grid(row=k, column=1, sticky='w', padx=8); k += 1
+			help_line(tab4, key).grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+
 		self.match_distance_var = tk.IntVar(value=200)
-		ttk.Spinbox(tab4, from_=1, to=10000, textvariable=self.match_distance_var, width=8, command=self._set_dirty).grid(row=0, column=1, sticky='w', padx=8)
-
-		ttk.Label(tab4, text='Delete after missed').grid(row=1, column=0, sticky='w', padx=8, pady=(6,0))
+		_track_spin('Match distance thresh', 'match_distance_thresh', self.match_distance_var, 1, 10000)
 		self.delete_after_var = tk.IntVar(value=10)
-		ttk.Spinbox(tab4, from_=1, to=10000, textvariable=self.delete_after_var, width=8, command=self._set_dirty).grid(row=1, column=1, sticky='w', padx=8)
-
-		ttk.Label(tab4, text='Centroid merge thresh').grid(row=2, column=0, sticky='w', padx=8, pady=(6,0))
+		_track_spin('Delete after missed', 'delete_after_missed', self.delete_after_var, 1, 10000)
 		self.centroid_merge_var = tk.IntVar(value=50)
-		ttk.Spinbox(tab4, from_=1, to=10000, textvariable=self.centroid_merge_var, width=8, command=self._set_dirty).grid(row=2, column=1, sticky='w', padx=8)
-
-		ttk.Label(tab4, text='IOU thresh (overlap required to merge)').grid(row=3, column=0, sticky='w', padx=8, pady=(6,0))
+		_track_spin('Centroid merge thresh', 'centroid_merge_thresh', self.centroid_merge_var, 1, 10000)
 		self.iou_var = tk.DoubleVar(value=0.5)
-		ttk.Spinbox(tab4, from_=0.0, to=1.0, increment=0.01, textvariable=self.iou_var, width=6, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
+		_track_spin('IOU thresh (overlap required to merge)', 'iou_thresh', self.iou_var, 0.0, 1.0, 0.01, width=6)
 
 		# Kalman subsection
-		ttk.Label(tab4, text='Kalman filter').grid(row=4, column=0, sticky='w', padx=8, pady=(12,0))
-		ttk.Label(tab4, text='Process noise position').grid(row=5, column=0, sticky='w', padx=8)
+		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
+		ttk.Label(tab4, text='Kalman filter', style='Section.TLabel').grid(row=k, column=0, sticky='w', padx=8); k += 1
+
+		help_label(tab4, 'Process noise position', 'kalman_process_noise_pos').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_pos_var = tk.DoubleVar(value=0.01)
-		ttk.Entry(tab4, textvariable=self.kalman_pos_var).grid(row=5, column=1, sticky='w', padx=8)
+		ttk.Entry(tab4, textvariable=self.kalman_pos_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'kalman_process_noise_pos').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Process noise velocity').grid(row=6, column=0, sticky='w', padx=8)
+		help_label(tab4, 'Process noise velocity', 'kalman_process_noise_vel').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_vel_var = tk.DoubleVar(value=0.01)
-		ttk.Entry(tab4, textvariable=self.kalman_vel_var).grid(row=6, column=1, sticky='w', padx=8)
+		ttk.Entry(tab4, textvariable=self.kalman_vel_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'kalman_process_noise_vel').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Measurement noise').grid(row=7, column=0, sticky='w', padx=8)
+		help_label(tab4, 'Measurement noise', 'kalman_measurement_noise').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_meas_var = tk.DoubleVar(value=0.2)
-		ttk.Entry(tab4, textvariable=self.kalman_meas_var).grid(row=7, column=1, sticky='w', padx=8)
+		ttk.Entry(tab4, textvariable=self.kalman_meas_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'kalman_measurement_noise').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
 		# Drone motion correction subsection (post-processing on the tracking CSV)
-		ttk.Separator(tab4, orient='horizontal').grid(
-			row=8, column=0, columnspan=2, sticky='ew', padx=8, pady=(12, 6))
-		ttk.Label(tab4, text='Drone motion correction').grid(row=9, column=0, sticky='w', padx=8)
-		ttk.Checkbutton(tab4, text='Enable drone correction',
-			variable=self.drone_enabled_var, command=self._set_dirty).grid(
-			row=10, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
+		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
+		ttk.Label(tab4, text='Drone motion correction', style='Section.TLabel').grid(row=k, column=0, sticky='w', padx=8); k += 1
 
-		ttk.Label(tab4, text='Transform model').grid(row=11, column=0, sticky='w', padx=8, pady=(6, 0))
+		cb_drone = ttk.Checkbutton(tab4, text='Enable drone correction  ' + 'ⓘ',
+			variable=self.drone_enabled_var, command=self._set_dirty)
+		cb_drone.grid(row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0)); k += 1
+		Tooltip(cb_drone, tooltip_text('drone_enabled'))
+		help_line(tab4, 'drone_enabled').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+
+		help_label(tab4, 'Transform model', 'drone_model').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab4, values=['affine', 'homography'],
-			textvariable=self.drone_model_var, state='readonly', width=12).grid(
-			row=11, column=1, sticky='w', padx=8)
+			textvariable=self.drone_model_var, state='readonly', width=12).grid(row=k, column=1, sticky='w', padx=8); k += 1
 		self.drone_model_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab4, 'drone_model').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Box dilation (fraction)').grid(row=12, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab4, 'Box dilation (fraction)', 'drone_box_dilation').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab4, from_=0.0, to=1.0, increment=0.05,
-			textvariable=self.drone_box_dilation_var, width=6, command=self._set_dirty).grid(
-			row=12, column=1, sticky='w', padx=8)
+			textvariable=self.drone_box_dilation_var, width=6, command=self._set_dirty).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'drone_box_dilation').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Min background features').grid(row=13, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab4, 'Min background features', 'drone_min_features').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab4, from_=1, to=100000,
-			textvariable=self.drone_min_features_var, width=8, command=self._set_dirty).grid(
-			row=13, column=1, sticky='w', padx=8)
+			textvariable=self.drone_min_features_var, width=8, command=self._set_dirty).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'drone_min_features').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Uncertain residual std (px)').grid(row=14, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab4, 'Uncertain residual std (px)', 'drone_uncertain_std').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab4, from_=0.0, to=1000.0, increment=0.5,
-			textvariable=self.drone_uncertain_std_var, width=8, command=self._set_dirty).grid(
-			row=14, column=1, sticky='w', padx=8)
+			textvariable=self.drone_uncertain_std_var, width=8, command=self._set_dirty).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'drone_uncertain_std').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Smoothing').grid(row=15, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab4, 'Smoothing', 'drone_smoothing').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab4, values=['savgol', 'moving_average', 'none'],
-			textvariable=self.drone_smoothing_var, state='readonly', width=14).grid(
-			row=15, column=1, sticky='w', padx=8)
+			textvariable=self.drone_smoothing_var, state='readonly', width=14).grid(row=k, column=1, sticky='w', padx=8); k += 1
 		self.drone_smoothing_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab4, 'drone_smoothing').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Label(tab4, text='Smoothing window (odd)').grid(row=16, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab4, 'Smoothing window (odd)', 'drone_smoothing_window').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab4, from_=3, to=99, increment=2,
-			textvariable=self.drone_smoothing_window_var, width=6, command=self._set_dirty).grid(
-			row=16, column=1, sticky='w', padx=8)
+			textvariable=self.drone_smoothing_window_var, width=6, command=self._set_dirty).grid(row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'drone_smoothing_window').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		ttk.Checkbutton(tab4, text='Fallback to smoothing-only when features scarce',
-			variable=self.drone_fallback_smoothing_var, command=self._set_dirty).grid(
-			row=17, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0))
+		cb_fb = ttk.Checkbutton(tab4, text='Fallback to smoothing-only when features scarce  ' + 'ⓘ',
+			variable=self.drone_fallback_smoothing_var, command=self._set_dirty)
+		cb_fb.grid(row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0)); k += 1
+		Tooltip(cb_fb, tooltip_text('drone_fallback_smoothing'))
+		help_line(tab4, 'drone_fallback_smoothing').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
 		# TAB: Re-Identification (intra-video) — placed after Tracking, before Display
-		tab_reid = ttk.Frame(notebook)
-		notebook.add(tab_reid, text='Re-Identification')
+		tab_reid = self._scroll_tab(notebook, 'Re-Identification')
 
 		_help_font = ('TkDefaultFont', 8, 'italic')
 		rr = 0
 
-		ttk.Checkbutton(tab_reid, text='Enable intra-video Re-ID',
-			variable=self.reid_enabled_var, command=self._set_dirty).grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); rr += 1
+		cb_reid = ttk.Checkbutton(tab_reid, text='Enable intra-video Re-ID  ' + 'ⓘ',
+			variable=self.reid_enabled_var, command=self._set_dirty)
+		cb_reid.grid(row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); rr += 1
+		Tooltip(cb_reid, tooltip_text('reid_enabled'))
 		ttk.Label(tab_reid, text='Give a horse the same id after it reappears within the same video.',
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
-		ttk.Label(tab_reid, text='Appearance method').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Appearance method', 'reid_method').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab_reid, values=['histogram', 'embedding'],
 			textvariable=self.reid_method_var, state='readonly', width=12).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1041,7 +1140,7 @@ class SettingsEditorApp(tk.Tk):
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 		self.reid_method_var.trace_add('write', lambda *a: self._set_dirty())
 
-		ttk.Label(tab_reid, text='Similarity threshold').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Similarity threshold', 'reid_similarity_threshold').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
 			textvariable=self.reid_similarity_var, width=6, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1049,7 +1148,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
-		ttk.Label(tab_reid, text='Histogram min similarity').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Histogram min similarity', 'reid_histogram_min_similarity').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
 			textvariable=self.reid_histogram_min_var, width=6, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1058,7 +1157,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey', wraplength=420, justify='left').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
-		ttk.Label(tab_reid, text='Max disappeared (seconds)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Max disappeared (seconds)', 'reid_max_disappeared').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
 			textvariable=self.reid_max_disappeared_var, width=10, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1066,7 +1165,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
-		ttk.Label(tab_reid, text='Max position distance (px)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Max position distance (px)', 'reid_max_position').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
 			textvariable=self.reid_max_position_var, width=10, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1074,7 +1173,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
-		ttk.Label(tab_reid, text='Min classified frames (group member)').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_reid, 'Min classified frames (group member)', 'ab_min_classified').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_reid, from_=0, to=100000,
 			textvariable=self.ab_min_classified_var, width=8, command=self._set_dirty).grid(
 			row=rr, column=1, sticky='w', padx=8); rr += 1
@@ -1083,8 +1182,7 @@ class SettingsEditorApp(tk.Tk):
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
 		# TAB: Sub-grouping (fission-fusion) — observed spatial clusters per frame
-		tab_sg = ttk.Frame(notebook)
-		notebook.add(tab_sg, text='Sub-grouping')
+		tab_sg = self._scroll_tab(notebook, 'Sub-grouping')
 		sr = 0
 
 		ttk.Label(tab_sg, text='Sub-grouping (fission-fusion)',
@@ -1094,7 +1192,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); sr += 1
 
-		ttk.Label(tab_sg, text='DBSCAN radius (body lengths)').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_sg, 'DBSCAN radius (body lengths)', 'subgroup_eps_bodylen').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_sg, from_=0.5, to=50.0, increment=0.5,
 			textvariable=self.subgroup_eps_bodylen_var, width=6, command=self._set_dirty).grid(
 			row=sr, column=1, sticky='w', padx=8); sr += 1
@@ -1102,7 +1200,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
 
-		ttk.Label(tab_sg, text='Min stable frames').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_sg, 'Min stable frames', 'subgroup_min_stable').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_sg, from_=1, to=100000,
 			textvariable=self.subgroup_min_stable_var, width=8, command=self._set_dirty).grid(
 			row=sr, column=1, sticky='w', padx=8); sr += 1
@@ -1110,7 +1208,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
 
-		ttk.Label(tab_sg, text='Foal size ratio threshold').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_sg, 'Foal size ratio threshold', 'foal_size_ratio').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_sg, from_=0.0, to=1.0, increment=0.05,
 			textvariable=self.foal_size_ratio_var, width=6, command=self._set_dirty).grid(
 			row=sr, column=1, sticky='w', padx=8); sr += 1
@@ -1118,7 +1216,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
 
-		ttk.Label(tab_sg, text='Body-length reference scope').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_sg, 'Body-length reference scope', 'body_len_ref_scope').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab_sg, values=['video', 'segment'],
 			textvariable=self.body_len_ref_scope_var, state='readonly', width=12).grid(
 			row=sr, column=1, sticky='w', padx=8); sr += 1
@@ -1128,8 +1226,7 @@ class SettingsEditorApp(tk.Tk):
 		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
 
 		# TAB: Interaction features / graph (TASK 4 primary output)
-		tab_int = ttk.Frame(notebook)
-		notebook.add(tab_int, text='Interaction')
+		tab_int = self._scroll_tab(notebook, 'Interaction')
 		ir = 0
 		ttk.Label(tab_int, text='Interaction features & graph',
 			font=('TkDefaultFont', 10, 'bold')).grid(
@@ -1138,7 +1235,7 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
 
-		ttk.Label(tab_int, text='Max interaction distance (px)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Max interaction distance (px)', 'complex_max_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=1.0, to=100000.0, increment=10.0,
 			textvariable=self.complex_max_dist_var, width=8, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
@@ -1146,27 +1243,27 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 
-		ttk.Label(tab_int, text='Min interaction duration (frames)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Min interaction duration (frames)', 'complex_min_duration').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=1, to=100000,
 			textvariable=self.complex_min_duration_var, width=8, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
-		ttk.Label(tab_int, text='Contact IoU threshold').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Contact IoU threshold', 'complex_contact_iou').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=0.0, to=1.0, increment=0.01,
 			textvariable=self.complex_contact_iou_var, width=6, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
-		ttk.Label(tab_int, text='Contact distance (body lengths)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Contact distance (body lengths)', 'complex_contact_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=0.0, to=50.0, increment=0.1,
 			textvariable=self.complex_contact_dist_var, width=6, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
-		ttk.Label(tab_int, text='Window length (frames)').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Window length (frames)', 'complex_window').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=1, to=100000,
 			textvariable=self.complex_window_var, width=8, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
-		ttk.Label(tab_int, text='Edge granularity').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Edge granularity', 'interaction_granularity').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab_int, values=['per_interaction', 'per_segment', 'per_frame'],
 			textvariable=self.interaction_granularity_var, state='readonly', width=16).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
@@ -1175,15 +1272,14 @@ class SettingsEditorApp(tk.Tk):
 			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 		self.interaction_granularity_var.trace_add('write', lambda *a: self._set_dirty())
 
-		ttk.Label(tab_int, text='Edge weight metric').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab_int, 'Edge weight metric', 'interaction_weight').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Combobox(tab_int, values=['duration', 'proximity', 'combined'],
 			textvariable=self.interaction_weight_var, state='readonly', width=16).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 		self.interaction_weight_var.trace_add('write', lambda *a: self._set_dirty())
 
 		# TAB: Complex Behaviours (label list + model selectors)
-		tab_cb = ttk.Frame(notebook)
-		notebook.add(tab_cb, text='Complex Behaviours')
+		tab_cb = self._scroll_tab(notebook, 'Complex Behaviours')
 
 		self.complex_editor = ComplexLabelEditor(tab_cb, on_change=self._set_dirty)
 		self.complex_editor.pack(fill='x', padx=8, pady=(10, 4), anchor='w')
@@ -1193,11 +1289,11 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').pack(anchor='w', padx=8, pady=(0, 8))
 
 		mdl = ttk.Frame(tab_cb); mdl.pack(fill='x', padx=8, pady=(4, 0))
-		ttk.Label(mdl, text='Model type').grid(row=0, column=0, sticky='w', pady=(4, 0))
+		help_label(mdl, 'Model type', 'complex_model_type').grid(row=0, column=0, sticky='w', pady=(4, 0))
 		ttk.Combobox(mdl, values=['baseline', 'lstm', 'transformer'],
 			textvariable=self.complex_model_type_var, state='readonly', width=16).grid(
 			row=0, column=1, sticky='w', padx=8)
-		ttk.Label(mdl, text='Baseline classifier').grid(row=1, column=0, sticky='w', pady=(6, 0))
+		help_label(mdl, 'Baseline classifier', 'complex_baseline_clf').grid(row=1, column=0, sticky='w', pady=(6, 0))
 		ttk.Combobox(mdl, values=['random_forest', 'hist_gradient_boosting'],
 			textvariable=self.complex_baseline_clf_var, state='readonly', width=20).grid(
 			row=1, column=1, sticky='w', padx=8)
@@ -1212,67 +1308,76 @@ class SettingsEditorApp(tk.Tk):
 		# Model + candidate-heuristic thresholds
 		thr = ttk.LabelFrame(tab_cb, text='Model & candidate thresholds')
 		thr.pack(fill='x', padx=8, pady=(10, 4))
-		def _thr_row(rownum, label, var, lo, hi, inc, helptext):
-			ttk.Label(thr, text=label).grid(row=rownum * 2, column=0, sticky='w', padx=6, pady=(4, 0))
+		def _thr_row(rownum, label, var, lo, hi, inc, helptext, key=None):
+			help_label(thr, label, key).grid(row=rownum * 2, column=0, sticky='w', padx=6, pady=(4, 0))
 			ttk.Spinbox(thr, from_=lo, to=hi, increment=inc, textvariable=var, width=8,
 				command=self._set_dirty).grid(row=rownum * 2, column=1, sticky='w', padx=6)
 			ttk.Label(thr, text=helptext, font=_help_font, foreground='grey').grid(
 				row=rownum * 2 + 1, column=0, columnspan=2, sticky='w', padx=24)
 		_thr_row(0, 'Confusion merge rate', self.complex_confusion_merge_rate_var, 0.0, 1.0, 0.05,
-				 'Confusion >= this flags a class pair as a merge suggestion.')
+				 'Confusion >= this flags a class pair as a merge suggestion.', 'complex_confusion_merge_rate')
 		_thr_row(1, 'Predict min probability', self.complex_predict_min_proba_var, 0.0, 1.0, 0.05,
-				 'Minimum probability to emit a complex-behaviour prediction.')
+				 'Minimum probability to emit a complex-behaviour prediction.', 'complex_predict_min_proba')
 		_thr_row(2, 'Speed ~still (body len/frame)', self.complex_speed_low_var, 0.0, 5.0, 0.01,
-				 'Speeds below this count as ~stationary in the candidate heuristics.')
+				 'Speeds below this count as ~stationary in the candidate heuristics.', 'complex_speed_low')
 		_thr_row(3, 'Speed fast (body len/frame)', self.complex_speed_high_var, 0.0, 10.0, 0.05,
-				 'Speeds above this count as fast (gallop / chase).')
+				 'Speeds above this count as fast (gallop / chase).', 'complex_speed_high')
 		_thr_row(4, 'Polarisation high', self.complex_polarisation_high_var, 0.0, 1.0, 0.05,
-				 'Sub-group alignment above this suggests trek/stampede.')
+				 'Sub-group alignment above this suggests trek/stampede.', 'complex_polarisation_high')
 		_thr_row(5, 'Synchrony high', self.complex_synchrony_high_var, 0.0, 1.0, 0.05,
-				 'Behavioural synchrony above this suggests synchronised rest/graze.')
+				 'Behavioural synchrony above this suggests synchronised rest/graze.', 'complex_synchrony_high')
 		_thr_row(6, 'Active-learning top-K', self.complex_candidate_topk_var, 1, 100000, 1,
-				 'Number of most-uncertain windows surfaced as candidates.')
+				 'Number of most-uncertain windows surfaced as candidates.', 'complex_candidate_topk')
 
 		# TAB 6: Display
 		tab5 = ttk.Frame(notebook)
 		notebook.add(tab5, text='Display Settings')
 
 		# viewing options
-		ttk.Label(tab5, text='Viewing options').pack(anchor='w')
+		ttk.Label(tab5, text='Viewing options', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 4))
 		self.line_thickness_var = tk.IntVar(value=1)
-		ttk.Label(tab5, text='Line thickness').pack(anchor='w', pady=(6,0))
-		ttk.Spinbox(tab5, from_=1, to=10, textvariable=self.line_thickness_var, width=6, command=self._set_dirty).pack(anchor='w')
+		help_label(tab5, 'Line thickness', 'line_thickness').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=1, to=10, textvariable=self.line_thickness_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'line_thickness').pack(anchor='w', padx=24, pady=(0, 4))
 
 		self.font_size_var = tk.DoubleVar(value=0.6)
-		ttk.Label(tab5, text='Font size').pack(anchor='w', pady=(6,0))
-		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w')
+		help_label(tab5, 'Font size', 'font_size').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'font_size').pack(anchor='w', padx=24, pady=(0, 4))
 
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
 		notebook.add(tab_ab, text='Activity Budget')
 
-		ttk.Label(tab_ab, text='Min presence ratio (stranger threshold)').grid(
-			row=0, column=0, sticky='w', padx=8, pady=6)
+		ttk.Label(tab_ab, text='Activity budget', style='Section.TLabel').grid(
+			row=0, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 6))
+
+		help_label(tab_ab, 'Min presence ratio (stranger threshold)', 'ab_min_presence_ratio').grid(
+			row=1, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_ab, from_=0.01, to=1.0, increment=0.01,
 			textvariable=self.ab_min_presence_ratio_var,
-			width=8, command=self._set_dirty).grid(row=0, column=1, sticky='w', padx=8)
+			width=8, command=self._set_dirty).grid(row=1, column=1, sticky='w', padx=8)
+		help_line(tab_ab, 'ab_min_presence_ratio').grid(row=2, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
-		ttk.Label(tab_ab, text='Border zone ratio (stranger threshold)').grid(
-			row=1, column=0, sticky='w', padx=8, pady=6)
+		help_label(tab_ab, 'Border zone ratio (stranger threshold)', 'ab_border_zone_ratio').grid(
+			row=3, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_ab, from_=0.01, to=0.5, increment=0.01,
 			textvariable=self.ab_border_zone_ratio_var,
-			width=8, command=self._set_dirty).grid(row=1, column=1, sticky='w', padx=8)
+			width=8, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
+		help_line(tab_ab, 'ab_border_zone_ratio').grid(row=4, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
-		ttk.Label(tab_ab, text='Filename field separator').grid(
-			row=2, column=0, sticky='w', padx=8, pady=6)
+		help_label(tab_ab, 'Filename field separator', 'ab_group_type_separator').grid(
+			row=5, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Entry(tab_ab, textvariable=self.ab_group_type_separator_var,
-			width=4).grid(row=2, column=1, sticky='w', padx=8)
+			width=4).grid(row=5, column=1, sticky='w', padx=8)
+		help_line(tab_ab, 'ab_group_type_separator').grid(row=6, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
-		ttk.Label(tab_ab, text='Group type field index (0-based)').grid(
-			row=3, column=0, sticky='w', padx=8, pady=6)
+		help_label(tab_ab, 'Group type field index (0-based)', 'ab_group_type_field_index').grid(
+			row=7, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_ab, from_=0, to=10, increment=1,
 			textvariable=self.ab_group_type_field_index_var,
-			width=6, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
+			width=6, command=self._set_dirty).grid(row=7, column=1, sticky='w', padx=8)
+		help_line(tab_ab, 'ab_group_type_field_index').grid(row=8, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
 		# bottom save/cancel
 		bottom = ttk.Frame(self)

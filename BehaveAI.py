@@ -11,6 +11,7 @@ BehaveAI Launcher (project-aware)
 """
 import tkinter as tk
 from tkinter import scrolledtext, Button, Frame, ttk, simpledialog, messagebox
+import tkinter.font as tkfont
 import subprocess
 import threading
 import queue
@@ -23,6 +24,7 @@ import time
 from pathlib import Path
 import configparser
 from BehaveAI_augmentation import load_augmentation_config
+from BehaveAI_settings_help import apply_theme, Tooltip, BUTTON_HELP
 
 
 # -------------------------- utils --------------------------
@@ -85,7 +87,9 @@ class ScriptRunnerApp:
 	def __init__(self, root):
 		self.root = root
 		root.title("BehaveAI Launcher")
-		root.geometry("980x560")
+		apply_theme(root)
+		root.geometry("1040x620")
+		root.minsize(900, 540)
 
 		# ===== Logo + action buttons row =====
 		base64_image = "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"
@@ -101,11 +105,11 @@ class ScriptRunnerApp:
 		self.current_project = None  # Path object or None
 
 		# ===== Top row: project controls =====
-		self.project_frame = Frame(root)
+		self.project_frame = ttk.Frame(root)
 		self.project_frame.pack(fill='x', padx=8, pady=(8, 0))
 
 		# logo
-		tk.Label(self.project_frame, image=self.logo_img).pack(side=tk.LEFT, padx=10)
+		tk.Label(self.project_frame, image=self.logo_img, background='#f4f5f7').pack(side=tk.LEFT, padx=10)
 		ttk.Label(self.project_frame, text="Project:").pack(side="left", padx=(4,6))
 
 		# Combobox for existing projects
@@ -115,44 +119,55 @@ class ScriptRunnerApp:
 		self.project_combo.bind("<<ComboboxSelected>>", lambda e: self.select_project(self.project_var.get()))
 
 		# New Project button
-		Button(self.project_frame, text="New project", command=self.create_new_project, width=10).pack(side="left", padx=(0,6))
+		ttk.Button(self.project_frame, text="New project", command=self.create_new_project, width=12).pack(side="left", padx=(0,6))
 
 		# Refresh projects button
-		Button(self.project_frame, text="Refresh", command=self.refresh_projects, width=6).pack(side="left", padx=(0,6))
+		ttk.Button(self.project_frame, text="Refresh", command=self.refresh_projects, width=8).pack(side="left", padx=(0,6))
 
 		# Current project label
 		self.current_label_var = tk.StringVar(value="(no project selected)")
 		ttk.Label(self.project_frame, textvariable=self.current_label_var).pack(side="left", padx=(10,6))
 
-		self.button_frame = Frame(root)
-		self.button_frame.pack(pady=10, fill='x')
+		# ===== Action buttons, grouped by pipeline stage =====
+		# Each stage is a labelled box so the workflow order is obvious to new users.
+		self.button_frame = ttk.Frame(root)
+		self.button_frame.pack(pady=8, padx=8, fill='x')
 
+		stages = [
+			("1 - Setup",    [("Settings", "BehaveAI_settings_gui.py")]),
+			("2 - Annotate", [("Annotate", "BehaveAI_annotation.py"),
+							   ("Annotate complex", "BehaveAI_annotation_complex.py"),
+							   ("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
+							   ("Augment Dataset", "BehaveAI_augmentation.py")]),
+			("3 - Train",    [("Train & batch classify", "BehaveAI_classify_track.py"),
+							   ("Train complex model", "BehaveAI_complex_model.py"),
+							   ("Propose candidates", "BehaveAI_complex_candidates.py")]),
+			("4 - Run",      [("Live", "BehaveAI_live.py")]),
+		]
 
 		# action buttons (initially disabled: enable after project selection)
 		self.buttons = {}
-		btn_names = [
-			("Settings", "BehaveAI_settings_gui.py"),
-			("Annotate", "BehaveAI_annotation.py"),
-			("Annotate complex", "BehaveAI_annotation_complex.py"),
-			("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
-			("Augment Dataset", "BehaveAI_augmentation.py"),
-			("Train & batch classify", "BehaveAI_classify_track.py"),
-			("Train complex model", "BehaveAI_complex_model.py"),
-			("Propose candidates", "BehaveAI_complex_candidates.py"),
-			("Live", "BehaveAI_live.py"),
-		]
-		for (label_text, script_name) in btn_names:
-			b = Button(self.button_frame, text=label_text,
-					   command=lambda s=script_name: self.run_script(s),
-					   width=18, state="disabled")
-			b.pack(side=tk.LEFT, padx=6)
-			self.buttons[script_name] = b
+		for stage_title, items in stages:
+			box = ttk.LabelFrame(self.button_frame, text=stage_title)
+			box.pack(side=tk.LEFT, padx=(0, 8), pady=2, fill='y', anchor='n')
+			for (label_text, script_name) in items:
+				b = ttk.Button(box, text=label_text,
+						   command=lambda s=script_name: self.run_script(s),
+						   width=20, state="disabled")
+				b.pack(side=tk.TOP, padx=6, pady=3, fill='x')
+				Tooltip(b, BUTTON_HELP.get(script_name, ""))
+				self.buttons[script_name] = b
 
-		# ScrolledText setup
-		self.output_area = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, state='normal', height=22)
+		# ===== Integrated output / log =====
+		ttk.Label(self.root, text="Output / log", style='Section.TLabel').pack(
+			anchor='w', padx=10, pady=(4, 0))
+
+		# Monospace so progress bars and the stats tables stay aligned.
+		mono = tkfont.nametofont("TkFixedFont").copy()
+		self.output_area = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, state='normal', height=22, font=mono)
 		self.output_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-		self.output_area.tag_config('stdout', foreground='black')
-		self.output_area.tag_config('stderr', foreground='blue')
+		self.output_area.tag_config('stdout', foreground='#1a1a1a')
+		self.output_area.tag_config('stderr', foreground='#b35a00')
 
 		self.stdout_rd = TextRedirector(self.output_area, 'stdout')
 		self.stderr_rd = TextRedirector(self.output_area, 'stderr')
