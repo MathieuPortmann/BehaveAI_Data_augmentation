@@ -42,7 +42,8 @@ PyYAML==6.0.3
 requests==2.32.5
 scikit-learn==1.9.0
 scipy==1.17.1
-setuptools==82.0.0
+# setuptools intentionally left unpinned: pinning ==82.0.0 conflicts with modern torch
+# (which requires setuptools<82) and forces pip to downgrade torch to an old CPU build.
 six==1.17.0
 sympy==1.14.0
 tqdm==4.67.3

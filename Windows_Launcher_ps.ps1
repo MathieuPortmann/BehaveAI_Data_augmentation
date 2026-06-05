@@ -273,33 +273,36 @@ try {
         $hasNvidia = Detect-NvidiaGPU
         $torchChoice = Choose-Torch-Wheel -nvidiaPresent:$hasNvidia
 
-        try {
-            if ($torchChoice.mode -eq "custom") {
-                # User pastes the exact install command from the PyTorch website.
-                [void](Invoke-CustomTorchInstall -venvPython $venvPython)
-            } else {
-                Write-Host "Installing PyTorch ($($torchChoice.label)) - version chosen by your machine/CUDA, not requirements.txt..."
-                # Unpinned on purpose: pip resolves the latest torch/torchvision available
-                # for the selected index (cpu/cuNNN) so the build matches this machine.
-                # torchaudio is omitted (not imported by the code).
-                & $venvPython -m pip install --index-url $torchChoice.indexUrl torch torchvision
-            }
-            if ($LASTEXITCODE -ne 0) { Write-Warning "PyTorch install returned non-zero exit code; you may need to retry manually." }
-        } catch {
-            Write-Warning "PyTorch installation raised an error: $_"
-        }
-
-        # Install the remaining dependencies from requirements.txt (the project's source of
-        # truth, 47 packages). Filter out torch/torchvision/torchaudio so we don't override
-        # the build we just installed from the chosen index with the default PyPI (CPU) build.
+        # 1) Install the project dependencies from requirements.txt FIRST. ultralytics/timm
+        #    pull a default (CPU) torch here; that is fine because we (re)install the
+        #    machine-specific torch build LAST so it always wins. (Installing torch before
+        #    requirements lets pip's transitive re-resolution downgrade it back to CPU.)
         if (-not (Test-Path $ReqFile)) { throw "requirements.txt not found at $ReqFile" }
-        Write-Host "Installing project dependencies from requirements.txt (excluding torch/vision)..."
+        Write-Host "Installing project dependencies from requirements.txt..."
+        # requirements.txt does not list torch/torchvision, but filter defensively in case.
         $reqLines = Get-Content $ReqFile | Where-Object { $_ -notmatch '^\s*(torch|torchvision|torchaudio)\b' }
         $tmpReq = Join-Path $env:TEMP "behaveai_requirements_filtered.txt"
         $reqLines | Set-Content -Encoding ascii $tmpReq
         & $venvPython -m pip install -r $tmpReq
         if ($LASTEXITCODE -ne 0) { throw "pip install of requirements.txt failed" }
         Remove-Item $tmpReq -ErrorAction SilentlyContinue
+
+        # 2) Install the machine-specific PyTorch LAST so it is the final, authoritative build.
+        try {
+            if ($torchChoice.mode -eq "custom") {
+                # User pastes the exact install command from the PyTorch website.
+                [void](Invoke-CustomTorchInstall -venvPython $venvPython)
+            } else {
+                Write-Host "Installing PyTorch ($($torchChoice.label)) - version chosen by your machine/CUDA, not requirements.txt..."
+                # --upgrade so it replaces any CPU torch pulled above; --no-deps so it cannot
+                # disturb the pinned requirements packages (numpy, etc.) - torch's runtime
+                # deps are already provided by requirements.txt. torchaudio omitted (unused).
+                & $venvPython -m pip install --upgrade --no-deps --index-url $torchChoice.indexUrl torch torchvision
+            }
+            if ($LASTEXITCODE -ne 0) { Write-Warning "PyTorch install returned non-zero exit code; you may need to retry manually." }
+        } catch {
+            Write-Warning "PyTorch installation raised an error: $_"
+        }
 
         Write-Host ""
         Write-Host "Verifying important imports inside the venv (this may take a moment)..."

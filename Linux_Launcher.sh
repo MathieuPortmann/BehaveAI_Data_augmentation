@@ -141,9 +141,10 @@ install_torch() {
   esac
 
   echo "Installing PyTorch (${idx##*/}) - version chosen by your machine/CUDA, not requirements.txt..."
-  # Unpinned on purpose: pip resolves the latest torch/torchvision for the selected index
-  # (cpu/cuNNN) so the build matches this machine. torchaudio omitted (not imported).
-  "${py}" -m pip install --index-url "${idx}" torch torchvision
+  # --upgrade so it replaces any CPU torch pulled by requirements.txt; --no-deps so it cannot
+  # disturb the pinned requirements packages (numpy, etc.) - torch's runtime deps are already
+  # provided by requirements.txt. torchaudio omitted (not imported by the code).
+  "${py}" -m pip install --upgrade --no-deps --index-url "${idx}" torch torchvision
 }
 
 bootstrap() {
@@ -170,22 +171,23 @@ bootstrap() {
     source "${VENV_DIR}/bin/activate"
     python -m pip install --upgrade pip setuptools wheel
 
-    # 1) Install torch/torchvision (CPU / CUDA / custom) via the interactive menu.
-    install_torch "${VENV_DIR}/bin/python"
-
-    # 2) Install the rest of the project dependencies from requirements.txt (the source of
-    #    truth). Exclude torch/torchvision/torchaudio (handled above) and opencv-python
-    #    (provided by apt's python3-opencv via --system-site-packages).
+    # 1) Install the project dependencies from requirements.txt FIRST (the source of truth).
+    #    Exclude opencv-python (provided by apt's python3-opencv via --system-site-packages)
+    #    and torch/torchvision (handled below). ultralytics/timm may pull a CPU torch here;
+    #    that is fine because install_torch reinstalls the machine build LAST so it wins.
+    #    NOTE: on ARM (Raspberry Pi) some packages (scipy, scikit-learn, matplotlib) may
+    #    build from source and take a while.
     if [ ! -f "${REQ_FILE}" ]; then
       echo "ERROR: requirements.txt not found at ${REQ_FILE}" >&2
       exit 1
     fi
     echo "Installing project dependencies from requirements.txt (excluding torch/vision/opencv)..."
-    # NOTE: on ARM (Raspberry Pi) some packages (scipy, scikit-learn, matplotlib) may build
-    # from source and take a while.
     grep -viE '^[[:space:]]*(torch|torchvision|torchaudio|opencv-python)\b' "${REQ_FILE}" > /tmp/behaveai_req_filtered.txt
     python -m pip install -r /tmp/behaveai_req_filtered.txt
     rm -f /tmp/behaveai_req_filtered.txt
+
+    # 2) Install the machine-specific torch LAST (CPU / CUDA / custom) so it is authoritative.
+    install_torch "${VENV_DIR}/bin/python"
   )
 
   # final sanity checks
