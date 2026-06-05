@@ -24,7 +24,11 @@ try {
     Write-Host "=== Windows_Launcher_ps.ps1 starting ==="
 
     # Config
-    $VENV_DIR = Join-Path $env:USERPROFILE "ultralytics-venv"
+    # Everything is self-contained next to this script so a freshly downloaded copy of
+    # the repo works with no external files: the venv and requirements.txt both live in
+    # the same folder as the launcher (and the BehaveAI .py code).
+    $VENV_DIR = Join-Path $ScriptDir "BehaveAI.venv"
+    $ReqFile = Join-Path $ScriptDir "requirements.txt"
     $PYTHON_CANDIDATES = @("py -3", "python", "python3")
     $MARKER = Join-Path $VENV_DIR ".ultralytics_ready"
 
@@ -75,6 +79,67 @@ try {
         return $false
     }
 
+    # Map a CUDA version string (e.g. "12.8") reported by nvidia-smi to the closest
+    # PyTorch wheel tag that actually ships a torch 2.10.0 build. Only cu126/cu128/cu130
+    # exist for torch 2.10.0; older toolkits (cu118/cu121/cu124) have no 2.10.0 wheel.
+    function Map-CudaVersionToWheel {
+        param([string]$ver)
+        if (-not $ver) { return $null }
+        $v = $null
+        if (-not [double]::TryParse($ver, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $null }
+        if ($v -ge 13.0) { return @{ indexUrl = "https://download.pytorch.org/whl/cu130"; label="cu130" } }
+        elseif ($v -ge 12.8) { return @{ indexUrl = "https://download.pytorch.org/whl/cu128"; label="cu128" } }
+        elseif ($v -ge 12.6) { return @{ indexUrl = "https://download.pytorch.org/whl/cu126"; label="cu126" } }
+        else { return $null }  # < 12.6: no compatible torch 2.10 CUDA wheel -> custom flow
+    }
+
+    # Open the PyTorch "get started" page and let the user paste the exact install
+    # command. We normalise it (strip a leading pip/python -m pip) and run it in the venv.
+    function Invoke-CustomTorchInstall {
+        param([string]$venvPython)
+
+        $url = "https://pytorch.org/get-started/locally/"
+        Write-Host ""
+        Write-Host "No compatible prebuilt CUDA wheel could be selected automatically." -ForegroundColor Yellow
+        Write-Host "Opening the official PyTorch install page in your web browser:"
+        Write-Host "  $url"
+        try { Start-Process $url } catch { Write-Warning "Could not open browser automatically. Open this URL manually: $url" }
+
+        Write-Host ""
+        Write-Host "On that page, pick your OS / package=pip / your CUDA version, then COPY the"
+        Write-Host "generated install command and PASTE it below (e.g.:"
+        Write-Host "  pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu124 )."
+        Write-Host ""
+        $pasted = Read-Host "Paste the PyTorch install command (or press Enter to cancel)"
+        if ([string]::IsNullOrWhiteSpace($pasted)) {
+            Write-Warning "No command provided. Skipping custom PyTorch install."
+            return $false
+        }
+
+        # Strip a leading pip / pip3 / python -m pip / python3 -m pip so we always run it
+        # through the venv's interpreter.
+        $argLine = $pasted.Trim()
+        $argLine = [regex]::Replace($argLine, '^(python3?\s+-m\s+pip|pip3?)\s+', '', 'IgnoreCase')
+
+        Write-Host ""
+        Write-Host "The following command will run inside the venv:" -ForegroundColor Cyan
+        Write-Host "  `"$venvPython`" -m pip $argLine"
+        $confirm = Read-Host "Run it now? (Y/N)"
+        if ($confirm.ToUpper() -ne 'Y') {
+            Write-Host "Custom PyTorch install cancelled."
+            return $false
+        }
+
+        # Split the argument line into tokens and invoke pip in the venv.
+        $pipArgs = @("-m", "pip") + ([regex]::Matches($argLine, '[^\s]+') | ForEach-Object { $_.Value })
+        & $venvPython @pipArgs
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Custom PyTorch install returned non-zero exit code ($LASTEXITCODE)."; return $false }
+        return $true
+    }
+
+    # Returns a hashtable describing how torch should be installed:
+    #   @{ mode = "index"; indexUrl = "..."; label = "cpu|cuNNN" }   -> pip install from index
+    #   @{ mode = "custom" }                                          -> user pastes command
     function Choose-Torch-Wheel {
         param([bool]$nvidiaPresent)
 
@@ -82,19 +147,20 @@ try {
         Write-Host "PyTorch install options:"
         Write-Host "  1) CPU-only (recommended default)"
         Write-Host "  2) Auto-detect NVIDIA GPU and pick a compatible CUDA wheel (requires NVIDIA driver)"
-        Write-Host "  3) Manually pick a CUDA wheel (advanced users)"
+        Write-Host "  3) Manually pick a CUDA wheel (cu126 / cu128 / cu130)"
+        Write-Host "  4) Custom install via the PyTorch website (paste the command)"
 
-        $choice = Read-Host "Choose option - 1=CPU-only, 2=Auto-detect NVIDIA (CUDA), 3=Manual pick. Enter 1/2/3 [default=1]"
-        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+        $choice = Read-Host "Choose option - 1=CPU, 2=Auto-detect, 3=Manual CUDA, 4=Custom. Enter 1/2/3/4 [default=2 auto]"
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "2" }
 
         switch ($choice) {
             "1" {
-                return @{ indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
+                return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
             }
             "2" {
                 if (-not $nvidiaPresent) {
                     Write-Warning "No NVIDIA GPU detected. Falling back to CPU-only."
-                    return @{ indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
+                    return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
                 }
 
                 Write-Host "Auto-detect: checking nvidia-smi for driver/CUDA info..."
@@ -102,9 +168,9 @@ try {
                 try {
                     $smi = & nvidia-smi 2>$null
                     if ($LASTEXITCODE -eq 0 -and $smi) {
-                        $cudaLine = ($smi | Select-String -Pattern "CUDA Version" -SimpleMatch).ToString()
+                        $cudaLine = ($smi | Select-String -Pattern "CUDA Version" -SimpleMatch | Select-Object -First 1)
                         if ($cudaLine) {
-                            $m = [regex]::Match($cudaLine, "CUDA Version:\s*([0-9]+\.[0-9]+)")
+                            $m = [regex]::Match($cudaLine.ToString(), "CUDA Version:\s*([0-9]+\.[0-9]+)")
                             if ($m.Success) { $ver = $m.Groups[1].Value; Write-Host "nvidia-smi reports CUDA $ver" }
                         }
                     }
@@ -112,36 +178,37 @@ try {
                     $ver = $null
                 }
 
-                if ($ver -and $ver.StartsWith("12")) {
-                    return @{ indexUrl = "https://download.pytorch.org/whl/cu121"; label="cu121" }
-                } elseif ($ver -and $ver.StartsWith("11.8")) {
-                    return @{ indexUrl = "https://download.pytorch.org/whl/cu118"; label="cu118" }
-                } elseif ($ver -and $ver.StartsWith("11.7")) {
-                    return @{ indexUrl = "https://download.pytorch.org/whl/cu117"; label="cu117" }
+                $wheel = Map-CudaVersionToWheel $ver
+                if ($wheel) {
+                    Write-Host "Auto-selected wheel: $($wheel.label)"
+                    return @{ mode="index"; indexUrl = $wheel.indexUrl; label = $wheel.label }
                 } else {
-                    Write-Warning "Could not confidently detect a CUDA version from nvidia-smi. Please choose manually."
-                    # fall through to manual selection
+                    Write-Warning "No torch 2.10 CUDA wheel matches your driver (CUDA '$ver'). Switching to custom install."
+                    return @{ mode="custom" }
                 }
             }
             "3" {
                 Write-Host ""
-                Write-Host "Manual CUDA wheel choices:"
-                Write-Host "  a) cu121 (CUDA 12.1)"
-                Write-Host "  b) cu118 (CUDA 11.8)"
-                Write-Host "  c) cu117 (CUDA 11.7)"
-                Write-Host "  d) cu116 (CUDA 11.6)"
-                $pick = Read-Host "Pick (a/b/c/d) or press Enter for cu118"
+                Write-Host "Manual CUDA wheel choices (only tags with a torch 2.10.0 build):"
+                Write-Host "  a) cu126 (CUDA 12.6)"
+                Write-Host "  b) cu128 (CUDA 12.8)"
+                Write-Host "  c) cu130 (CUDA 13.0)"
+                Write-Host "  d) Custom (paste command from the PyTorch website)"
+                $pick = Read-Host "Pick (a/b/c/d) or press Enter for cu128"
                 switch ($pick) {
-                    "a" { return @{ indexUrl = "https://download.pytorch.org/whl/cu121"; label="cu121" } }
-                    "b" { return @{ indexUrl = "https://download.pytorch.org/whl/cu118"; label="cu118" } }
-                    "c" { return @{ indexUrl = "https://download.pytorch.org/whl/cu117"; label="cu117" } }
-                    "d" { return @{ indexUrl = "https://download.pytorch.org/whl/cu116"; label="cu116" } }
-                    default { return @{ indexUrl = "https://download.pytorch.org/whl/cu118"; label="cu118" } }
+                    "a" { return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cu126"; label="cu126" } }
+                    "b" { return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cu128"; label="cu128" } }
+                    "c" { return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cu130"; label="cu130" } }
+                    "d" { return @{ mode="custom" } }
+                    default { return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cu128"; label="cu128" } }
                 }
+            }
+            "4" {
+                return @{ mode="custom" }
             }
             default {
                 Write-Host "Unknown choice; defaulting to CPU-only."
-                return @{ indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
+                return @{ mode="index"; indexUrl = "https://download.pytorch.org/whl/cpu"; label="cpu" }
             }
         }
     }
@@ -205,26 +272,34 @@ try {
         Write-Host "Checking for NVIDIA GPU..."
         $hasNvidia = Detect-NvidiaGPU
         $torchChoice = Choose-Torch-Wheel -nvidiaPresent:$hasNvidia
-        Write-Host "Selected: $($torchChoice.label)"
 
         try {
-            if ($torchChoice.label -eq "cpu") {
-                Write-Host "Installing CPU-only PyTorch..."
-                & $venvPython -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+            if ($torchChoice.mode -eq "custom") {
+                # User pastes the exact install command from the PyTorch website.
+                [void](Invoke-CustomTorchInstall -venvPython $venvPython)
             } else {
-                Write-Host "Installing CUDA-enabled PyTorch ($($torchChoice.label))."
-                $idx = $torchChoice.indexUrl
-                & $venvPython -m pip install --index-url $idx torch torchvision torchaudio
+                Write-Host "Installing PyTorch ($($torchChoice.label)) - version chosen by your machine/CUDA, not requirements.txt..."
+                # Unpinned on purpose: pip resolves the latest torch/torchvision available
+                # for the selected index (cpu/cuNNN) so the build matches this machine.
+                # torchaudio is omitted (not imported by the code).
+                & $venvPython -m pip install --index-url $torchChoice.indexUrl torch torchvision
             }
             if ($LASTEXITCODE -ne 0) { Write-Warning "PyTorch install returned non-zero exit code; you may need to retry manually." }
         } catch {
             Write-Warning "PyTorch installation raised an error: $_"
         }
 
-        Write-Host "Installing ultralytics and common dependencies inside venv..."
-        $packages = @("ultralytics[export]", "numpy", "tqdm", "pillow", "opencv-python", "ncnn")
-        & $venvPython -m pip install $packages
-        if ($LASTEXITCODE -ne 0) { throw "pip install of core packages failed" }
+        # Install the remaining dependencies from requirements.txt (the project's source of
+        # truth, 47 packages). Filter out torch/torchvision/torchaudio so we don't override
+        # the build we just installed from the chosen index with the default PyPI (CPU) build.
+        if (-not (Test-Path $ReqFile)) { throw "requirements.txt not found at $ReqFile" }
+        Write-Host "Installing project dependencies from requirements.txt (excluding torch/vision)..."
+        $reqLines = Get-Content $ReqFile | Where-Object { $_ -notmatch '^\s*(torch|torchvision|torchaudio)\b' }
+        $tmpReq = Join-Path $env:TEMP "behaveai_requirements_filtered.txt"
+        $reqLines | Set-Content -Encoding ascii $tmpReq
+        & $venvPython -m pip install -r $tmpReq
+        if ($LASTEXITCODE -ne 0) { throw "pip install of requirements.txt failed" }
+        Remove-Item $tmpReq -ErrorAction SilentlyContinue
 
         Write-Host ""
         Write-Host "Verifying important imports inside the venv (this may take a moment)..."
@@ -291,16 +366,18 @@ try {
         Stop-Transcript
         exit $exitCode
     } else {
-        $default = Join-Path (Get-Location) "BehaveAI.py"
+        # Default: run BehaveAI.py shipped next to this launcher (works no matter which
+        # folder the user double-clicks from).
+        $default = Join-Path $ScriptDir "BehaveAI.py"
         if (Test-Path $default) {
-            Write-Host "Running ./BehaveAI.py in $(Get-Location)"
+            Write-Host "Launching BehaveAI ($default)"
             & $venvPythonExe $default
             $exitCode = $LASTEXITCODE
             Write-Host "BehaveAI.py exited with code $exitCode"
             Stop-Transcript
             exit $exitCode
         } else {
-            Write-Host "No script provided and BehaveAI.py not found in $(Get-Location)." -ForegroundColor Yellow
+            Write-Host "BehaveAI.py not found next to the launcher ($ScriptDir)." -ForegroundColor Yellow
             Write-Host "Usage: Windows_Launcher.bat path\to\script.py [args...]"
             Stop-Transcript
             exit 2

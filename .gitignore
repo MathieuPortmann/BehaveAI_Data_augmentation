@@ -3,6 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Virtual environment (created by the launcher/installer, never commit)
+BehaveAI.venv/
+.ultralytics_ready
+
+# Launcher / installer logs
+Windows_Launcher_ps.log
+Windows_Uninstaller.log
+
 # Videos
 *.mp4
 *.avi

@@ -2,7 +2,7 @@
   BehaveAI - Windows_Uninstaller_ps.ps1 -- safe interactive uninstaller for the BehaveAI/yolo environment
   This version will NOT remove any scripts in the working directory (e.g. BehaveAI.py).
   It only removes:
-    - the virtualenv directory (default: %USERPROFILE%\ultralytics-venv)
+    - the virtualenv directory (default: <project root>\BehaveAI.venv)
     - the marker file inside the venv (.ultralytics_ready)
     - the installer transcript/log (Windows_Uninstaller.log) and the uninstaller log
 #>
@@ -23,8 +23,9 @@ try {
     Write-Host "It will also NOT remove system-installed Python."
     Write-Host ""
 
-    # Defaults — change here if you used a different venv location
-    $defaultVenv = Join-Path $env:USERPROFILE "ultralytics-venv"
+    # Defaults — the venv lives next to this script (self-contained inside the downloaded
+    # folder), named "BehaveAI.venv". Change here if you used a different venv location.
+    $defaultVenv = Join-Path $scriptDir "BehaveAI.venv"
     $venvPath = $defaultVenv
 
     if (-not (Test-Path $venvPath)) {
