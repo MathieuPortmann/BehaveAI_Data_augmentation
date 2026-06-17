@@ -7,8 +7,10 @@ Trains a classifier on the human complex-behaviour annotations
 and predicts complex behaviours over a video (<video>_complex_predictions.csv).
 
 The DEFAULT model is a scikit-learn baseline on fixed-size window feature vectors
-(robust with little data, interpretable). Optional lstm/transformer models over
-the per-frame feature sequence require torch and degrade gracefully when it is
+(robust with little data, interpretable). The lstm/transformer models train a real
+torch sequence network over the per-timestep feature sequence (each segment is
+sliced into complex_seq_steps sub-windows); they reuse the same features and the
+same by-video evaluation, and degrade gracefully to the baseline when torch is
 absent.
 
 First-class inputs: the per-individual YOLO simple-behaviour labels (primary AND,
@@ -87,6 +89,17 @@ def load_model_config(config_path):
 		'weight_metric':       d.get('interaction_weight_metric', 'duration'),
 		'confusion_merge_rate': float(d.get('complex_confusion_merge_rate', '0.20')),
 		'predict_min_proba':   float(d.get('complex_predict_min_proba', '0.5')),
+		# --- Deep sequence model (lstm/transformer) hyper-parameters ---
+		# All read with safe defaults so the deep path works even if these keys
+		# are absent from an older INI.
+		'seq_steps':           int(float(d.get('complex_seq_steps', '8'))),
+		'deep_epochs':         int(float(d.get('complex_deep_epochs', '60'))),
+		'deep_hidden':         int(float(d.get('complex_deep_hidden', '64'))),
+		'deep_layers':         int(float(d.get('complex_deep_layers', '1'))),
+		'deep_heads':          int(float(d.get('complex_deep_heads', '4'))),
+		'deep_dropout':        float(d.get('complex_deep_dropout', '0.2')),
+		'deep_lr':             float(d.get('complex_deep_lr', '0.001')),
+		'deep_batch':          int(float(d.get('complex_deep_batch', '16'))),
 	}
 
 
@@ -368,7 +381,8 @@ def _train_baseline(project_path, params, project_dir, config_path):
 	pipe.fit(X, y, clf__sample_weight=sample_weight)
 	model_dir = os.path.join(project_dir, MODEL_DIR_NAME)
 	os.makedirs(model_dir, exist_ok=True)
-	joblib.dump({'pipeline': pipe, 'classes': classes, 'params': params},
+	joblib.dump({'model_kind': 'baseline', 'pipeline': pipe,
+				 'classes': classes, 'params': params},
 				os.path.join(model_dir, 'pipeline.joblib'))
 	with open(os.path.join(model_dir, 'train_count.txt'), 'w') as f:
 		f.write(str(len(X)))
@@ -452,7 +466,15 @@ def classify_video(project_path, video_name):
 		print(f"No trained model at {model_path}; run train_model first.")
 		return
 	bundle = joblib.load(model_path)
-	pipe, classes = bundle['pipeline'], bundle['classes']
+	classes = bundle['classes']
+	model_kind = bundle.get('model_kind', 'baseline')
+	deep_predict = None
+	if model_kind == 'deep':
+		deep_predict = _load_deep_predictor(os.path.join(project_dir, MODEL_DIR_NAME), bundle)
+		if deep_predict is None:
+			return
+	else:
+		pipe = bundle['pipeline']
 
 	stem = video_name
 	for suf in ('_tracking_corrected.csv', '_tracking.csv', ''):
@@ -503,19 +525,25 @@ def classify_video(project_path, video_name):
 
 	# Predict each candidate; keep those above the probability threshold.
 	preds = []
-	feats = []
 	meta = []
-	for (s, e, ids) in candidates:
-		feat, _ = segment_feature_dict(cache, ids, s, e)
-		feats.append(feat); meta.append((s, e, ids))
-	if feats:
-		proba = pipe.predict_proba(feats)
-		for (s, e, ids), pr in zip(meta, proba):
-			j = int(np.argmax(pr))
-			if pr[j] >= thr:
-				preds.append({'start_frame': s, 'end_frame': e,
-							  'track_ids': ';'.join(ids),
-							  'behaviour': classes[j], 'probability': round(float(pr[j]), 4)})
+	if deep_predict is not None:
+		seqs = []
+		for (s, e, ids) in candidates:
+			seq, _ = _segment_sequence_dicts(cache, ids, s, e, params['seq_steps'])
+			seqs.append(seq); meta.append((s, e, ids))
+		proba = deep_predict(seqs) if seqs else np.zeros((0, len(classes)))
+	else:
+		feats = []
+		for (s, e, ids) in candidates:
+			feat, _ = segment_feature_dict(cache, ids, s, e)
+			feats.append(feat); meta.append((s, e, ids))
+		proba = pipe.predict_proba(feats) if feats else np.zeros((0, len(classes)))
+	for (s, e, ids), pr in zip(meta, proba):
+		j = int(np.argmax(pr))
+		if pr[j] >= thr:
+			preds.append({'start_frame': s, 'end_frame': e,
+						  'track_ids': ';'.join(ids),
+						  'behaviour': classes[j], 'probability': round(float(pr[j]), 4)})
 
 	preds = _merge_adjacent_predictions(preds)
 	out_path = os.path.join(output_dir, stem + '_complex_predictions.csv')
@@ -616,35 +644,396 @@ def analyse_confusion(project_path):
 
 
 # ---------------------------------------------------------------------------
-# Optional deep models (torch)
+# Optional deep models (torch): LSTM / Transformer over feature sequences
 # ---------------------------------------------------------------------------
+#
+# The deep path consumes a *temporal sequence* of the SAME features the baseline
+# pools: a labelled segment [start, end] is sliced into `seq_steps` contiguous
+# sub-windows and segment_feature_dict() is computed on each, yielding one feature
+# vector per timestep. The sequence model can therefore capture temporal dynamics
+# the baseline aggregates away, while reusing the tested feature code, the same
+# YOLO-label-bag + kinematic/graph features, and the same by-video evaluation.
+#
+# Saved bundle (model_complex/pipeline.joblib) carries model_kind='deep' plus the
+# fitted DictVectorizer, the standardisation stats and the architecture; the torch
+# weights live alongside in deep_model.pt. When torch is unavailable the trainer
+# falls back to the dependency-light baseline so the user always gets a model.
 
-def _train_deep_model(project_path, params, project_dir, config_path):
-	"""Optional LSTM/Transformer over per-frame feature sequences (needs torch).
+DEEP_WEIGHTS_NAME = 'deep_model.pt'
 
-	The scikit-learn baseline is the supported, evaluated default. The deep
-	sequence variants are a documented optional extension; this entry point checks
-	for torch, prints a clear message, and trains the dependable baseline so the
-	user always gets a usable, saved model.
+
+def _segment_sequence_dicts(cache, ids, start, end, n_steps):
+	"""Slice [start, end] into up to n_steps contiguous sub-windows and return a
+	list of per-timestep feature dicts (reusing segment_feature_dict), plus the
+	whole-segment quality weight."""
+	start, end = int(start), int(end)
+	total = max(1, end - start + 1)
+	n_steps = max(1, int(n_steps))
+	step = max(1, -(-total // n_steps))  # ceil division
+	seq = []
+	cs = start
+	while cs <= end:
+		ce = min(end, cs + step - 1)
+		feat, _ = segment_feature_dict(cache, ids, cs, ce)
+		seq.append(feat)
+		cs = ce + 1
+	# Whole-segment quality weight (consistent with the baseline's per-window one).
+	_, qw = segment_feature_dict(cache, ids, start, end)
+	return seq, qw
+
+
+def build_sequence_dataset(project_path, params=None):
+	"""Like build_dataset, but each sample is a *sequence* of per-timestep feature
+	dicts. Returns (X_seq, y, groups, weights)."""
+	config_path = _config_path_for(project_path)
+	if params is None:
+		params = load_model_config(config_path)
+	_, output_dir = _resolve_output_dir(config_path)
+
+	ann_files = sorted(glob.glob(os.path.join(output_dir, '*_complex_behaviours.csv')))
+	X_seq, y, groups, weights = [], [], [], []
+	if not ann_files:
+		return X_seq, y, groups, weights
+
+	n_steps = params['seq_steps']
+	for ann_path in ann_files:
+		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
+		csv_path = None
+		for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
+			p = os.path.join(output_dir, cand)
+			if os.path.exists(p):
+				csv_path = p
+				break
+		if csv_path is None:
+			print(f"  {stem}: no tracking CSV — annotations skipped.")
+			continue
+		cache = _build_video_cache(stem, csv_path, params)
+		with open(ann_path, newline='', encoding='utf-8') as f:
+			for r in csv.DictReader(f):
+				try:
+					s = int(r['start_frame']); e = int(r['end_frame'])
+					ids = [t for t in str(r['track_ids']).split(';') if t]
+					beh = (r.get('behaviour', '') or '').strip()
+				except (ValueError, KeyError, TypeError):
+					continue
+				if not beh or not ids or s >= e:
+					continue
+				seq, qw = _segment_sequence_dicts(cache, ids, s, e, n_steps)
+				if not seq:
+					continue
+				X_seq.append(seq); y.append(beh); groups.append(stem); weights.append(qw)
+	return X_seq, y, groups, weights
+
+
+def _vectorize_sequences(seqs, vec, mean, std):
+	"""Turn a list of dict-sequences into a list of standardised float32 arrays
+	[Ti, D] using a fitted DictVectorizer and per-feature mean/std."""
+	out = []
+	for seq in seqs:
+		mat = vec.transform(seq).astype('float32')   # [Ti, D]
+		mat = (mat - mean) / std
+		out.append(mat)
+	return out
+
+
+def _make_deep_components():
+	"""Build the torch-dependent pieces lazily (models + train/predict helpers).
+
+	Returns None if torch is unavailable so callers can degrade gracefully.
 	"""
 	try:
-		import torch  # noqa: F401
-		has_torch = True
+		import torch
+		import torch.nn as nn
 	except Exception:
-		has_torch = False
+		return None
 
-	if not has_torch:
+	class _SeqDataset(torch.utils.data.Dataset):
+		def __init__(self, X_list, y_idx=None, sw=None):
+			self.X = X_list
+			self.y = y_idx
+			self.sw = sw
+
+		def __len__(self):
+			return len(self.X)
+
+		def __getitem__(self, i):
+			x = torch.from_numpy(self.X[i])
+			y = -1 if self.y is None else int(self.y[i])
+			w = 1.0 if self.sw is None else float(self.sw[i])
+			return x, y, w
+
+	def _collate(batch):
+		xs, ys, ws = zip(*batch)
+		lengths = torch.tensor([x.shape[0] for x in xs], dtype=torch.long)
+		maxlen = int(lengths.max())
+		dim = xs[0].shape[1]
+		padded = torch.zeros(len(xs), maxlen, dim, dtype=torch.float32)
+		for i, x in enumerate(xs):
+			padded[i, :x.shape[0]] = x
+		return (padded, lengths,
+				torch.tensor(ys, dtype=torch.long),
+				torch.tensor(ws, dtype=torch.float32))
+
+	def _masked_mean(seq, lengths):
+		# seq: [B, T, H]; mean over valid timesteps.
+		mask = (torch.arange(seq.shape[1], device=seq.device)[None, :]
+				< lengths[:, None].to(seq.device)).unsqueeze(-1).float()
+		summed = (seq * mask).sum(dim=1)
+		return summed / mask.sum(dim=1).clamp(min=1.0)
+
+	class LSTMClassifier(nn.Module):
+		def __init__(self, input_dim, hidden, n_layers, n_classes, dropout):
+			super().__init__()
+			self.lstm = nn.LSTM(input_dim, hidden, num_layers=n_layers,
+								batch_first=True, bidirectional=True,
+								dropout=dropout if n_layers > 1 else 0.0)
+			self.head = nn.Sequential(nn.Dropout(dropout),
+									  nn.Linear(2 * hidden, n_classes))
+
+		def forward(self, x, lengths):
+			packed = nn.utils.rnn.pack_padded_sequence(
+				x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+			out, _ = self.lstm(packed)
+			out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
+			return self.head(_masked_mean(out, lengths))
+
+	class TransformerClassifier(nn.Module):
+		def __init__(self, input_dim, hidden, n_layers, n_heads, n_classes, dropout):
+			super().__init__()
+			# d_model must be divisible by n_heads.
+			d_model = max(n_heads, (hidden // n_heads) * n_heads)
+			self.proj = nn.Linear(input_dim, d_model)
+			self.pos = nn.Parameter(torch.zeros(1, 512, d_model))
+			layer = nn.TransformerEncoderLayer(
+				d_model=d_model, nhead=n_heads, dim_feedforward=2 * d_model,
+				dropout=dropout, batch_first=True)
+			self.encoder = nn.TransformerEncoder(layer, num_layers=max(1, n_layers))
+			self.head = nn.Sequential(nn.Dropout(dropout),
+									  nn.Linear(d_model, n_classes))
+			self._d_model = d_model
+
+		def forward(self, x, lengths):
+			h = self.proj(x)
+			t = h.shape[1]
+			h = h + self.pos[:, :t]
+			key_padding = (torch.arange(t, device=x.device)[None, :]
+						   >= lengths[:, None].to(x.device))
+			h = self.encoder(h, src_key_padding_mask=key_padding)
+			return self.head(_masked_mean(h, lengths))
+
+	def build_model(arch):
+		if arch['model_type'] == 'transformer':
+			m = TransformerClassifier(arch['input_dim'], arch['hidden'],
+									  arch['n_layers'], arch['n_heads'],
+									  arch['n_classes'], arch['dropout'])
+		else:
+			m = LSTMClassifier(arch['input_dim'], arch['hidden'],
+							   arch['n_layers'], arch['n_classes'], arch['dropout'])
+		return m
+
+	def train(model, X_list, y_idx, sample_w, class_w, epochs, lr, batch):
+		device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+		model.to(device)
+		ds = _SeqDataset(X_list, y_idx, sample_w)
+		loader = torch.utils.data.DataLoader(
+			ds, batch_size=max(1, batch), shuffle=True, collate_fn=_collate)
+		opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+		cw = torch.tensor(class_w, dtype=torch.float32, device=device)
+		crit = nn.CrossEntropyLoss(weight=cw, reduction='none')
+		model.train()
+		for _ in range(max(1, epochs)):
+			for padded, lengths, ys, ws in loader:
+				padded, ys, ws = padded.to(device), ys.to(device), ws.to(device)
+				opt.zero_grad()
+				logits = model(padded, lengths)
+				loss = (crit(logits, ys) * ws).mean()
+				loss.backward()
+				opt.step()
+		return model
+
+	def predict_proba(model, X_list, batch):
+		if not X_list:
+			return np.zeros((0, 0), dtype=float)
+		device = next(model.parameters()).device
+		ds = _SeqDataset(X_list)
+		loader = torch.utils.data.DataLoader(
+			ds, batch_size=max(1, batch), shuffle=False, collate_fn=_collate)
+		model.eval()
+		out = []
+		with torch.no_grad():
+			for padded, lengths, _ys, _ws in loader:
+				logits = model(padded.to(device), lengths)
+				out.append(torch.softmax(logits, dim=1).cpu().numpy())
+		return np.concatenate(out, axis=0)
+
+	return {
+		'torch': torch, 'build_model': build_model,
+		'train': train, 'predict_proba': predict_proba,
+	}
+
+
+def _fit_vectorizer(seqs):
+	"""Fit a DictVectorizer on every timestep dict and compute standardisation
+	stats. Returns (vec, mean, std)."""
+	flat = [d for seq in seqs for d in seq]
+	vec = DictVectorizer(sparse=False)
+	mat = vec.fit_transform(flat).astype('float32')
+	mean = mat.mean(axis=0)
+	std = mat.std(axis=0)
+	std[std < 1e-6] = 1.0
+	return vec, mean, std
+
+
+def _class_weights(y_idx, n_classes):
+	counts = np.bincount(np.asarray(y_idx, dtype=int), minlength=n_classes).astype(float)
+	counts[counts == 0] = 1.0
+	w = counts.sum() / (n_classes * counts)
+	return w
+
+
+def _train_deep_fold(comp, X_seq, y_idx, weights, n_classes, arch, params):
+	"""Fit vectorizer + a fresh model on the given (already-selected) data."""
+	vec, mean, std = _fit_vectorizer(X_seq)
+	X_list = _vectorize_sequences(X_seq, vec, mean, std)
+	fold_arch = dict(arch, input_dim=X_list[0].shape[1], n_classes=n_classes)
+	model = comp['build_model'](fold_arch)
+	class_w = _class_weights(y_idx, n_classes)
+	comp['train'](model, X_list, y_idx, weights, class_w,
+				  params['deep_epochs'], params['deep_lr'], params['deep_batch'])
+	return model, vec, mean, std, fold_arch
+
+
+def _train_deep_model(project_path, params, project_dir, config_path):
+	"""Train and save an LSTM/Transformer over feature sequences (needs torch).
+
+	Falls back to the scikit-learn baseline when torch is unavailable so the user
+	always gets a usable, saved model.
+	"""
+	if not _SKLEARN_AVAILABLE:
+		print("scikit-learn is required (DictVectorizer) for the deep model too. "
+			  "Install it with: pip install scikit-learn")
+		return None
+
+	comp = _make_deep_components()
+	if comp is None:
 		print(f"complex_model_type='{params['model_type']}' needs torch, which is "
-			  "not available — training the scikit-learn baseline instead.")
-	else:
-		print(f"complex_model_type='{params['model_type']}' selected. The LSTM/"
-			  "Transformer sequence model is a documented optional extension; the "
-			  "supported, by-video-evaluated path is the baseline, which is being "
-			  "trained now. Set complex_model_type=baseline to silence this.")
+			  "not available — training the scikit-learn baseline instead. "
+			  "Install torch to enable the sequence model.")
+		base = dict(params); base['model_type'] = 'baseline'
+		return _train_baseline(project_path, base, project_dir, config_path)
 
-	base = dict(params)
-	base['model_type'] = 'baseline'
-	return _train_baseline(project_path, base, project_dir, config_path)
+	X_seq, y, groups, weights = build_sequence_dataset(project_path, params)
+	if len(X_seq) < 2:
+		print(f"Not enough annotations to train ({len(X_seq)} found). "
+			  "Annotate more segments first.")
+		return None
+
+	classes = sorted(set(y))
+	cls_to_idx = {c: i for i, c in enumerate(classes)}
+	y_idx = [cls_to_idx[c] for c in y]
+	weights = np.asarray(weights, dtype=float)
+	n_classes = len(classes)
+	print(f"Complex {params['model_type']} model: {len(X_seq)} annotated segments, "
+		  f"{n_classes} class(es) across {len(set(groups))} video(s): {classes}")
+
+	arch = {
+		'model_type': params['model_type'],
+		'hidden':   params['deep_hidden'],
+		'n_layers': params['deep_layers'],
+		'n_heads':  params['deep_heads'],
+		'dropout':  params['deep_dropout'],
+		'seq_steps': params['seq_steps'],
+	}
+
+	# --- By-video CV for honest metrics (train a fresh model per fold) ---
+	metrics_lines = []
+	uniq_groups = sorted(set(groups))
+	if len(uniq_groups) >= 2:
+		if len(uniq_groups) <= 8:
+			folds = [[g] for g in uniq_groups]            # leave-one-video-out
+		else:
+			rng = np.random.RandomState(0)
+			shuffled = list(uniq_groups); rng.shuffle(shuffled)
+			folds = [shuffled[i::5] for i in range(5)]    # 5 grouped folds
+		groups_arr = np.asarray(groups)
+		y_true_cv, y_pred_cv = [], []
+		for held in folds:
+			held = set(held)
+			tr = [i for i in range(len(X_seq)) if groups[i] not in held]
+			te = [i for i in range(len(X_seq)) if groups[i] in held]
+			if not tr or not te or len(set(y_idx[i] for i in tr)) < 2:
+				continue
+			model, vec, mean, std, fa = _train_deep_fold(
+				comp, [X_seq[i] for i in tr], [y_idx[i] for i in tr],
+				weights[tr], n_classes, arch, params)
+			te_list = _vectorize_sequences([X_seq[i] for i in te], vec, mean, std)
+			proba = comp['predict_proba'](model, te_list, params['deep_batch'])
+			pred_idx = proba.argmax(axis=1)
+			y_true_cv.extend(classes[y_idx[i]] for i in te)
+			y_pred_cv.extend(classes[int(j)] for j in pred_idx)
+		if y_true_cv:
+			macro = f1_score(y_true_cv, y_pred_cv, average='macro',
+							 labels=classes, zero_division=0)
+			metrics_lines.append(f"By-video CV macro-F1: {macro:.3f}\n")
+			metrics_lines.append(classification_report(
+				y_true_cv, y_pred_cv, labels=classes, zero_division=0))
+			cm = confusion_matrix(y_true_cv, y_pred_cv, labels=classes)
+			metrics_lines.append("\nConfusion matrix (rows=true, cols=pred):\n")
+			metrics_lines.append("labels: " + ", ".join(classes) + "\n")
+			metrics_lines.append(np.array2string(cm))
+			_write_merge_suggestions(project_dir, classes, cm, params['confusion_merge_rate'])
+			print(f"  By-video CV macro-F1 = {macro:.3f}")
+	else:
+		metrics_lines.append("Only one annotated video — no by-video held-out "
+							 "evaluation possible. Annotate a second video for "
+							 "honest scores.\n")
+		print("  Single video; metrics not held-out.")
+
+	# --- Fit the final model on ALL data and save ---
+	model, vec, mean, std, final_arch = _train_deep_fold(
+		comp, X_seq, y_idx, weights, n_classes, arch, params)
+
+	model_dir = os.path.join(project_dir, MODEL_DIR_NAME)
+	os.makedirs(model_dir, exist_ok=True)
+	comp['torch'].save(model.state_dict(), os.path.join(model_dir, DEEP_WEIGHTS_NAME))
+	joblib.dump({'model_kind': 'deep', 'classes': classes, 'params': params,
+				 'vectorizer': vec, 'feat_mean': mean, 'feat_std': std,
+				 'arch': final_arch},
+				os.path.join(model_dir, 'pipeline.joblib'))
+	with open(os.path.join(model_dir, 'train_count.txt'), 'w') as f:
+		f.write(str(len(X_seq)))
+	try:
+		shutil.copy2(config_path, os.path.join(model_dir, 'saved_settings.ini'))
+	except Exception:
+		pass
+	with open(os.path.join(model_dir, 'metrics.txt'), 'w', encoding='utf-8') as f:
+		f.write("\n".join(metrics_lines) + "\n")
+	print(f"  Saved complex {params['model_type']} model -> {model_dir}")
+	return model
+
+
+def _load_deep_predictor(model_dir, bundle):
+	"""Reconstruct a trained deep model from a saved bundle. Returns a callable
+	predict_proba(seqs)->[N,C] over dict-sequences, or None if torch is missing."""
+	comp = _make_deep_components()
+	if comp is None:
+		print("This project's complex model is a deep (lstm/transformer) model but "
+			  "torch is not installed; cannot classify. Install torch or retrain "
+			  "with complex_model_type=baseline.")
+		return None
+	arch = bundle['arch']
+	model = comp['build_model'](arch)
+	state = comp['torch'].load(os.path.join(model_dir, DEEP_WEIGHTS_NAME),
+							   map_location='cpu')
+	model.load_state_dict(state)
+	vec, mean, std = bundle['vectorizer'], bundle['feat_mean'], bundle['feat_std']
+	batch = int(bundle['params'].get('deep_batch', 16))
+
+	def predict_proba(seqs):
+		X_list = _vectorize_sequences(seqs, vec, mean, std)
+		return comp['predict_proba'](model, X_list, batch)
+
+	return predict_proba
 
 
 # ---------------------------------------------------------------------------

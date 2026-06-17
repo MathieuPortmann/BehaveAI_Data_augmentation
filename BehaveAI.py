@@ -743,6 +743,23 @@ complex_behaviours_hotkeys =
 complex_model_type = baseline
 # Baseline classifier: random_forest | hist_gradient_boosting.
 complex_baseline_classifier = random_forest
+# Deep sequence model (lstm/transformer) hyper-parameters; ignored by 'baseline'.
+# Number of sub-windows a labelled segment is sliced into (sequence length).
+complex_seq_steps = 8
+# Training epochs for the deep model.
+complex_deep_epochs = 60
+# Hidden size of the LSTM / Transformer d_model.
+complex_deep_hidden = 64
+# Number of stacked recurrent / encoder layers.
+complex_deep_layers = 1
+# Attention heads (transformer only; must divide the effective d_model).
+complex_deep_heads = 4
+# Dropout used in the deep model.
+complex_deep_dropout = 0.2
+# Adam learning rate for the deep model.
+complex_deep_lr = 0.001
+# Mini-batch size for the deep model.
+complex_deep_batch = 16
 # Pairs farther apart than this (px) are ignored as interactions.
 complex_max_interaction_distance = 400
 # Minimum length (frames) of an interaction episode (per_segment granularity).

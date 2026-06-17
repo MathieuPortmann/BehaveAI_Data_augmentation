@@ -700,6 +700,50 @@ PARAM_HELP = {
         "what": "The scikit-learn algorithm used when model type = baseline.",
         "influence": "Different speed/accuracy trade-offs; both work on the aggregated feature window.",
     },
+    "complex_seq_steps": {
+        "short": "How many sub-windows a labelled segment is sliced into (lstm/transformer).",
+        "what": "Sequence length fed to the deep model: each segment becomes this many "
+                "per-timestep feature vectors.",
+        "influence": "More steps give finer temporal resolution but shorter sub-windows (noisier "
+                     "per-step features) and more compute. Ignored by the baseline.",
+    },
+    "complex_deep_epochs": {
+        "short": "Training epochs for the deep (lstm/transformer) model.",
+        "what": "Number of passes over the annotated sequences during training.",
+        "influence": "More epochs fit harder (risk of over-fitting on small data); fewer under-fit. "
+                     "Ignored by the baseline.",
+    },
+    "complex_deep_hidden": {
+        "short": "Hidden size of the LSTM / Transformer (d_model).",
+        "what": "Width of the recurrent/encoder representation.",
+        "influence": "Larger has more capacity but needs more data/compute. Ignored by the baseline.",
+    },
+    "complex_deep_layers": {
+        "short": "Number of stacked recurrent / encoder layers.",
+        "what": "Depth of the deep sequence model.",
+        "influence": "Deeper can model more complex dynamics but is harder to train on little data. "
+                     "Ignored by the baseline.",
+    },
+    "complex_deep_heads": {
+        "short": "Attention heads (transformer only).",
+        "what": "Number of self-attention heads; the effective d_model is rounded to a multiple.",
+        "influence": "More heads capture more relation types; must divide d_model. LSTM ignores this.",
+    },
+    "complex_deep_dropout": {
+        "short": "Dropout used in the deep model.",
+        "what": "Regularisation probability applied during training.",
+        "influence": "Higher reduces over-fitting but can under-fit small data. Ignored by the baseline.",
+    },
+    "complex_deep_lr": {
+        "short": "Adam learning rate for the deep model.",
+        "what": "Optimiser step size during deep-model training.",
+        "influence": "Too high diverges; too low trains slowly. Ignored by the baseline.",
+    },
+    "complex_deep_batch": {
+        "short": "Mini-batch size for the deep model.",
+        "what": "Number of sequences per optimiser step.",
+        "influence": "Larger is faster/steadier but uses more memory. Ignored by the baseline.",
+    },
     "complex_confusion_merge_rate": {
         "short": "Confusion rate above which a class pair is suggested for merging.",
         "what": "Threshold on true-vs-predicted confusion between two behaviour classes.",
