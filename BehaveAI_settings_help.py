@@ -387,6 +387,12 @@ PARAM_HELP = {
         "influence": "Higher = faster processing and longer apparent motion per step, but coarser "
                      "temporal detail. 0 keeps every frame.",
     },
+    "motion_threshold": {
+        "short": "Pixel-difference threshold below which inter-frame motion is ignored.",
+        "what": "Noise floor for the motion image: differences smaller than this are treated as static.",
+        "influence": "Higher suppresses sensor noise / lighting flicker but can erase subtle real "
+                     "motion; 0 keeps all detected differences.",
+    },
 
     # ---------------- Model type ----------------
     "val_frequency": {
@@ -565,6 +571,50 @@ PARAM_HELP = {
         "what": "Activity-budget filter on how much behaviour an ID must have to be counted.",
         "influence": "Higher removes fleeting/spurious IDs from group statistics; 0 disables the filter.",
     },
+    "reid_descriptor": {
+        "short": "Spatial layout of the appearance descriptor: global or grid.",
+        "what": "'global' = one masked HSV histogram of the box (legacy); 'grid' = one histogram per "
+                "foreground-aware cell, concatenated (a coarse body-parts descriptor).",
+        "influence": "'grid' captures local colour patterns (e.g. markings) for better discrimination "
+                     "but is more sensitive to pose/mask quality.",
+    },
+    "reid_grid": {
+        "short": "Grid layout 'RxC' for the grid descriptor (e.g. 3x3).",
+        "what": "Number of rows x columns the foreground box is split into for the grid descriptor.",
+        "influence": "Finer grids give more spatial detail but shorter per-cell histograms and more "
+                     "noise. Ignored when descriptor = global.",
+    },
+    "reid_foreground": {
+        "short": "Foreground masking method for the descriptor: hsv, sam2 or yoloseg.",
+        "what": "How the subject is separated from the background before building the descriptor.",
+        "influence": "hsv is fast and dependency-free; sam2/yoloseg are more accurate but need the "
+                     "segmentation model (fall back to hsv on failure).",
+    },
+    "reid_orient": {
+        "short": "Align the grid to the body's major axis (PCA on the mask).",
+        "what": "Rotates the grid so cells track head/tail orientation rather than image axes.",
+        "influence": "Improves cell-to-cell consistency across poses; adds a little cost and depends on "
+                     "a usable foreground mask. Ignored when descriptor = global.",
+    },
+    "reid_backbone": {
+        "short": "MegaDescriptor backbone tag for the embedding/megadescriptor method.",
+        "what": "Which BVRA MegaDescriptor variant to load (T-224, L-224, L-384, T-CNN-288).",
+        "influence": "Larger backbones (L-384) are more discriminative but slower and heavier; T-224 is "
+                     "the light default. Only used by the embedding/megadescriptor method.",
+    },
+    "reid_checkpoint": {
+        "short": "Path to a fine-tuned MegaDescriptor checkpoint (blank = auto-detect).",
+        "what": "Optional .pt produced by BehaveAI_reid_finetune.py. Empty auto-detects "
+                "model_reid/megadescriptor_finetuned.pt if present.",
+        "influence": "A project-specific checkpoint improves re-ID on your animals; blank uses the "
+                     "pretrained backbone.",
+    },
+    "ab_analysis_duration_s": {
+        "short": "Seconds of each video used for the activity budget (0 = whole video).",
+        "what": "Truncates the analysis window to a fixed duration from the start of the clip.",
+        "influence": "A fixed window makes budgets comparable across clips of different lengths; 0 uses "
+                     "the entire video.",
+    },
 
     # ---------------- Sub-grouping ----------------
     "subgroup_eps_bodylen": {
@@ -700,6 +750,12 @@ PARAM_HELP = {
         "short": "Scale of label text in output overlays.",
         "what": "Text size multiplier for drawn labels.",
         "influence": "Display only. Larger is readable but clutters crowded scenes.",
+    },
+    "buttons_per_row": {
+        "short": "Number of class buttons shown per row in the annotation window.",
+        "what": "Grid width of the class button panel in the annotation/inspect tools.",
+        "influence": "Display only. More columns fit more classes per row but make each button "
+                     "narrower; fewer columns give wider buttons but a taller panel.",
     },
 
     # ---------------- Activity budget ----------------

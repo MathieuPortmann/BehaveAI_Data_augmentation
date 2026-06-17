@@ -963,6 +963,11 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab2, from_=0, to=10000, textvariable=self.frame_skip_var, width=8, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
 		help_line(tab2, 'frame_skip').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
 
+		help_label(tab2, 'Motion threshold', 'motion_threshold').grid(row=m, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.motion_threshold_var = tk.IntVar(value=0)
+		ttk.Spinbox(tab2, from_=0, to=255, textvariable=self.motion_threshold_var, width=8, command=self._set_dirty).grid(row=m, column=1, sticky='w', padx=8); m += 1
+		help_line(tab2, 'motion_threshold').grid(row=m, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); m += 1
+
 		# TAB 4: Model type
 		tab3 = self._scroll_tab(notebook, 'Model type')
 
@@ -1181,6 +1186,54 @@ class SettingsEditorApp(tk.Tk):
 			font=_help_font, foreground='grey').grid(
 			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
 
+		# ---- Advanced ReID (appearance descriptor) ----
+		ttk.Label(tab_reid, text='Advanced ReID', style='Section.TLabel').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(12, 2)); rr += 1
+		ttk.Label(tab_reid, text='Shape of the appearance descriptor. Defaults reproduce the legacy '
+			'single-histogram behaviour; change only if you know the ReID body-part pipeline.',
+			font=_help_font, foreground='grey', wraplength=420, justify='left').grid(
+			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
+
+		self.reid_descriptor_var = tk.StringVar(value='global')
+		help_label(tab_reid, 'Descriptor layout', 'reid_descriptor').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_reid, values=['global', 'grid'], textvariable=self.reid_descriptor_var,
+			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
+		self.reid_descriptor_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab_reid, 'reid_descriptor').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
+		self.reid_grid_var = tk.StringVar(value='3x3')
+		help_label(tab_reid, 'Grid (RxC)', 'reid_grid').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Entry(tab_reid, textvariable=self.reid_grid_var, width=8).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
+		self.reid_grid_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab_reid, 'reid_grid').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
+		self.reid_foreground_var = tk.StringVar(value='hsv')
+		help_label(tab_reid, 'Foreground masking', 'reid_foreground').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_reid, values=['hsv', 'sam2', 'yoloseg'], textvariable=self.reid_foreground_var,
+			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
+		self.reid_foreground_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab_reid, 'reid_foreground').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
+		self.reid_orient_var = tk.BooleanVar(value=False)
+		cb_orient = ttk.Checkbutton(tab_reid, text='Orient grid to body axis  ' + 'ⓘ',
+			variable=self.reid_orient_var, command=self._set_dirty)
+		cb_orient.grid(row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(6, 0)); rr += 1
+		Tooltip(cb_orient, tooltip_text('reid_orient'))
+		help_line(tab_reid, 'reid_orient').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
+		self.reid_backbone_var = tk.StringVar(value='T-224')
+		help_label(tab_reid, 'MegaDescriptor backbone', 'reid_backbone').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_reid, values=['T-224', 'L-224', 'L-384', 'T-CNN-288'], textvariable=self.reid_backbone_var,
+			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
+		self.reid_backbone_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab_reid, 'reid_backbone').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
+		self.reid_checkpoint_var = tk.StringVar(value='')
+		help_label(tab_reid, 'Fine-tuned checkpoint', 'reid_checkpoint').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Entry(tab_reid, textvariable=self.reid_checkpoint_var, width=40).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
+		self.reid_checkpoint_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab_reid, 'reid_checkpoint').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
+
 		# TAB: Sub-grouping (fission-fusion) — observed spatial clusters per frame
 		tab_sg = self._scroll_tab(notebook, 'Sub-grouping')
 		sr = 0
@@ -1345,6 +1398,11 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
 		help_line(tab5, 'font_size').pack(anchor='w', padx=24, pady=(0, 4))
 
+		self.buttons_per_row_var = tk.IntVar(value=8)
+		help_label(tab5, 'Class buttons per row', 'buttons_per_row').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=1, to=20, textvariable=self.buttons_per_row_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'buttons_per_row').pack(anchor='w', padx=24, pady=(0, 4))
+
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
 		notebook.add(tab_ab, text='Activity Budget')
@@ -1378,6 +1436,14 @@ class SettingsEditorApp(tk.Tk):
 			textvariable=self.ab_group_type_field_index_var,
 			width=6, command=self._set_dirty).grid(row=7, column=1, sticky='w', padx=8)
 		help_line(tab_ab, 'ab_group_type_field_index').grid(row=8, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
+
+		self.ab_analysis_duration_var = tk.DoubleVar(value=0.0)
+		help_label(tab_ab, 'Analysis duration (s, 0 = whole video)', 'ab_analysis_duration_s').grid(
+			row=9, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_ab, from_=0.0, to=100000.0, increment=1.0,
+			textvariable=self.ab_analysis_duration_var,
+			width=10, command=self._set_dirty).grid(row=9, column=1, sticky='w', padx=8)
+		help_line(tab_ab, 'ab_analysis_duration_s').grid(row=10, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
 		# bottom save/cancel
 		bottom = ttk.Frame(self)
@@ -1452,6 +1518,7 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
+		self.buttons_per_row_var.set(int(d.get('buttons_per_row', fallback='8')))
 
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
@@ -1464,6 +1531,7 @@ class SettingsEditorApp(tk.Tk):
 		self.lum_weight_var.set(float(d.get('lum_weight', fallback='0.5')))
 		self.rgb_mult_var.set(d.get('rgb_multipliers', fallback='4,4,4'))
 		self.frame_skip_var.set(int(d.get('frame_skip', fallback='0')))
+		self.motion_threshold_var.set(int(float(d.get('motion_threshold', fallback='0'))))
 		# ~ self.scale_factor_var.set(float(d.get('scale_factor', fallback='1.0')))
 
 		# Save a snapshot of motion-related settings for later change detection
@@ -1514,6 +1582,13 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_max_disappeared_var.set(float(d.get('reid_max_disappeared_seconds', fallback='180.0')))
 		self.reid_max_position_var.set(float(d.get('reid_max_position_distance', fallback='500.0')))
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
+		# advanced re-id appearance descriptor
+		self.reid_descriptor_var.set(d.get('reid_descriptor', fallback='global'))
+		self.reid_grid_var.set(d.get('reid_grid', fallback='3x3'))
+		self.reid_foreground_var.set(d.get('reid_foreground', fallback='hsv'))
+		self.reid_orient_var.set(self._str_to_bool(d.get('reid_orient', fallback='false')))
+		self.reid_backbone_var.set(d.get('reid_backbone', fallback='T-224'))
+		self.reid_checkpoint_var.set(d.get('reid_checkpoint', fallback=''))
 
 		# sub-grouping (fission-fusion)
 		self.subgroup_eps_bodylen_var.set(float(d.get('subgroup_eps_bodylen', fallback='4.0')))
@@ -1587,6 +1662,7 @@ class SettingsEditorApp(tk.Tk):
 		self.ab_border_zone_ratio_var.set(float(d.get('ab_border_zone_ratio', fallback='0.15')))
 		self.ab_group_type_separator_var.set(d.get('ab_group_type_separator', fallback='_'))
 		self.ab_group_type_field_index_var.set(int(d.get('ab_group_type_field_index', fallback='4')))
+		self.ab_analysis_duration_var.set(float(d.get('ab_analysis_duration_s', fallback='0')))
 
 
 		self._set_dirty(False)
@@ -1923,6 +1999,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['scale_factor'] = '1.0'
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
+		new_default['buttons_per_row'] = str(self.buttons_per_row_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
 
 		# Data augmentation parameters
@@ -1956,6 +2033,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['ab_border_zone_ratio']     = str(self.ab_border_zone_ratio_var.get())
 		new_default['ab_group_type_separator']  = self.ab_group_type_separator_var.get()
 		new_default['ab_group_type_field_index'] = str(self.ab_group_type_field_index_var.get())
+		new_default['ab_analysis_duration_s']   = str(self.ab_analysis_duration_var.get())
 
 		# motion strategy
 		new_default['strategy'] = self.strategy_var.get()
@@ -1965,6 +2043,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['lum_weight'] = str(self.lum_weight_var.get())
 		new_default['rgb_multipliers'] = self.rgb_mult_var.get()
 		new_default['frame_skip'] = str(self.frame_skip_var.get())
+		new_default['motion_threshold'] = str(self.motion_threshold_var.get())
 		# ~ new_default['scale_factor'] = str(self.scale_factor_var.get())
 
 		# model type
@@ -2000,6 +2079,12 @@ class SettingsEditorApp(tk.Tk):
 		new_default['reid_max_disappeared_seconds'] = str(self.reid_max_disappeared_var.get())
 		new_default['reid_max_position_distance'] = str(self.reid_max_position_var.get())
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
+		new_default['reid_descriptor'] = self.reid_descriptor_var.get()
+		new_default['reid_grid'] = self.reid_grid_var.get()
+		new_default['reid_foreground'] = self.reid_foreground_var.get()
+		new_default['reid_orient'] = str(self.reid_orient_var.get()).lower()
+		new_default['reid_backbone'] = self.reid_backbone_var.get()
+		new_default['reid_checkpoint'] = self.reid_checkpoint_var.get().strip()
 
 		# sub-grouping (fission-fusion)
 		new_default['subgroup_eps_bodylen'] = str(self.subgroup_eps_bodylen_var.get())
