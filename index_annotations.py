@@ -245,14 +245,21 @@ class AnnotationIndex:
 	# ------------------------------------------------------------------
 	def _attach_secondary_crops(self, item, boxes):
 		MATCH_TOL = 2
-		# build map by (x1, y1, primary_name) -> list of box indices
+		# Pooled crop layout: annot_<stream>_crop/<secondary>/. Crops carry no
+		# primary info, so we match on (x1, y1) only.
 		box_index = {}
 		for bi, b in enumerate(boxes):
 			bx1 = int(round(b[0])); by1 = int(round(b[1]))
-			primary_idx = b[4] if len(b) > 4 else None
-			primary_name = self.primary_classes[primary_idx] if primary_idx is not None and primary_idx < len(self.primary_classes) else None
-			key = (bx1, by1, primary_name)
-			box_index.setdefault(key, []).append(bi)
+			box_index.setdefault((bx1, by1), []).append(bi)
+
+		def _set_secondary(bi, sec_idx):
+			b = boxes[bi]
+			if len(b) >= 8:
+				boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
+			else:
+				primary_cls = b[4] if len(b) > 4 else 0
+				conf = b[6] if len(b) > 6 else -1
+				boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
 
 		# prepare mapping secondary dir name -> index
 		sec_name_to_idx = {name: idx for idx, name in enumerate(self.secondary_classes)}
@@ -268,63 +275,46 @@ class AnnotationIndex:
 			video_label_guess = item.get('basename', '')
 			frame_number_guess = None
 
-		# scan both cropped base dirs (motion then static)
+		# scan both cropped base dirs (motion then static); each contains
+		# <secondary>/ subfolders directly.
 		for base_crop_dir in (self.motion_cropped_base_dir, self.static_cropped_base_dir):
 			if not base_crop_dir or not os.path.isdir(base_crop_dir):
 				continue
-			for primary_name in os.listdir(base_crop_dir):
-				prim_dir = os.path.join(base_crop_dir, primary_name)
-				if not os.path.isdir(prim_dir):
+			for secondary_name in os.listdir(base_crop_dir):
+				sec_dir = os.path.join(base_crop_dir, secondary_name)
+				if not os.path.isdir(sec_dir):
 					continue
-				for secondary_name in os.listdir(prim_dir):
-					sec_dir = os.path.join(prim_dir, secondary_name)
-					if not os.path.isdir(sec_dir):
+				sec_idx = sec_name_to_idx.get(secondary_name)
+				if sec_idx is None:
+					continue
+				for fn in os.listdir(sec_dir):
+					if not fn.lower().endswith(('.jpg', '.jpeg', '.png')):
 						continue
-					sec_idx = sec_name_to_idx.get(secondary_name)
-					if sec_idx is None:
+					parsed = self._parse_crop_filename(fn)
+					if parsed is None:
 						continue
-					for fn in os.listdir(sec_dir):
-						if not fn.lower().endswith(('.jpg', '.jpeg', '.png')):
-							continue
-						parsed = self._parse_crop_filename(fn)
-						if parsed is None:
-							continue
-						vlabel_part, fn_frame, x1_fn, y1_fn = parsed
-						if vlabel_part != video_label_guess or fn_frame != frame_number_guess:
-							continue
-						# exact key match first
-						key = (x1_fn, y1_fn, primary_name)
-						matched = False
-						if key in box_index:
-							for bi in box_index[key]:
-								b = boxes[bi]
-								if len(b) >= 8:
-									boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
-								else:
-									primary_cls = b[4] if len(b) > 4 else 0
-									conf = b[6] if len(b) > 6 else -1
-									boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
-								matched = True
-						if matched:
-							continue
-						# otherwise small neighbourhood search
-						for dx in range(-MATCH_TOL, MATCH_TOL + 1):
-							if matched: break
-							for dy in range(-MATCH_TOL, MATCH_TOL + 1):
-								cand = (x1_fn + dx, y1_fn + dy, primary_name)
-								if cand in box_index:
-									for bi in box_index[cand]:
-										b = boxes[bi]
-										if len(b) >= 8:
-											boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
-										else:
-											primary_cls = b[4] if len(b) > 4 else 0
-											conf = b[6] if len(b) > 6 else -1
-											boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
-										matched = True
-										break
-									if matched: break
-							if matched: break
+					vlabel_part, fn_frame, x1_fn, y1_fn = parsed
+					if vlabel_part != video_label_guess or fn_frame != frame_number_guess:
+						continue
+					# exact (x1, y1) match first
+					matched = False
+					if (x1_fn, y1_fn) in box_index:
+						for bi in box_index[(x1_fn, y1_fn)]:
+							_set_secondary(bi, sec_idx)
+							matched = True
+					if matched:
+						continue
+					# otherwise small neighbourhood search
+					for dx in range(-MATCH_TOL, MATCH_TOL + 1):
+						if matched: break
+						for dy in range(-MATCH_TOL, MATCH_TOL + 1):
+							cand = (x1_fn + dx, y1_fn + dy)
+							if cand in box_index:
+								for bi in box_index[cand]:
+									_set_secondary(bi, sec_idx)
+									matched = True
+								if matched: break
+						if matched: break
 
 		return boxes
 

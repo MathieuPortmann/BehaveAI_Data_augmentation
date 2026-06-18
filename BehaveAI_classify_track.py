@@ -6,6 +6,7 @@ import glob
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
 import configparser
+from behaveai_config import load_secondary_config
 import time
 import shutil
 import tkinter as tk
@@ -223,47 +224,30 @@ try:
 	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
 
-	secondary_motion_classes = [name.strip() for name in config['DEFAULT']['secondary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_motion_colors', '').split(';') if c.strip()]
-	secondary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_motion_hotkeys'].split(',')]
-
 	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
 	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
 
-	secondary_static_classes = [name.strip() for name in config['DEFAULT']['secondary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_static_colors', '').split(';') if c.strip()]
-	secondary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_static_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_static_hotkeys'].split(',')]
-
-	if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-		hierarchical_mode = True
-		motion_cropped_base_dir = 'annot_motion_crop'
-		static_cropped_base_dir = 'annot_static_crop'
-
-		# secondary classes need more than one value, so clear if there's only one value
-		if len(secondary_motion_classes) == 1:
-			secondary_motion_classes = []
-			secondary_motion_colors = []
-			secondary_motion_hotkeys = []
-
-		if len(secondary_static_classes) == 1:
-			secondary_static_classes = []
-			secondary_static_colors = []
-			secondary_static_hotkeys = []
-
-	else: hierarchical_mode = False
-
+	motion_cropped_base_dir = 'annot_motion_crop'
+	static_cropped_base_dir = 'annot_static_crop'
 
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
-	secondary_classes = secondary_static_classes + secondary_motion_classes
-	secondary_colors = secondary_static_colors + secondary_motion_colors
-	secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
+	# ---- Shared secondary configuration (pool + per-primary mapping) ----
+	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
+	secondary_classes = _sec_cfg['secondary_classes']
+	secondary_colors = _sec_cfg['secondary_colors']
+	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
+	secondary_map = _sec_cfg['secondary_map']
+	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
+	hierarchical_mode = _sec_cfg['hierarchical_mode']
+
+	# Derived: primaries that have no secondary at all (kept for legacy guards).
+	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
+						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 
 	primary_static_project_path = 'model_primary_static'
 	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
@@ -273,7 +257,6 @@ try:
 	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
 	primary_motion_yaml_path = 'motion_annotations.yaml'
 
-	ignore_secondary = [name.strip() for name in config['DEFAULT']['ignore_secondary'].split(',')]
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
 	primary_classifier = config['DEFAULT'].get('primary_classifier', 'yolo11s.pt')
@@ -289,16 +272,6 @@ try:
 		secondary_motion_project_path = 'model_secondary_motion'
 		secondary_motion_data_path = 'annot_motion_crop'
 		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
-
-		secondary_class_ids = list(range(len(secondary_classes)))
-		paired = list(zip(secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys))
-		paired_sorted = sorted(paired, key=lambda x: x[0].lower())
-		secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = zip(*paired_sorted)
-		# Convert back to lists
-		secondary_classes = list(secondary_classes)
-		secondary_colors = list(secondary_colors)
-		secondary_class_ids = list(secondary_class_ids)
-		secondary_hotkeys = list(secondary_hotkeys)
 
 	# Common parameters
 	scale_factor = float(config['DEFAULT'].get('scale_factor', '1.0'))
@@ -357,12 +330,8 @@ except KeyError as e:
 
 if len(primary_motion_classes) != len(primary_motion_colors) or len(primary_motion_classes) != len(primary_motion_hotkeys):
 	raise ValueError("Primary motion classes, colors and hotkeys must match in configuration.")
-if len(secondary_motion_classes) != len(secondary_motion_colors) or len(secondary_motion_classes) != len(secondary_motion_hotkeys):
-	raise ValueError("Secondary motion classes, colors and hotkeys must match in configuration.")
 if len(primary_static_classes) != len(primary_static_colors) or len(primary_static_classes) != len(primary_static_hotkeys):
 	raise ValueError("Primary static classes, colors and hotkeys must match in configuration.")
-if len(secondary_static_classes) != len(secondary_static_colors) or len(secondary_static_classes) != len(secondary_static_hotkeys):
-	raise ValueError("Secondary static classes, colors and hotkeys must match in configuration.")
 if dominant_source != 'motion' and dominant_source != 'static' and dominant_source != 'confidence':
 	raise ValueError("dominant_source must be motion, static, or confidence")
 
@@ -546,75 +515,26 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 		return True
 
 
-# Train secondary classifiers for each static class
-secondary_static_models = None
-secondary_motion_models = None
-
-if hierarchical_mode:
-	secondary_static_models = {}
-	static_class_map = [[None] * len(secondary_classes) for _ in range(len(primary_classes))]
-	if len(secondary_static_classes) >= 2:
-		for primary_class in primary_classes:
-			idx = primary_classes.index(primary_class)
-			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys:
-				continue
-
-			if primary_class in ignore_secondary:
-				continue
-
-			data_dir = os.path.join(secondary_static_data_path, primary_class)
-			# Skip if directory doesn't exist
-			if not os.path.isdir(data_dir):
-				continue
-
-			# Create model directory for this static class
-			model_dir = f"model_static_static_{primary_class}"
-			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-			maybe_retrain(model_dir, data_dir, model_dir,
-				weights_path, secondary_classifier, secondary_epochs, 224)
-
-			# Load the trained model
-			if use_ncnn == 'true':
-				secondary_static_models[primary_class] = load_model_with_ncnn_preference(weights_path, "classify")
-			else:
-				secondary_static_models[primary_class] = YOLO(weights_path)
+# Two per-stream secondary classifiers, trained on the pooled crop folders
+# annot_<stream>_crop/<secondary>/ (one model per stream, shared label pool).
+secondary_static_model = None
+secondary_motion_model = None
 
 
-		# ~ print(f"secondary_static_models {secondary_static_models}")
+def _count_class_subdirs(d):
+	"""Count immediate subfolders of `d` that contain at least one image."""
+	if not d or not os.path.isdir(d):
+		return 0
+	n = 0
+	for name in os.listdir(d):
+		sub = os.path.join(d, name)
+		try:
+			if os.path.isdir(sub) and any(f.lower().endswith(('.jpg', '.jpeg', '.png')) for f in os.listdir(sub)):
+				n += 1
+		except Exception:
+			continue
+	return n
 
-	secondary_motion_models = {}
-	motion_class_map = [[None] * len(secondary_classes) for _ in range(len(primary_classes))]
-	if len(secondary_motion_classes) >= 2:
-		for primary_class in primary_classes:
-			idx = primary_classes.index(primary_class)
-			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys:
-				continue
-
-			if primary_class in ignore_secondary:
-				continue
-
-			data_dir = os.path.join(secondary_motion_data_path, primary_class)
-			# Skip if directory doesn't exist
-			if not os.path.isdir(data_dir):
-				continue
-
-			# Create model directory for this static class
-			model_dir = f"model_secondary_motion_{primary_class}"
-			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-			maybe_retrain(model_dir, data_dir, model_dir,
-				weights_path, secondary_classifier, secondary_epochs, 224)
-
-			# Load the trained model
-			if use_ncnn == 'true':
-				secondary_motion_models[primary_class] = load_model_with_ncnn_preference(weights_path, "classify")
-			else:
-				secondary_motion_models[primary_class] = YOLO(weights_path)
-
-		# ~ print(f"secondary_motion_models {secondary_motion_models}")
 
 if __name__ == '__main__':
 	#-------CHECK PRIMARY MODEL EXISTS----------
@@ -626,6 +546,25 @@ if __name__ == '__main__':
 	if primary_motion_classes[0] != '0':
 		maybe_retrain('primary motion', primary_motion_yaml_path, primary_motion_project_path,
 			primary_motion_model_path, primary_classifier, primary_epochs, 640)
+
+	if hierarchical_mode:
+		# Static stream (pooled over all static primaries)
+		if _count_class_subdirs(secondary_static_data_path) >= 2:
+			maybe_retrain('secondary_static', secondary_static_data_path, secondary_static_project_path,
+				secondary_static_model_path, secondary_classifier, secondary_epochs, 224)
+			if use_ncnn == 'true':
+				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
+			else:
+				secondary_static_model = YOLO(secondary_static_model_path)
+
+		# Motion stream (pooled over all motion primaries)
+		if _count_class_subdirs(secondary_motion_data_path) >= 2:
+			maybe_retrain('secondary_motion', secondary_motion_data_path, secondary_motion_project_path,
+				secondary_motion_model_path, secondary_classifier, secondary_epochs, 224)
+			if use_ncnn == 'true':
+				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
+			else:
+				secondary_motion_model = YOLO(secondary_motion_model_path)
 
 
 	# --- PARAMETERS -----------------------------------------------------------
@@ -1170,49 +1109,52 @@ if __name__ == '__main__':
 					if hierarchical_mode:
 						x1, y1, x2, y2 = coords
 
-						# Determine which secondary model to use based on source and configuration
-						sec_model = None
-						sec_classes = []
-						crop_img = None
-
+						# Per-stream secondary model + crop source, and the global
+						# primary index (to restrict output to allowed secondaries).
 						if source == 'static':
-							# Use static secondary model if configured
-							if len(secondary_static_classes) >= 2:
-								sec_model = secondary_static_models.get(primary_class, None)
-								sec_classes = secondary_static_classes
-								crop_img = frame
-							# Fallback to motion secondary model if static not available
-							elif len(secondary_motion_classes) >= 2:
-								sec_model = secondary_motion_models.get(primary_class, None)
-								sec_classes = secondary_motion_classes
-								crop_img = motion_image if primary_motion_classes[0] != '0' else frame
+							sec_model = secondary_static_model
+							crop_img = frame
+							try:
+								g_idx = primary_static_classes.index(primary_class)
+							except ValueError:
+								g_idx = -1
 						else:  # motion source
-							# Use motion secondary model if configured
-							if len(secondary_motion_classes) >= 2:
-								sec_model = secondary_motion_models.get(primary_class, None)
-								sec_classes = secondary_motion_classes
-								crop_img = motion_image
-							# Fallback to static secondary model if motion not available
-							elif len(secondary_static_classes) >= 2:
-								sec_model = secondary_static_models.get(primary_class, None)
-								sec_classes = secondary_static_classes
-								crop_img = frame
+							sec_model = secondary_motion_model
+							crop_img = motion_image
+							try:
+								g_idx = len(primary_static_classes) + primary_motion_classes.index(primary_class)
+							except ValueError:
+								g_idx = -1
 
-						# Get the cropped region
-						crop = None
-						if crop_img is not None:
+						allowed = allowed_secondary_idx[g_idx] if 0 <= g_idx < len(allowed_secondary_idx) else []
+
+						secondary_class = ''
+						secondary_conf = 0.0
+
+						# Classify only when a model exists and the primary allows secondaries;
+						# restrict the prediction to the allowed secondaries of this primary.
+						if sec_model is not None and allowed and crop_img is not None:
 							crop = crop_img[y1:y2, x1:x2]
-
-						secondary_class = primary_class
-						secondary_conf = 1.0
-
-						# Run secondary classification if we have a model and valid crop
-						if sec_model and crop is not None and crop.size > 0:
-							sec_results = sec_model.predict(crop, verbose=False)
-							if sec_results[0].probs is not None:
-								secondary_class_idx = sec_results[0].probs.top1
-								secondary_conf = sec_results[0].probs.top1conf.item()
-								secondary_class = sec_model.names[secondary_class_idx]
+							if crop is not None and crop.size > 0:
+								try:
+									sec_results = sec_model.predict(crop, verbose=False)
+								except Exception:
+									sec_results = None
+								if sec_results and sec_results[0].probs is not None:
+									allowed_names = set(secondary_classes[i] for i in allowed)
+									probs = sec_results[0].probs.data
+									best_conf = -1.0
+									for m_idx, nm in sec_model.names.items():
+										if nm not in allowed_names:
+											continue
+										try:
+											c = float(probs[m_idx])
+										except Exception:
+											continue
+										if c > best_conf:
+											best_conf = c
+											secondary_class = nm
+											secondary_conf = c
 
 						# Add secondary results to detection
 						if source == 'static':

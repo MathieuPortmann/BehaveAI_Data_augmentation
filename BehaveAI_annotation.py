@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
+from behaveai_config import load_secondary_config
 
 
 # Try to import YOLO
@@ -91,20 +92,10 @@ try:
 	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
 
-	secondary_motion_classes = [name.strip() for name in config['DEFAULT']['secondary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_motion_colors', '').split(';') if c.strip()]
-	secondary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_motion_hotkeys'].split(',')]
-
 	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
 	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
-
-	secondary_static_classes = [name.strip() for name in config['DEFAULT']['secondary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_static_colors', '').split(';') if c.strip()]
-	secondary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_static_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_static_hotkeys'].split(',')]
 
 	primary_static_project_path = 'model_primary_static'
 	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
@@ -114,37 +105,28 @@ try:
 	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
 	primary_motion_yaml_path = 'motion_annotations.yaml'
 
-	ignore_secondary = [name.strip() for name in config['DEFAULT']['ignore_secondary'].split(',')]
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
 
 	motion_cropped_base_dir = 'annot_motion_crop'
 	static_cropped_base_dir = 'annot_static_crop'
 
-	if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-		hierarchical_mode = True
-
-		# secondary classes need more than one value, so clear if there's only one value
-		if len(secondary_motion_classes) == 1:
-			secondary_motion_classes = []
-			secondary_motion_colors = []
-			secondary_motion_hotkeys = []
-
-		if len(secondary_static_classes) == 1:
-			secondary_static_classes = []
-			secondary_static_colors = []
-			secondary_static_hotkeys = []
-
-	else: hierarchical_mode = False
-
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
-	secondary_classes = secondary_static_classes + secondary_motion_classes
-	secondary_colors = secondary_static_colors + secondary_motion_colors
-	secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
+	# ---- Shared secondary configuration (pool + per-primary mapping) ----
+	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
+	secondary_classes = _sec_cfg['secondary_classes']
+	secondary_colors = _sec_cfg['secondary_colors']
+	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
+	secondary_map = _sec_cfg['secondary_map']
+	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
+	hierarchical_mode = _sec_cfg['hierarchical_mode']
 
+	# Derived: primaries that have no secondary at all (kept for legacy guards).
+	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
+						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 
 	if hierarchical_mode:
 		secondary_static_project_path = 'model_secondary_static'
@@ -154,16 +136,6 @@ try:
 		secondary_motion_project_path = 'model_secondary_motion'
 		secondary_motion_data_path = 'annot_motion_crop'
 		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
-
-		secondary_class_ids = list(range(len(secondary_classes)))
-		paired = list(zip(secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys))
-		paired_sorted = sorted(paired, key=lambda x: x[0].lower())
-		secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = zip(*paired_sorted)
-		# Convert back to lists
-		secondary_classes = list(secondary_classes)
-		secondary_colors = list(secondary_colors)
-		secondary_class_ids = list(secondary_class_ids)
-		secondary_hotkeys = list(secondary_hotkeys)
 
 
 	static_train_images_dir = 'annot_static/images/train'
@@ -213,14 +185,15 @@ if save_empty_frames not in ('true', 'false'):
 
 primary_classes_info = list(zip(primary_hotkeys, primary_classes))
 secondary_classes_info = list(zip(secondary_hotkeys, secondary_classes))
-primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info)}
-secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info)}
+primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info) if key}
+secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info) if key}
 
 # initial selections
 active_primary = 0
 if len(primary_static_classes) <= 1:
 	active_primary = 1
-active_secondary = 0
+# -1 is the "no secondary" sentinel (secondary is optional per box)
+active_secondary = -1
 
 
 annotation_index = AnnotationIndex(
@@ -631,75 +604,76 @@ if YOLO is not None:
 		except Exception as e:
 			print("Failed to load primary motion model:", e)
 
-secondary_static_models = {}
-secondary_motion_models = {}
+# Two per-stream secondary classifiers (shared pool of secondary labels).
+# Crops are routed by the primary's stream; each model's classes are the union
+# of secondaries mapped to that stream's primaries.
+secondary_static_model = None
+secondary_motion_model = None
 
-if hierarchical_mode:
-	secondary_static_models = {}
-	static_class_map = [[None] * len(secondary_classes) for _ in range(len(primary_classes))]
-	if len(secondary_static_classes) >= 2:
-		for primary_class in primary_classes:
-			idx = primary_classes.index(primary_class)
-			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys:
-				continue
+if hierarchical_mode and YOLO is not None:
+	_ss_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
+	if os.path.exists(_ss_path):
+		try:
+			secondary_static_model = YOLO(_ss_path)
+			print('Secondary static model found')
+		except Exception as e:
+			print("Failed to load secondary static model:", e)
+	else:
+		print('Secondary static model not found')
 
-			if primary_class in ignore_secondary:
-				continue
-
-			data_dir = os.path.join(secondary_static_data_path, primary_class)
-			if not os.path.isdir(data_dir):
-				continue
-
-			# Create model directory for this static class
-			model_dir = f"model_static_static_{primary_class}"
-			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-			# Check if model exists
-			if not os.path.exists(weights_path):
-				print(f'Secondary static model for "{primary_class}" not found')
-				# ~ secondary_motion_models[primary_class] = '0'
-			else:
-				print(f'Secondary static model for "{primary_class}" found')
-				# Load the trained model
-				secondary_static_models[primary_class] = YOLO(weights_path)
+	_sm_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
+	if os.path.exists(_sm_path):
+		try:
+			secondary_motion_model = YOLO(_sm_path)
+			print('Secondary motion model found')
+		except Exception as e:
+			print("Failed to load secondary motion model:", e)
+	else:
+		print('Secondary motion model not found')
 
 
-		# ~ print(f"secondary_static_models {secondary_static_models}")
-
-	secondary_motion_models = {}
-	motion_class_map = [[None] * len(secondary_classes) for _ in range(len(primary_classes))]
-	if len(secondary_motion_classes) >= 2:
-		for primary_class in primary_classes:
-			idx = primary_classes.index(primary_class)
-			hotkey = primary_hotkeys[idx]
-			if hotkey in secondary_hotkeys:
-				continue
-
-			if primary_class in ignore_secondary:
-				continue
-
-			data_dir = os.path.join(secondary_motion_data_path, primary_class)
-			if not os.path.isdir(data_dir):
-				continue
-
-			disk_classes = sorted(os.listdir(data_dir))
-
-			# Create model directory for this static class
-			model_dir = f"model_secondary_motion_{primary_class}"
-			weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-			# Check if model exists
-			if not os.path.exists(weights_path):
-				print(f'Secondary motion model for "{primary_class}" not found')
-				# ~ secondary_motion_models[primary_class] = '0'
-			else:
-				print(f'Secondary motion model for "{primary_class}" found')
-				# Load the trained model
-				secondary_motion_models[primary_class] = YOLO(weights_path)
-				# ~ motion_model_count += 1
-
-		# ~ print(f"secondary_motion_models {secondary_motion_models}")
+def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_img):
+	"""Run the stream-appropriate secondary classifier on a crop and return
+	(pool_index, confidence), restricted to the secondaries allowed for this
+	primary. Returns (-1, -1.0) when no secondary applies/available."""
+	if not hierarchical_mode:
+		return -1, -1.0
+	if primary_global_idx is None or primary_global_idx < 0 or primary_global_idx >= len(allowed_secondary_idx):
+		return -1, -1.0
+	allowed = allowed_secondary_idx[primary_global_idx]
+	if not allowed:
+		return -1, -1.0
+	if primary_global_idx < len(primary_static_classes):
+		model = secondary_static_model
+		crop_src = static_img
+	else:
+		model = secondary_motion_model
+		crop_src = motion_img
+	if model is None or crop_src is None:
+		return -1, -1.0
+	crop = crop_src[y1:y2, x1:x2]
+	if crop is None or crop.size == 0:
+		return -1, -1.0
+	try:
+		res = model.predict(crop, verbose=False)
+	except Exception:
+		return -1, -1.0
+	if not res or res[0].probs is None:
+		return -1, -1.0
+	allowed_names = set(secondary_classes[i] for i in allowed)
+	probs = res[0].probs.data
+	best_pool_idx, best_conf = -1, -1.0
+	for m_idx, nm in model.names.items():
+		if nm not in allowed_names:
+			continue
+		try:
+			c = float(probs[m_idx])
+		except Exception:
+			continue
+		if c > best_conf:
+			best_conf = c
+			best_pool_idx = secondary_classes.index(nm)
+	return best_pool_idx, best_conf
 
 
 # Helper: convert BGR -> PhotoImage
@@ -800,35 +774,9 @@ def auto_annotate_local():
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
 
 			if hierarchical_mode:
-				# crop and run secondary classifier on static image
-				if len(secondary_static_classes) >= 2:
-					sec_model = secondary_static_models.get(primary_class, None)
-					sec_classes = secondary_static_classes
-					crop_img = fr
-				# Fallback to motion secondary model if static not available
-				elif len(secondary_motion_classes) >= 2:
-					sec_model = secondary_motion_models.get(primary_class, None)
-					sec_classes = secondary_motion_classes
-					crop_img = motion_image if primary_motion_classes[0] != '0' else fr
-
-				# Get the cropped region
-				crop = None
-				if crop_img is not None:
-					crop = crop_img[y1:y2, x1:x2]
-
-				secondary_class = primary_class
-				secondary_conf = 1.0
-				secondary_class_idx = -1
-
-				# Run secondary classification if we have a model and valid crop
-				if sec_model and crop is not None and crop.size > 0:
-					sec_results = sec_model.predict(crop, verbose=False)
-					if sec_results[0].probs is not None:
-						secondary_class_idx = sec_results[0].probs.top1
-						secondary_conf = sec_results[0].probs.top1conf.item()
-						secondary_class = sec_model.names[secondary_class_idx]
-
-				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf))#conf 1 & 2 need separating
+				secondary_class_idx, secondary_conf = classify_secondary(
+					class_idx, x1, y1, x2, y2, fr, motion_image)
+				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf))
 
 
 			else:
@@ -845,35 +793,10 @@ def auto_annotate_local():
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
 
 			if hierarchical_mode:
-				# crop and run secondary classifier on static image
-				if len(secondary_static_classes) >= 2:
-					sec_model = secondary_static_models.get(primary_class, None)
-					sec_classes = secondary_static_classes
-					crop_img = fr
-				# Fallback to motion secondary model if static not available
-				elif len(secondary_motion_classes) >= 2:
-					sec_model = secondary_motion_models.get(primary_class, None)
-					sec_classes = secondary_motion_classes
-					crop_img = motion_image if primary_motion_classes[0] != '0' else fr
-
-				# Get the cropped region
-				crop = None
-				if crop_img is not None:
-					crop = crop_img[y1:y2, x1:x2]
-
-				secondary_class = primary_class
-				secondary_conf = 1.0
-				secondary_class_idx = -1
-
-				# Run secondary classification if we have a model and valid crop
-				if sec_model and crop is not None and crop.size > 0:
-					sec_results = sec_model.predict(crop, verbose=False)
-					if sec_results[0].probs is not None:
-						secondary_class_idx = sec_results[0].probs.top1
-						secondary_conf = sec_results[0].probs.top1conf.item()
-						secondary_class = sec_model.names[secondary_class_idx]
-
-				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), secondary_class_idx, conf, secondary_conf))#conf 1 & 2 need separating
+				global_primary_idx = class_idx + len(primary_static_classes)
+				secondary_class_idx, secondary_conf = classify_secondary(
+					global_primary_idx, x1, y1, x2, y2, fr, motion_image)
+				boxes.append((x1, y1, x2, y2, global_primary_idx, secondary_class_idx, conf, secondary_conf))
 
 			else:
 				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), conf))
@@ -884,35 +807,46 @@ def auto_annotate_local():
 
 
 # draw boxes onto a frame copy
-def draw_boxes_on_image(base_img):
+def draw_boxes_on_image(base_img, selected_set=None):
 	"""
 	Draw hierarchical boxes onto a *copy* of base_img.
 	- Outer rectangle uses primary color (slightly thicker)
 	- Inner rectangle uses secondary color (if present)
 	- Label shows PRIMARY conf SECONDARY conf (primary uppercased)
+	- Unclassified boxes (primary_cls < 0) are drawn dashed-red as "pending".
+	- The selected box gets a bright highlight.
 	"""
 	out = base_img.copy()
-	for box in boxes:
+	for bi, box in enumerate(boxes):
 
+		primary_cls = box[4] if len(box) > 4 else -1
+		x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+		is_selected = (selected_set is not None and bi in selected_set)
+
+		# --- Pending / unclassified box (no primary chosen yet) ---
+		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
+			cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), max(1, line_thickness))
+			cv2.putText(out, "? choose primary", (x1, max(y1 - 6, 10)),
+						cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 255), line_thickness, cv2.LINE_AA)
+			if is_selected:
+				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
+			continue
 
 		if hierarchical_mode:
-			x1, y1, x2, y2, primary_cls, secondary_cls, conf, sec_conf = box
-			# primary colour (BGR tuple) if available
-			pcol = primary_colors[primary_cls] if (primary_cls is not None and primary_cls < len(primary_colors)) else (255,255,255)
-			# if secondary present choose its colour, otherwise use primary for inner too
-			scol = None
-			if secondary_cls is not None and secondary_cls != -1 and secondary_cls < len(secondary_colors):
-				scol = secondary_colors[secondary_cls]
-			else:
-				scol = pcol
+			secondary_cls = box[5] if len(box) > 5 else -1
+			conf = box[6] if len(box) > 6 else -1
+			sec_conf = box[7] if len(box) > 7 else -1
+			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
+			has_secondary = (secondary_cls is not None and secondary_cls != -1 and secondary_cls < len(secondary_colors))
+			scol = secondary_colors[secondary_cls] if has_secondary else pcol
 
 			# draw outer box (primary) slightly thicker
 			outer_th = max(1, line_thickness + 2)
-			cv2.rectangle(out, (int(x1)-outer_th, int(y1)-outer_th), (int(x2)+outer_th, int(y2)+outer_th), pcol, outer_th)
+			cv2.rectangle(out, (x1-outer_th, y1-outer_th), (x2+outer_th, y2+outer_th), pcol, outer_th)
 
-			# draw inner box (secondary or primary)
-			if primary_classes[primary_cls] not in ignore_secondary:
-				cv2.rectangle(out, (int(x1), int(y1)), (int(x2), int(y2)), scol, line_thickness)
+			# draw inner box (secondary) only when a secondary is set
+			if has_secondary:
+				cv2.rectangle(out, (x1, y1), (x2, y2), scol, line_thickness)
 
 			# compose label: PRIMARY (upper) [+ conf], then secondary [+ conf]
 			label = f"{primary_classes[primary_cls].upper()}"
@@ -922,35 +856,37 @@ def draw_boxes_on_image(base_img):
 				except Exception:
 					pass
 
-			if primary_classes[primary_cls] not in ignore_secondary:
-				if secondary_cls is not None and secondary_cls != -1 and secondary_cls < len(secondary_classes):
-					label2 = f"{secondary_classes[secondary_cls]}"
-					if sec_conf != -1 and sec_conf is not None:
-						try:
-							label2 = label2 + f" {sec_conf:.2f}"
-						except Exception:
-							pass
-					label = label + " " + label2
+			if has_secondary and secondary_cls < len(secondary_classes):
+				label2 = f"{secondary_classes[secondary_cls]}"
+				if sec_conf != -1 and sec_conf is not None:
+					try:
+						label2 = label2 + f" {sec_conf:.2f}"
+					except Exception:
+						pass
+				label = label + " " + label2
 
 			# draw label background and text
 			label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
 			label_w, label_h = label_size
-			lx, ly = int(x1), int(y1)
+			lx, ly = x1, y1
 			cv2.rectangle(out, (lx - line_thickness, ly - label_h - line_thickness*4), (lx + label_w + line_thickness*2, ly), (0,0,0), -1)
-			# ~ cv2.putText(out, label, (lx, ly - line_thickness*2), cv2.FONT_HERSHEY_SIMPLEX, font_size, scol, line_thickness, cv2.LINE_AA)
 			cv2.putText(out, label, (lx, ly - line_thickness*2), cv2.FONT_HERSHEY_SIMPLEX, font_size, pcol, line_thickness, cv2.LINE_AA)
+			if is_selected:
+				cv2.rectangle(out, (x1-outer_th-2, y1-outer_th-2), (x2+outer_th+2, y2+outer_th+2), (0, 255, 255), 1)
 
 		else:
-			x1, y1, x2, y2, primary_cls, conf = box
-			pcol = primary_colors[primary_cls] if (primary_cls is not None and primary_cls < len(primary_colors)) else (255,255,255)
-			cv2.rectangle(out, (int(x1), int(y1)), (int(x2), int(y2)), pcol, line_thickness)
+			conf = box[5] if len(box) > 5 else -1
+			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
+			cv2.rectangle(out, (x1, y1), (x2, y2), pcol, line_thickness)
 			label = f"{primary_classes[primary_cls]}"
 			if conf != -1 and conf is not None:
 				try:
 					label = label + f" {conf:.2f}"
 				except Exception:
 					pass
-			cv2.putText(out, label, (int(x1), max(int(y1) - 6, 10)), cv2.FONT_HERSHEY_SIMPLEX, font_size, pcol, line_thickness, cv2.LINE_AA)
+			cv2.putText(out, label, (x1, max(y1 - 6, 10)), cv2.FONT_HERSHEY_SIMPLEX, font_size, pcol, line_thickness, cv2.LINE_AA)
+			if is_selected:
+				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
 
 	# grey masks (as previously)
 	for gx1, gy1, gx2, gy2 in grey_boxes:
@@ -962,9 +898,14 @@ def draw_boxes_on_image(base_img):
 
 
 def save_annotation():
-	global annot_count
+	global annot_count, boxes
 	if original_frame is None or (not boxes and not grey_boxes) and save_empty_frames == 'false':
 		return
+	# Drop unclassified (pending) boxes — they have no primary class yet.
+	pending = [b for b in boxes if (len(b) <= 4 or b[4] is None or b[4] < 0)]
+	if pending:
+		print(f"Skipping {len(pending)} unclassified box(es) — assign a primary class first.")
+		boxes = [b for b in boxes if not (len(b) <= 4 or b[4] is None or b[4] < 0)]
 	# randomly assign to valdiation
 	randVal = random.random()
 	is_val = randVal < val_frequency
@@ -1075,55 +1016,31 @@ def save_annotation():
 
 		for box in boxes:
 			x1, y1, x2, y2, primary_cls, secondary_cls, _ , _ = box
-			####----Motion-----
-			# ~ if secondary_cls > len(secondary_static_classes)-1:
-			motion_crop = motion_ann_frame[y1:y2, x1:x2]
-			if motion_crop.size == 0:
+			# Skip boxes without a secondary (secondary is optional).
+			if secondary_cls is None or secondary_cls < 0 or secondary_cls >= len(secondary_classes):
+				continue
+			if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
 				continue
 
-			# Create cropped image path
-			primary_class_name = primary_classes[primary_cls]
 			secondary_class_name = secondary_classes[secondary_cls]
 
-			# Create target directory (static_class/motion_class)
-			motion_class_dir = os.path.join(
-				motion_cropped_base_dir,
-				primary_class_name,
-				secondary_class_name
-			)
+			# Route the crop to the stream of the primary only; pooled layout
+			# annot_<stream>_crop/<secondary>/ (no per-primary level).
+			if primary_cls < len(primary_static_classes):
+				base_crop_dir = static_cropped_base_dir
+				crop_src = static_ann_frame
+			else:
+				base_crop_dir = motion_cropped_base_dir
+				crop_src = motion_ann_frame
 
-			os.makedirs(motion_class_dir, exist_ok=True)
-			# Save image
-			crop_path = os.path.join(
-				motion_class_dir,
-				f"{video_label}_{frame_number}_{x1}_{y1}.jpg"
-			)
-			cv2.imwrite(crop_path, motion_crop)
-
-			####----Static-----
-			# ~ if secondary_cls < len(secondary_static_classes)-1:
-			static_crop = static_ann_frame[y1:y2, x1:x2]
-			if static_crop.size == 0:
+			crop = crop_src[y1:y2, x1:x2]
+			if crop is None or crop.size == 0:
 				continue
 
-			# Create cropped image path
-			primary_class_name = primary_classes[primary_cls]
-			secondary_class_name = secondary_classes[secondary_cls]
-
-			# Create target directory (static_class/motion_class)
-			static_class_dir = os.path.join(
-				static_cropped_base_dir,
-				primary_class_name,
-				secondary_class_name
-			)
-
-			os.makedirs(static_class_dir, exist_ok=True)
-			# Save image
-			crop_path = os.path.join(
-				static_class_dir,
-				f"{video_label}_{frame_number}_{x1}_{y1}.jpg"
-			)
-			cv2.imwrite(crop_path, static_crop)
+			class_dir = os.path.join(base_crop_dir, secondary_class_name)
+			os.makedirs(class_dir, exist_ok=True)
+			crop_path = os.path.join(class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg")
+			cv2.imwrite(crop_path, crop)
 
 
 	# Create mask directories
@@ -1592,13 +1509,27 @@ class AnnotatorTk:
 	def __init__(self, root):
 		self.root = root
 		root.title(f"BehaveAI — {os.path.basename(video_path)}")
-		root.attributes('-fullscreen', True)
 
-		# sensible default window geometry so the main video panel is visible on launch
+		# Size the window to fit the current screen (any size); keep it resizable so
+		# the composite display scales down to whatever space is available.
+		sw = root.winfo_screenwidth()
+		sh = root.winfo_screenheight()
 		default_w = max(1000, int(video_width * 1.2))
 		default_h = max(700, int(video_height * 1.2))
-		root.geometry(f"{default_w}x{default_h}")
-		root.minsize(900, 600)
+		win_w = min(default_w, sw)
+		win_h = min(default_h, max(400, sh - 60))  # leave room for the taskbar
+		root.geometry(f"{win_w}x{win_h}+0+0")
+		root.minsize(min(900, max(400, sw - 40)), min(600, max(300, sh - 80)))
+
+		# F11 toggles fullscreen for users who prefer it.
+		self._fullscreen = False
+		def _toggle_fullscreen(event=None):
+			self._fullscreen = not self._fullscreen
+			try:
+				root.attributes('-fullscreen', self._fullscreen)
+			except Exception:
+				pass
+		root.bind_all('<F11>', _toggle_fullscreen)
 
 		# main layout
 		self.main = tk.Frame(root)
@@ -1656,14 +1587,25 @@ class AnnotatorTk:
 		self.buttons_frame = tk.Frame(self.left)
 		self.buttons_frame.pack(side='bottom', fill='x', pady=(4,4))
 
-		self.primary_buttons = []
-		self.secondary_buttons = []
+		# Status banner guiding the box-first workflow (set in update_button_states)
+		self.status_label = tk.Label(self.buttons_frame, text='', anchor='w', fg='#444')
+		self.status_label.pack(side='top', fill='x', padx=2)
+
+		self.primary_buttons = []     # (btn, color_hex, global_primary_idx)
+		self.secondary_buttons = []   # (btn, color_hex, pool_idx)
 
 		# Number of buttons per row — controlled via Settings > Display Settings
 		BUTTONS_PER_ROW = buttons_per_row
+		n_static = len(primary_static_classes)
 
-		# create primary buttons — wrap onto multiple rows when needed
-		btn_position = 0
+		# --- Primary groups: two titled frames (Static / Motion) ---
+		self.primary_static_frame = tk.LabelFrame(self.buttons_frame, text='Primary — Static')
+		self.primary_motion_frame = tk.LabelFrame(self.buttons_frame, text='Primary — Motion')
+		self.primary_static_frame.pack(fill='x', pady=(0,2))
+		self.primary_motion_frame.pack(fill='x', pady=(0,2))
+
+		static_pos = 0
+		motion_pos = 0
 		for idx, name in enumerate(primary_classes):
 			if name == '0':
 				continue
@@ -1671,32 +1613,42 @@ class AnnotatorTk:
 			if idx < len(primary_colors):
 				bgr = primary_colors[idx]
 				color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
-			grid_row = btn_position // BUTTONS_PER_ROW
-			grid_col = btn_position % BUTTONS_PER_ROW
-			btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, primary_classes_info[idx][0]),
-							width=12, relief='raised', command=lambda i=idx: self.select_primary(i))
+			key = primary_classes_info[idx][0] if idx < len(primary_classes_info) else ''
+			label = "{} ({})".format(name, key) if key else name
+			if idx < n_static:
+				parent = self.primary_static_frame
+				grid_row, grid_col = static_pos // BUTTONS_PER_ROW, static_pos % BUTTONS_PER_ROW
+				static_pos += 1
+			else:
+				parent = self.primary_motion_frame
+				grid_row, grid_col = motion_pos // BUTTONS_PER_ROW, motion_pos % BUTTONS_PER_ROW
+				motion_pos += 1
+			btn = tk.Button(parent, text=label, width=12, relief='raised',
+							command=lambda i=idx: self.select_primary(i))
 			btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 			self.primary_buttons.append((btn, color_hex, idx))
-			btn_position += 1
 
-		# How many grid rows did the primary buttons use?
-		primary_row_count = max(1, (btn_position + BUTTONS_PER_ROW - 1) // BUTTONS_PER_ROW)
+		# Hide empty primary group frames
+		if static_pos == 0:
+			self.primary_static_frame.pack_forget()
+		if motion_pos == 0:
+			self.primary_motion_frame.pack_forget()
 
-		# secondary rows — start after the last primary row
+		# --- Secondary group: one titled frame, buttons pre-created, shown on demand ---
+		self.secondary_frame = tk.LabelFrame(self.buttons_frame, text='Secondary (optional)')
+		self._secondary_per_row = BUTTONS_PER_ROW
 		if hierarchical_mode:
-			btn_position = 0
 			for idx, name in enumerate(secondary_classes):
 				color_hex = None
 				if idx < len(secondary_colors):
 					bgr = secondary_colors[idx]
 					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
-				grid_row = primary_row_count + (btn_position // BUTTONS_PER_ROW)
-				grid_col = btn_position % BUTTONS_PER_ROW
-				btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, secondary_classes_info[idx][0]),
-								width=12, relief='raised', command=lambda i=idx: self.select_secondary(i))
-				btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
+				key = secondary_classes_info[idx][0] if idx < len(secondary_classes_info) else ''
+				label = "{} ({})".format(name, key) if key else name
+				btn = tk.Button(self.secondary_frame, text=label, width=12, relief='raised',
+								command=lambda i=idx: self.select_secondary(i))
+				# Pre-created but not gridded; refresh_secondary_buttons() shows the allowed subset.
 				self.secondary_buttons.append((btn, color_hex, idx))
-				btn_position += 1
 
 
 		# bind events
@@ -1705,12 +1657,19 @@ class AnnotatorTk:
 		self.canvas.bind('<ButtonRelease-1>', self.on_mouse_up)
 		self.canvas.bind('<Button-3>', self.on_right_click)
 		self.canvas.bind('<Motion>', self.on_motion)
+		# Mouse-wheel zoom (Windows/macOS use <MouseWheel>; X11 uses Button-4/5).
+		self.canvas.bind('<MouseWheel>', self.on_mouse_wheel)
+		self.canvas.bind('<Button-4>', self.on_mouse_wheel)
+		self.canvas.bind('<Button-5>', self.on_mouse_wheel)
+		# Middle mouse button (wheel click) resets the zoom.
+		self.canvas.bind('<Button-2>', self.on_reset_zoom)
 
 		root.bind_all('<Key>', self.on_key_all)
 		# ~ root.bind_all('<Left>', lambda e: self.key_step(-1))
 		# ~ root.bind_all('<Right>', lambda e: self.key_step(1))
 		root.bind_all('<space>', lambda e: self.toggle_show_mode())
 		root.bind_all('<Return>', self._on_return_key)
+		root.bind_all('<Escape>', self.reset_selection)
 
 		# drawing/display state
 		# ~ self.display_size = (video_width, video_height)
@@ -1719,6 +1678,16 @@ class AnnotatorTk:
 		self.last_mouse = None
 		self.drawing = False
 		self.start_canvas_xy = None
+		# Indices into `boxes` of the boxes currently selected for (re)labelling.
+		# Multiple boxes can be selected so the same behaviour is assigned to all.
+		self.selected_boxes = set()
+
+		# Mouse-wheel zoom state (1.0 = no zoom). zoom_cx/zoom_cy are the zoom
+		# centre in video coordinates; _zoom_crop is the visible video rectangle.
+		self.zoom = 1.0
+		self.zoom_cx = video_width / 2
+		self.zoom_cy = video_height / 2
+		self._zoom_crop = (0, 0, video_width, video_height)
 
 		# Keep the display size hint in sync for the prefetch thread
 		global _display_size_hint
@@ -1729,31 +1698,85 @@ class AnnotatorTk:
 
 		# schedule loop
 		self.root.after(30, self.loop)
+		self.refresh_secondary_buttons()
 		self.update_button_states()
 
 
 	# button handlers
 	def select_primary(self, class_idx):
-		global active_primary, grey_mode, show_mode
+		global active_primary, active_secondary, grey_mode, show_mode
 		active_primary = class_idx
 		grey_mode = False
-		if active_primary < len(primary_static_classes):
-			show_mode = -1
-		else:
-			show_mode = 1
+		show_mode = -1 if active_primary < len(primary_static_classes) else 1
+		# Drop the current secondary if it is not allowed for this primary.
+		allowed = allowed_secondary_idx[class_idx] if 0 <= class_idx < len(allowed_secondary_idx) else []
+		if active_secondary not in allowed:
+			active_secondary = -1
+		self._apply_classes_to_selected_boxes()
+		self.refresh_secondary_buttons()
 		self.update_button_states()
 		self.redraw()
 
 	def select_secondary(self, class_idx):
-		global active_secondary, grey_mode, show_mode
-		active_secondary = class_idx
+		global active_secondary, grey_mode
 		grey_mode = False
-		if class_idx < len(secondary_static_classes):
-			show_mode = -1
-		else:
-			show_mode = 1
+		# Toggle: clicking the active secondary again clears it (secondary is optional).
+		active_secondary = -1 if active_secondary == class_idx else class_idx
+		self._apply_classes_to_selected_boxes()
 		self.update_button_states()
 		self.redraw()
+
+	def reset_selection(self, event=None):
+		"""Escape: deselect all boxes and go back to step 1 (no model selected)."""
+		global active_primary, active_secondary
+		active_primary = -1
+		active_secondary = -1
+		self.selected_boxes = set()
+		self.refresh_secondary_buttons()
+		self.update_button_states()
+		self.redraw()
+
+	def _apply_classes_to_selected_boxes(self):
+		"""Re-label every selected/pending box with the active classes."""
+		global boxes
+		if active_primary is None or active_primary < 0:
+			return
+		for idx in list(getattr(self, 'selected_boxes', set())):
+			if idx is None or idx < 0 or idx >= len(boxes):
+				continue
+			b = boxes[idx]
+			x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
+			if hierarchical_mode:
+				c1 = b[6] if len(b) > 6 else -1
+				c2 = b[7] if len(b) > 7 else -1
+				boxes[idx] = (x1, y1, x2, y2, active_primary, active_secondary, c1, c2)
+			else:
+				c1 = b[5] if len(b) > 5 else -1
+				boxes[idx] = (x1, y1, x2, y2, active_primary, c1)
+
+	def refresh_secondary_buttons(self):
+		"""Show only the secondaries allowed for the active primary (fast grid/forget)."""
+		if not hierarchical_mode or not self.secondary_buttons:
+			return
+		allowed = []
+		if active_primary is not None and 0 <= active_primary < len(allowed_secondary_idx):
+			allowed = allowed_secondary_idx[active_primary]
+		for btn, _col, _idx in self.secondary_buttons:
+			btn.grid_forget()
+		if not allowed:
+			self.secondary_frame.pack_forget()
+			return
+		pool_to_btn = {idx: btn for (btn, _c, idx) in self.secondary_buttons}
+		per_row = self._secondary_per_row
+		pos = 0
+		for pool_idx in allowed:
+			btn = pool_to_btn.get(pool_idx)
+			if btn is None:
+				continue
+			btn.grid(row=pos // per_row, column=pos % per_row, padx=2, pady=2)
+			pos += 1
+		if not self.secondary_frame.winfo_ismapped():
+			self.secondary_frame.pack(fill='x', pady=(0,2))
 
 	def toggle_grey(self):
 		global grey_mode
@@ -1864,6 +1887,25 @@ class AnnotatorTk:
 			else:
 				btn.config(relief='raised', bg='#888888')
 		self.grey_btn.config(relief='sunken' if grey_mode else 'raised')
+		self._update_status_banner()
+
+	def _update_status_banner(self):
+		try:
+			if active_primary is None or active_primary < 0:
+				txt = 'Step 1 — Draw a box, then choose a primary behaviour'
+			else:
+				pname = primary_classes[active_primary] if active_primary < len(primary_classes) else '?'
+				if hierarchical_mode and active_primary < len(allowed_secondary_idx) and allowed_secondary_idx[active_primary]:
+					if active_secondary is not None and active_secondary >= 0 and active_secondary < len(secondary_classes):
+						sname = secondary_classes[active_secondary]
+						txt = "Primary: {}  |  Secondary: {}  (Esc = reset)".format(pname, sname)
+					else:
+						txt = "Primary: {}  |  Secondary: none (optional)  (Esc = reset)".format(pname)
+				else:
+					txt = "Primary: {}  (Esc = reset)".format(pname)
+			self.status_label.config(text=txt)
+		except Exception:
+			pass
 
 	def draw_seek_ticks(self):
 		"""Draw small ticks for annotated frames and a red cursor for current frame."""
@@ -1985,8 +2027,10 @@ class AnnotatorTk:
 		display_x = min(cx, scaled_disp_w - 1) / scale
 		display_y = min(cy, scaled_disp_h - 1) / scale
 
-		vx = display_x * (video_width / float(max(1, disp_w)))
-		vy = display_y * (video_height / float(max(1, disp_h)))
+		# Account for the active mouse-wheel zoom crop (x0,y0 origin, cw,ch size).
+		x0, y0, cw, ch = getattr(self, '_zoom_crop', (0, 0, video_width, video_height))
+		vx = x0 + display_x * (cw / float(max(1, disp_w)))
+		vy = y0 + display_y * (ch / float(max(1, disp_h)))
 		return (vx, vy)
 
 
@@ -2010,6 +2054,7 @@ class AnnotatorTk:
 		self.redraw(temp_rect=(self.start_canvas_xy, (event.x, event.y)))
 
 	def on_mouse_up(self, event):
+		global active_primary, active_secondary
 		if not self.drawing:
 			return
 		self.drawing = False
@@ -2023,11 +2068,80 @@ class AnnotatorTk:
 			if grey_mode:
 				grey_boxes.append((x1, y1, x2, y2))
 			else:
+				# Once the current selection has been classified, drawing a new box
+				# starts a fresh selection; otherwise keep accumulating so several
+				# boxes can be drawn and assigned the same behaviour at once.
+				if active_primary is not None and active_primary >= 0:
+					self.selected_boxes = set()
+				active_primary = -1
+				active_secondary = -1
 				if hierarchical_mode:
-					boxes.append((x1, y1, x2, y2, active_primary, active_secondary, -1, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1, -1, -1))
 				else:
-					boxes.append((x1, y1, x2, y2, active_primary, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1))
+				self.selected_boxes.add(len(boxes) - 1)
+				self.refresh_secondary_buttons()
+				self.update_button_states()
+		elif not grey_mode:
+			# A click (no real drag): select the box under the cursor to relabel it.
+			self._select_box_at(x1, y1)
 		self.redraw()
+
+	def on_mouse_wheel(self, event):
+		"""Zoom the annotation view in/out around the cursor with the mouse wheel."""
+		# Determine scroll direction across platforms.
+		direction = 0
+		if getattr(event, 'delta', 0):
+			direction = 1 if event.delta > 0 else -1
+		elif getattr(event, 'num', None) == 4:
+			direction = 1
+		elif getattr(event, 'num', None) == 5:
+			direction = -1
+		if direction == 0:
+			return
+		# Zoom towards the video point currently under the cursor.
+		try:
+			vx, vy = self.canvas_to_video((event.x, event.y))
+		except Exception:
+			vx, vy = video_width / 2, video_height / 2
+		factor = 1.25 if direction > 0 else (1.0 / 1.25)
+		self.zoom = max(1.0, min(8.0, self.zoom * factor))
+		if self.zoom <= 1.0:
+			self.zoom = 1.0
+			self.zoom_cx, self.zoom_cy = video_width / 2, video_height / 2
+		else:
+			self.zoom_cx, self.zoom_cy = vx, vy
+		self.redraw()
+
+	def on_reset_zoom(self, event=None):
+		"""Middle mouse button (wheel click): reset the zoom to fit."""
+		self.zoom = 1.0
+		self.zoom_cx, self.zoom_cy = video_width / 2, video_height / 2
+		self.redraw()
+
+	def _select_box_at(self, x, y):
+		"""Toggle the topmost box under (x, y) in the multi-selection.
+
+		Clicking a box adds it to the selection (or removes it if already
+		selected); the active classes follow the clicked box so the buttons
+		reflect it. Escape clears the whole selection.
+		"""
+		global active_primary, active_secondary, show_mode
+		for i in range(len(boxes)-1, -1, -1):
+			bx1, by1, bx2, by2 = boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3]
+			if bx1 <= x <= bx2 and by1 <= y <= by2:
+				if i in self.selected_boxes:
+					self.selected_boxes.discard(i)
+				else:
+					self.selected_boxes.add(i)
+					b = boxes[i]
+					active_primary = b[4] if len(b) > 4 else -1
+					active_secondary = b[5] if (hierarchical_mode and len(b) > 5) else -1
+					if active_primary is not None and 0 <= active_primary < len(primary_classes):
+						show_mode = -1 if active_primary < len(primary_static_classes) else 1
+				self.refresh_secondary_buttons()
+				self.update_button_states()
+				return
 
 	def on_right_click(self, event):
 		v = self.canvas_to_video((event.x, event.y))
@@ -2036,7 +2150,10 @@ class AnnotatorTk:
 		for i in range(len(boxes)-1, -1, -1):
 			bx1, by1, bx2, by2 = boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3]
 			if bx1 <= x <= bx2 and by1 <= y <= by2:
-				del boxes[i]; removed = True; break
+				del boxes[i]; removed = True
+				# Keep the selection indices consistent after deletion.
+				self.selected_boxes = {(j - 1 if j > i else j) for j in self.selected_boxes if j != i}
+				break
 		if not removed:
 			for i in range(len(grey_boxes)-1, -1, -1):
 				gx1, gy1, gx2, gy2 = grey_boxes[i]
@@ -2075,44 +2192,25 @@ class AnnotatorTk:
 			return
 
 
-		if ch:
+		if ch and ch != '0':
 			c_ord = ord(ch)
-			if c_ord in primary_class_dict and c_ord in secondary_class_dict:
-				if ch != '0':
-					active_primary = primary_class_dict[c_ord]
-					active_secondary = secondary_class_dict[c_ord]
-					grey_mode = False
-					if active_primary < len(primary_static_classes):
-						show_mode = -1
-					else:
-						show_mode = 1
-					self.update_button_states()
-					return
+			# Primary hotkey takes priority; reuse select_primary (sticky + relabel + refresh).
 			if c_ord in primary_class_dict:
-				if ch != '0':
-					active_primary = primary_class_dict[c_ord]
-					grey_mode = False
-					if active_primary < len(primary_static_classes):
-						show_mode = -1
-					else:
-						show_mode = 1
-					self.update_button_states()
-					return
+				self.select_primary(primary_class_dict[c_ord])
+				return
+			# Secondary hotkey: only when allowed for the active primary (toggle on repeat).
 			if c_ord in secondary_class_dict:
-				if ch != '0':
-					active_secondary = secondary_class_dict[c_ord]
-					grey_mode = False
-					if active_secondary < len(secondary_static_classes):
-						show_mode = -1
-					else:
-						show_mode = 1
-					self.update_button_states()
-					return
+				pool_idx = secondary_class_dict[c_ord]
+				allowed = allowed_secondary_idx[active_primary] if (active_primary is not None and 0 <= active_primary < len(allowed_secondary_idx)) else []
+				if pool_idx in allowed:
+					self.select_secondary(pool_idx)
+				return
 
 		# Tab — skip current frame without saving, advance to next frame
-		if ks == 'Escape':
+		if ks == 'Tab':
 			boxes.clear()
 			grey_boxes.clear()
+			self.selected_boxes = set()
 			load_next_target(self)
 			return
 
@@ -2236,7 +2334,22 @@ class AnnotatorTk:
 			base = motion_image.copy() if motion_image is not None else np.zeros((video_height, video_width, 3), dtype=np.uint8)
 
 		# draw boxes/grey boxes onto base (works in video/native coords)
-		display = draw_boxes_on_image(base)
+		display = draw_boxes_on_image(base, selected_set=getattr(self, 'selected_boxes', None))
+
+		# Apply mouse-wheel zoom: crop a sub-region of the (box-annotated) frame
+		# around the zoom centre; it is then scaled up to the display size.
+		zoom = getattr(self, 'zoom', 1.0)
+		if zoom and zoom > 1.0:
+			cw = max(1, int(round(video_width / zoom)))
+			ch = max(1, int(round(video_height / zoom)))
+			zcx = int(getattr(self, 'zoom_cx', video_width / 2))
+			zcy = int(getattr(self, 'zoom_cy', video_height / 2))
+			x0 = max(0, min(video_width - cw, zcx - cw // 2))
+			y0 = max(0, min(video_height - ch, zcy - ch // 2))
+			display = display[y0:y0 + ch, x0:x0 + cw]
+			self._zoom_crop = (x0, y0, cw, ch)
+		else:
+			self._zoom_crop = (0, 0, video_width, video_height)
 
 		# initial desired main display size (before final uniform scaling)
 		disp_w = max(1, int(self.display_size[0]))

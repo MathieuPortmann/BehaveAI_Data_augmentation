@@ -670,12 +670,12 @@ primary_static_classes = 0
 primary_static_colors = 0
 primary_static_hotkeys = 0
 
-secondary_motion_classes = 0
-secondary_motion_colors = 0
-secondary_motion_hotkeys = 0
-secondary_static_classes = 0
-secondary_static_colors = 0
-secondary_static_hotkeys = 0
+# Shared pool of secondary behaviours (reused across static/motion primaries).
+secondary_classes = 0
+secondary_colors = 0
+secondary_hotkeys = 0
+# Per-primary allowed secondaries: Primary1:secA|secB; Primary2:secA
+secondary_map =
 
 # === Drone motion correction ===
 # Master switch; off = no behaviour change.

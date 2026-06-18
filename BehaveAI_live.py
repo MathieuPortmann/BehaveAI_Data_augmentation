@@ -9,6 +9,7 @@ import configparser
 import sys
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
+from behaveai_config import load_secondary_config
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import deque
@@ -227,44 +228,32 @@ try:
 	primary_motion_colors = [tuple(map(int,c.split(',')))[::-1] for c in cols]
 	primary_motion_hotkeys = [k.strip() for k in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
 
-	secondary_motion_classes = [name.strip() for name in config['DEFAULT']['secondary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_motion_colors','').split(';') if c.strip()]
-	secondary_motion_colors = [tuple(map(int,c.split(',')))[::-1] for c in cols]
-	secondary_motion_hotkeys = [k.strip() for k in config['DEFAULT']['secondary_motion_hotkeys'].split(',')]
-
 	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors','').split(';') if c.strip()]
 	primary_static_colors = [tuple(map(int,c.split(',')))[::-1] for c in cols]
 	primary_static_hotkeys = [k.strip() for k in config['DEFAULT']['primary_static_hotkeys'].split(',')]
 
-	secondary_static_classes = [name.strip() for name in config['DEFAULT']['secondary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_static_colors','').split(';') if c.strip()]
-	secondary_static_colors = [tuple(map(int,c.split(',')))[::-1] for c in cols]
-	secondary_static_hotkeys = [k.strip() for k in config['DEFAULT']['secondary_static_hotkeys'].split(',')]
-
-	if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-		hierarchical_mode = True
-		motion_cropped_base_dir = 'annot_motion_crop'
-		static_cropped_base_dir = 'annot_static_crop'
-		if len(secondary_motion_classes) == 1:
-			secondary_motion_classes = []; secondary_motion_colors = []; secondary_motion_hotkeys = []
-		if len(secondary_static_classes) == 1:
-			secondary_static_classes = []; secondary_static_colors = []; secondary_static_hotkeys = []
-	else:
-		hierarchical_mode = False
+	motion_cropped_base_dir = 'annot_motion_crop'
+	static_cropped_base_dir = 'annot_static_crop'
 
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
-	secondary_classes = secondary_static_classes + secondary_motion_classes
-	secondary_colors = secondary_static_colors + secondary_motion_colors
-	secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
+	# ---- Shared secondary configuration (pool + per-primary mapping) ----
+	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
+	secondary_classes = _sec_cfg['secondary_classes']
+	secondary_colors = _sec_cfg['secondary_colors']
+	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
+	secondary_map = _sec_cfg['secondary_map']
+	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
+	hierarchical_mode = _sec_cfg['hierarchical_mode']
 
 	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
 	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
 
-	ignore_secondary = [name.strip() for name in config['DEFAULT']['ignore_secondary'].split(',')]
+	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
+						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
 	scale_factor = float(config['DEFAULT'].get('scale_factor','1.0'))
@@ -433,9 +422,9 @@ class CameraProcessor:
 		self.tracker = KalmanTracker(match_distance_thresh, delete_after_missed)
 		self.model_static = None
 		self.model_motion = None
-		# secondary models keyed by PRIMARY class name (this matches train-time naming)
-		self.secondary_static_models = {}
-		self.secondary_motion_models = {}
+		# Two per-stream secondary classifiers (shared pool of secondary labels).
+		self.secondary_static_model = None
+		self.secondary_motion_model = None
 
 		# frame buffers
 		self.prev_frames = None
@@ -487,42 +476,28 @@ class CameraProcessor:
 			print("Primary model load failed:", e)
 			self.model_static = None; self.model_motion = None
 
-		# Load secondary models per PRIMARY class (matching naming used by annotation/training)
+		# Load the two per-stream secondary classifiers (shared label pool).
 		if hierarchical_mode:
-			for p in primary_classes:
-				if p in ignore_secondary: 
-					continue
-				# static secondary model for this primary
-				try:
-					model_dir = f"model_secondary_static_{p}"
-					model_path = os.path.join(model_dir, "train", "weights", "best.pt")
-					if os.path.exists(model_path):
-						# ~ self.secondary_static_models[p] = YOLO(model_path)
-						# ~ print(f"Loaded secondary static model for primary '{p}'")
-						if use_ncnn == 'true':
-							self.secondary_static_models[p] = load_model_with_ncnn_preference(model_path, "classify")
-							print(f"Loaded secondary static NCNN model for primary '{p}'")
-						else:
-							self.secondary_static_models[p] = YOLO(model_path)
-							print(f"Loaded secondary static YOLO model for primary '{p}'")
-
-				except Exception as e:
-					print(f"Secondary static model load failed for {p}: {e}")
-				# motion secondary model for this primary
-				try:
-					model_dir = f"model_secondary_motion_{p}"
-					model_path = os.path.join(model_dir, "train", "weights", "best.pt")
-					if os.path.exists(model_path):
-						# ~ self.secondary_motion_models[p] = YOLO(model_path)
-						# ~ print(f"Loaded secondary motion model for primary '{p}'")
-						if use_ncnn == 'true':
-							self.secondary_motion_models[p] = load_model_with_ncnn_preference(model_path, "classify")
-							print(f"Loaded secondary motion NCNN model for primary '{p}'")
-						else:
-							self.secondary_static_models[p] = YOLO(model_path)
-							print(f"Loaded secondary motion YOLO model for primary '{p}'")
-				except Exception as e:
-					print(f"Secondary motion model load failed for {p}: {e}")
+			try:
+				ss_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
+				if os.path.exists(ss_path):
+					if use_ncnn == 'true':
+						self.secondary_static_model = load_model_with_ncnn_preference(ss_path, "classify")
+					else:
+						self.secondary_static_model = YOLO(ss_path)
+					print("Loaded secondary static model")
+			except Exception as e:
+				print(f"Secondary static model load failed: {e}")
+			try:
+				sm_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
+				if os.path.exists(sm_path):
+					if use_ncnn == 'true':
+						self.secondary_motion_model = load_model_with_ncnn_preference(sm_path, "classify")
+					else:
+						self.secondary_motion_model = YOLO(sm_path)
+					print("Loaded secondary motion model")
+			except Exception as e:
+				print(f"Secondary motion model load failed: {e}")
 
 	# ~ def set_camera(self, index):
 		# ~ with self.frame_lock:
@@ -793,7 +768,7 @@ class CameraProcessor:
 				continue
 
 			# Motion processing
-			if primary_motion_classes[0] != '0' or secondary_motion_classes[0] != '0':
+			if primary_motion_classes and primary_motion_classes[0] != '0':
 				diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 				if strategy == 'exponential':
 					prev_frames[0] = gray
@@ -888,22 +863,23 @@ class CameraProcessor:
 				# Secondary classification (only if hierarchical)
 				if hierarchical_mode:
 					x1,y1,x2,y2 = coords
-					sec_model = None; crop_img = None
-					# Prefer secondary model types consistent with source, fall back to the other if needed
+					# Per-stream model + crop source + global primary index.
 					if source == 'static':
-						if primary_class in self.secondary_static_models:
-							sec_model = self.secondary_static_models.get(primary_class)
-							crop_img = frame
-						elif primary_class in self.secondary_motion_models:
-							sec_model = self.secondary_motion_models.get(primary_class)
-							crop_img = motion_image if primary_motion_classes[0] != '0' else frame
+						sec_model = self.secondary_static_model
+						crop_img = frame
+						try:
+							g_idx = primary_static_classes.index(primary_class)
+						except ValueError:
+							g_idx = -1
 					else:
-						if primary_class in self.secondary_motion_models:
-							sec_model = self.secondary_motion_models.get(primary_class)
-							crop_img = motion_image
-						elif primary_class in self.secondary_static_models:
-							sec_model = self.secondary_static_models.get(primary_class)
-							crop_img = frame
+						sec_model = self.secondary_motion_model
+						crop_img = motion_image
+						try:
+							g_idx = len(primary_static_classes) + primary_motion_classes.index(primary_class)
+						except ValueError:
+							g_idx = -1
+
+					allowed = allowed_secondary_idx[g_idx] if 0 <= g_idx < len(allowed_secondary_idx) else []
 
 					# Safe crop bounds
 					h_img, w_img = (crop_img.shape[:2] if crop_img is not None else (0,0))
@@ -913,15 +889,25 @@ class CameraProcessor:
 					if crop_img is not None and x2c > x1c and y2c > y1c:
 						crop = crop_img[y1c:y2c, x1c:x2c]
 
-					secondary_class = primary_class; secondary_conf = 1.0
-					if sec_model and crop is not None and crop.size > 0:
+					secondary_class = ''; secondary_conf = 0.0
+					if sec_model is not None and allowed and crop is not None and crop.size > 0:
 						try:
 							sec_results = sec_model.predict(crop, verbose=False)
 							if hasattr(sec_results[0], 'probs') and sec_results[0].probs is not None:
-								idx = sec_results[0].probs.top1
-								secondary_conf = sec_results[0].probs.top1conf.item()
-								# sec_model.names maps class indices -> class names
-								secondary_class = sec_model.names[idx]
+								allowed_names = set(secondary_classes[i] for i in allowed)
+								probs = sec_results[0].probs.data
+								best_conf = -1.0
+								for m_idx, nm in sec_model.names.items():
+									if nm not in allowed_names:
+										continue
+									try:
+										c = float(probs[m_idx])
+									except Exception:
+										continue
+									if c > best_conf:
+										best_conf = c
+										secondary_class = nm
+										secondary_conf = c
 						except Exception:
 							pass
 

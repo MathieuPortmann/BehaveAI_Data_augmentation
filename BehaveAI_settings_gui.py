@@ -21,14 +21,14 @@ import re
 from BehaveAI_settings_help import (
     PARAM_HELP, Tooltip, apply_theme, tooltip_text, help_label, help_line,
 )
+from behaveai_config import parse_secondary_map, format_secondary_map, load_secondary_config
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
 
 CLASS_GROUPS = [
-	('primary_motion', 'Primary motion'),
-	('secondary_motion', 'Secondary motion'),
 	('primary_static', 'Primary static'),
-	('secondary_static', 'Secondary static'),
+	('primary_motion', 'Primary motion'),
+	('secondary', 'Secondary (shared pool)'),
 ]
 
 CLASSIFIER_OPTIONS = [
@@ -254,7 +254,8 @@ class ClassListEditor(ttk.Frame):
 		ttk.Button(btn_frame, text='Add', command=self.add_row).grid(row=0, column=0)
 		ttk.Button(btn_frame, text='Clear', command=self.clear).grid(row=0, column=1, padx=(6,0))
 
-		self.allow_ignore_secondary = title.lower().startswith('primary')
+		# 'ignore secondary' is obsolete: a primary simply has no entry in secondary_map.
+		self.allow_ignore_secondary = False
 		self.rows_frame = ttk.Frame(self)
 		self.rows_frame.grid(row=1, column=0, columnspan=2, sticky='we', pady=(6,0))
 
@@ -386,6 +387,98 @@ class ClassListEditor(ttk.Frame):
 				continue
 			out.append((label, hotkey, color, ignore))
 		return out
+
+
+# ----------------------- Secondary mapping editor -----------------------
+
+class SecondaryMapEditor(ttk.Frame):
+	"""Per-primary checkboxes choosing which shared secondaries are allowed.
+
+	`get_primaries()` returns a list of (primary_name, 'static'|'motion').
+	`get_pool()` returns the list of shared secondary names.
+	Selections are preserved across rebuilds where the (primary, secondary)
+	pair still exists.
+	"""
+	def __init__(self, master, get_primaries, get_pool, on_change=None, *args, **kwargs):
+		super().__init__(master, *args, **kwargs)
+		self.get_primaries = get_primaries
+		self.get_pool = get_pool
+		self.on_change = on_change
+		self.vars = {}  # (primary_name, secondary_name) -> BooleanVar
+
+		header = ttk.Frame(self)
+		header.pack(fill='x')
+		try:
+			font_bold = tkfont.nametofont("TkDefaultFont").copy()
+			font_bold.configure(weight="bold", size=11)
+			ttk.Label(header, text='Secondary mapping (primary → allowed secondaries)', font=font_bold).pack(side='left')
+		except Exception:
+			ttk.Label(header, text='Secondary mapping (primary → allowed secondaries)').pack(side='left')
+		ttk.Button(header, text='Refresh', command=self.rebuild).pack(side='right')
+
+		ttk.Label(self,
+			text=('Tick the secondaries available for each primary. Untick all to give a primary '
+			      'no secondary. Click Refresh after changing primaries or the pool.'),
+			style='Help.TLabel', wraplength=700, justify='left').pack(anchor='w', pady=(0, 4))
+
+		self.body = ttk.Frame(self)
+		self.body.pack(fill='x')
+		self.rebuild()
+
+	def _changed(self):
+		if self.on_change:
+			self.on_change()
+
+	def rebuild(self):
+		prev = {k: v.get() for k, v in self.vars.items()}
+		for w in self.body.winfo_children():
+			w.destroy()
+		self.vars = {}
+
+		pool = [p for p in self.get_pool() if p]
+		primaries = [(n, s) for (n, s) in self.get_primaries() if n]
+		if not pool or not primaries:
+			ttk.Label(self.body,
+				text='(Define primary classes and at least one shared secondary, then Refresh.)',
+				style='Help.TLabel').grid(row=0, column=0, sticky='w')
+			return
+
+		row = 0
+		last_stream = None
+		for name, stream in primaries:
+			if stream != last_stream:
+				try:
+					font_bold = tkfont.nametofont("TkDefaultFont").copy()
+					font_bold.configure(weight="bold")
+					ttk.Label(self.body, text=('Static' if stream == 'static' else 'Motion'),
+							  font=font_bold).grid(row=row, column=0, sticky='w', pady=(6, 0))
+				except Exception:
+					ttk.Label(self.body, text=('Static' if stream == 'static' else 'Motion')).grid(row=row, column=0, sticky='w', pady=(6, 0))
+				row += 1
+				last_stream = stream
+			ttk.Label(self.body, text=name).grid(row=row, column=0, sticky='w', padx=(12, 6))
+			col = 1
+			for sec in pool:
+				var = tk.BooleanVar(value=prev.get((name, sec), False))
+				cb = ttk.Checkbutton(self.body, text=sec, variable=var, command=self._changed)
+				cb.grid(row=row, column=col, sticky='w', padx=4)
+				self.vars[(name, sec)] = var
+				col += 1
+			row += 1
+
+	def get(self):
+		mapping = {}
+		for (prim, sec), var in self.vars.items():
+			if var.get():
+				mapping.setdefault(prim, []).append(sec)
+		return mapping
+
+	def set(self, mapping):
+		self.rebuild()
+		for prim, secs in (mapping or {}).items():
+			for sec in secs:
+				if (prim, sec) in self.vars:
+					self.vars[(prim, sec)].set(True)
 
 
 # ----------------------- Complex-behaviour label editor -----------------------
@@ -629,34 +722,44 @@ class SettingsEditorApp(tk.Tk):
 			)
 		return None
 
+	def _get_primaries_for_map(self):
+		"""List of (primary_name, stream) for the secondary-mapping editor."""
+		out = []
+		for label, _hk, _col, _ig in self.class_editors['primary_static'].get():
+			if label:
+				out.append((label, 'static'))
+		for label, _hk, _col, _ig in self.class_editors['primary_motion'].get():
+			if label:
+				out.append((label, 'motion'))
+		return out
+
+	def _get_pool_for_map(self):
+		"""List of shared secondary names from the pool editor."""
+		return [label for label, _hk, _col, _ig in self.class_editors['secondary'].get() if label]
+
 	def _validate_secondary_classes(self):
-		"""
-		Ensure there are at least 2 secondary static and 2 secondary motion classes
-		when they are being used (have at least one class defined).
+		"""Validate the shared secondary pool + mapping.
+		- every secondary referenced in the map exists in the pool
+		- every primary referenced in the map exists
 		Returns (is_valid: bool, error_message: str)
 		"""
-		# Get secondary class counts and filter out empty labels
-		sec_static = [x for x in self.class_editors['secondary_static'].get() if x[0]]
-		sec_motion = [x for x in self.class_editors['secondary_motion'].get() if x[0]]
-
-		# Only validate if there are any secondary classes defined
-		needs_static_validation = len(sec_static) > 0
-		needs_motion_validation = len(sec_motion) > 0
+		pool = set(self._get_pool_for_map())
+		primaries = set(n for (n, _s) in self._get_primaries_for_map())
+		mapping = self.secondary_map_editor.get() if hasattr(self, 'secondary_map_editor') else {}
 
 		errors = []
-
-		if needs_static_validation and len(sec_static) < 2:
-			errors.append(
-				"At least 2 secondary static classes are required when using secondary static classes."
-			)
-
-		if needs_motion_validation and len(sec_motion) < 2:
-			errors.append(
-				"At least 2 secondary motion classes are required when using secondary motion classes."
-			)
+		for prim, secs in mapping.items():
+			if prim not in primaries:
+				errors.append(f"Mapping refers to unknown primary '{prim}'.")
+			for s in secs:
+				if s not in pool:
+					errors.append(f"Mapping refers to unknown secondary '{s}' (not in the pool).")
 
 		if errors:
-			return False, "\n\n".join(errors)
+			# de-duplicate while preserving order
+			seen = set()
+			uniq = [e for e in errors if not (e in seen or seen.add(e))]
+			return False, "\n\n".join(uniq)
 
 		return True, ""
 
@@ -756,6 +859,11 @@ class SettingsEditorApp(tk.Tk):
 			editor = ClassListEditor(tab1, title=title, on_change=self._set_dirty, confirm_modify=self._confirm_modify_structure)
 			editor.pack(fill='x', pady=(6,6), anchor='w', padx=8)
 			self.class_editors[key] = editor
+
+		# Secondary mapping editor (primary -> allowed shared secondaries)
+		self.secondary_map_editor = SecondaryMapEditor(
+			tab1, self._get_primaries_for_map, self._get_pool_for_map, on_change=self._set_dirty)
+		self.secondary_map_editor.pack(fill='x', pady=(6,6), anchor='w', padx=8)
 
 		self.motion_blocks_static_var = tk.BooleanVar(value=False)
 		cb_mbs = ttk.Checkbutton(tab1, text='Motion blocks static  ' + 'ⓘ', variable=self.motion_blocks_static_var, command=self._set_dirty)
@@ -1484,9 +1592,6 @@ class SettingsEditorApp(tk.Tk):
 
 
 		# classes
-		# read global ignore_secondary list from the file (may be empty)
-		ignore_list = parse_list_field(d.get('ignore_secondary', fallback=''))
-
 		# Suppress confirmation dialogs while populating editors at startup
 		for ed in self.class_editors.values():
 			ed.set_suppress_confirm(True)
@@ -1503,16 +1608,32 @@ class SettingsEditorApp(tk.Tk):
 			for i, label in enumerate(cls):
 				hot = hks[i] if i < len(hks) else ''
 				col = cols[i] if i < len(cols) else (200,200,200)
-				is_ignored = False
-				# if this is a primary editor, check whether this label is in ignore_list
-				if key.startswith('primary') and label in ignore_list:
-					is_ignored = True
-				# Use add_row (confirm suppressed) so saved origin ordering remains unchanged
-				editor.add_row(label=label, hotkey=hot, color=col, ignore_secondary=is_ignored)
+				editor.add_row(label=label, hotkey=hot, color=col)
+
+		# Secondary mapping (new schema) with legacy fallback reconstruction.
+		mapping = parse_secondary_map(d.get('secondary_map', fallback=''))
+		if not self._get_pool_for_map() or not mapping:
+			# Reconstruct pool + map from the legacy keys if the new schema is absent.
+			ps = [l for l, _h, _c, _i in self.class_editors['primary_static'].get()]
+			pm = [l for l, _h, _c, _i in self.class_editors['primary_motion'].get()]
+			cfgres = load_secondary_config(self.cfg, ps, pm)
+			if not self._get_pool_for_map() and cfgres['secondary_classes']:
+				ed = self.class_editors['secondary']
+				ed.clear()
+				for i, nm in enumerate(cfgres['secondary_classes']):
+					bgr = cfgres['secondary_colors'][i] if i < len(cfgres['secondary_colors']) else (200, 200, 200)
+					rgb = (bgr[2], bgr[1], bgr[0])
+					hot = cfgres['secondary_hotkeys'][i] if i < len(cfgres['secondary_hotkeys']) else ''
+					ed.add_row(label=nm, hotkey=hot, color=rgb)
+			if not mapping:
+				mapping = cfgres['secondary_map']
 
 		# Re-enable confirmation dialogs after load
 		for ed in self.class_editors.values():
 			ed.set_suppress_confirm(False)
+
+		# Populate the mapping editor from the (possibly reconstructed) mapping.
+		self.secondary_map_editor.set(mapping)
 
 
 		# viewing
@@ -1821,11 +1942,11 @@ class SettingsEditorApp(tk.Tk):
 			if b:
 				backed.append(b)
 
-		# secondary directories start with 'model_secondary_motion'
-		# skip any names that already end with _backup<number>
+		# secondary model directories (per-stream): 'model_secondary_motion' and
+		# 'model_secondary_static'. Skip any names that already end with _backup<number>.
 		backup_suffix_re = re.compile(r'_backup\d+$')
 		for name in sorted(os.listdir(self.project_dir)):
-			if not name.startswith('model_secondary_motion'):
+			if not (name.startswith('model_secondary_motion') or name.startswith('model_secondary_static')):
 				continue
 			# ignore directories that are already backuped (name ends with _backupN)
 			if backup_suffix_re.search(name):
@@ -1963,26 +2084,23 @@ class SettingsEditorApp(tk.Tk):
 		# ---- build a fresh DEFAULT dict from the current GUI state ----
 		new_default = {}
 
-		ignore_secondary_labels = []
-
 		for key, _title in CLASS_GROUPS:
 			editor = self.class_editors[key]
-			items = editor.get()  # now list of (label, hotkey, (r,g,b), ignore_flag)
+			items = editor.get()  # list of (label, hotkey, (r,g,b), ignore_flag[unused])
 			labels = []
 			hks = []
 			cols = []
-			for label, hk, col, ignored in items:
+			for label, hk, col, _ignored in items:
 				labels.append(label)
 				hks.append(hk)
 				cols.append(col)
-				if key.startswith('primary') and ignored:
-					ignore_secondary_labels.append(label)
 
 			new_default[f'{key}_classes'] = list_to_field(labels)
 			new_default[f'{key}_hotkeys'] = list_to_field(hks)
 			new_default[f'{key}_colors'] = colors_to_field(cols)
 
-		new_default['ignore_secondary'] = list_to_field(ignore_secondary_labels)
+		# Shared secondary mapping (new schema). ignore_secondary is obsolete.
+		new_default['secondary_map'] = format_secondary_map(self.secondary_map_editor.get())
 
 		# paths
 		new_default['clips_dir'] = self.clips_dir_var.get()
@@ -2122,26 +2240,6 @@ class SettingsEditorApp(tk.Tk):
 		k['process_noise_pos'] = str(self.kalman_pos_var.get())
 		k['process_noise_vel'] = str(self.kalman_vel_var.get())
 		k['measurement_noise'] = str(self.kalman_meas_var.get())
-
-
-
-		ignore_secondary = []
-
-		for key, editor in self.class_editors.items():
-			labels, hotkeys, colors = [], [], []
-
-			for label, hk, col, ignore_sec in editor.get():
-				if not label:
-					continue
-
-				labels.append(label)
-				hotkeys.append(hk)
-				colors.append(col)
-
-				if key.startswith('primary') and ignore_sec:
-					ignore_secondary.append(label)
-
-		new_default['ignore_secondary'] = ','.join(ignore_secondary)
 
 		path_error = self._validate_paths()
 		if path_error:

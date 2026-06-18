@@ -12,6 +12,7 @@ from collections import deque
 import sys
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
+from behaveai_config import load_secondary_config
 
 
 # Optional YOLO import
@@ -80,20 +81,10 @@ try:
 	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
 
-	secondary_motion_classes = [name.strip() for name in config['DEFAULT']['secondary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_motion_colors', '').split(';') if c.strip()]
-	secondary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_motion_hotkeys'].split(',')]
-
 	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
 	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
 	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
 	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
-
-	secondary_static_classes = [name.strip() for name in config['DEFAULT']['secondary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('secondary_static_colors', '').split(';') if c.strip()]
-	secondary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	secondary_static_hotkeys = [key.strip() for key in config['DEFAULT']['secondary_static_hotkeys'].split(',')]
 
 	primary_static_project_path = 'model_primary_static'
 	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
@@ -103,33 +94,26 @@ try:
 	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
 	primary_motion_yaml_path = 'motion_annotations.yaml'
 
-	ignore_secondary = [name.strip() for name in config['DEFAULT']['ignore_secondary'].split(',')]
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
-	if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-		hierarchical_mode = True
-		motion_cropped_base_dir = 'annot_motion_crop'
-		static_cropped_base_dir = 'annot_static_crop'
-		if len(secondary_motion_classes) == 1:
-			secondary_motion_classes = []
-			secondary_motion_colors = []
-			secondary_motion_hotkeys = []
-		if len(secondary_static_classes) == 1:
-			secondary_static_classes = []
-			secondary_static_colors = []
-			secondary_static_hotkeys = []
-	else:
-		hierarchical_mode = False
-		motion_cropped_base_dir = ""
-		static_cropped_base_dir = ""
+	motion_cropped_base_dir = 'annot_motion_crop'
+	static_cropped_base_dir = 'annot_static_crop'
 
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
-	secondary_classes = secondary_static_classes + secondary_motion_classes
-	secondary_colors = secondary_static_colors + secondary_motion_colors
-	secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
+	# ---- Shared secondary configuration (pool + per-primary mapping) ----
+	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
+	secondary_classes = _sec_cfg['secondary_classes']
+	secondary_colors = _sec_cfg['secondary_colors']
+	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
+	secondary_map = _sec_cfg['secondary_map']
+	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
+	hierarchical_mode = _sec_cfg['hierarchical_mode']
+
+	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
+						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 
 	if hierarchical_mode:
 		secondary_static_project_path = 'model_secondary_static'
@@ -139,15 +123,6 @@ try:
 		secondary_motion_project_path = 'model_secondary_motion'
 		secondary_motion_data_path = 'annot_motion_crop'
 		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
-
-		secondary_class_ids = list(range(len(secondary_classes)))
-		paired = list(zip(secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys))
-		paired_sorted = sorted(paired, key=lambda x: x[0].lower())
-		secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = zip(*paired_sorted)
-		secondary_classes = list(secondary_classes)
-		secondary_colors = list(secondary_colors)
-		secondary_class_ids = list(secondary_class_ids)
-		secondary_hotkeys = list(secondary_hotkeys)
 
 
 	static_train_images_dir = 'annot_static/images/train'
@@ -188,12 +163,8 @@ except KeyError as e:
 # Basic validation
 if len(primary_motion_classes) > len(primary_motion_colors) or len(primary_motion_classes) != len(primary_motion_hotkeys):
 	raise ValueError("Primary motion classes, colours and hotkeys must match in configuration. Ensure colours are seprated by semicolons")
-if len(secondary_motion_classes) > len(secondary_motion_colors) or len(secondary_motion_classes) != len(secondary_motion_hotkeys):
-	raise ValueError("Secondary motion classes, colours and hotkeys must match in configuration. Ensure colours are seprated by semicolons")
 if len(primary_static_classes) > len(primary_static_colors) or len(primary_static_classes) != len(primary_static_hotkeys):
 	raise ValueError("Primary static classes, colours and hotkeys must match in configuration. Ensure colours are seprated by semicolons")
-if len(secondary_static_classes) > len(secondary_static_colors) or len(secondary_static_classes) != len(secondary_static_hotkeys):
-	raise ValueError("Secondary static classes, colours and hotkeys must match in configuration. Ensure colours are seprated by semicolons")
 if motion_blocks_static not in ('true','false'):
 	raise ValueError("motion_blocks_static must be true or false")
 if static_blocks_motion not in ('true','false'):
@@ -206,12 +177,14 @@ expB2 = 1 - expB
 
 primary_classes_info = list(zip(primary_hotkeys, primary_classes))
 secondary_classes_info = list(zip(secondary_hotkeys, secondary_classes))
-primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info)}
-secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info)}
+primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info) if key}
+secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info) if key}
 active_primary = 0
 if len(primary_static_classes) <= 1:
 	active_primary = 1
-active_secondary = 0
+active_secondary = -1
+# Indices of the boxes currently selected (set by the app before redraw).
+g_selected_boxes = set()
 
 frameWindow = 4
 if strategy == 'exponential':
@@ -727,12 +700,27 @@ print("Starting inspection of annotation dataset. Items found:", len(items))
 
 # Drawing helpers (adapted)
 def draw_boxes(frame):
-	for box in boxes:
+	for bi, box in enumerate(boxes):
+		primary_cls = box[4] if len(box) > 4 else -1
+		is_selected = (bi in g_selected_boxes)
+		# Pending / unclassified box (no primary chosen yet).
+		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
+			px1 = int(box[0] * disp_scale_factor); py1 = int(box[1] * disp_scale_factor)
+			px2 = int(box[2] * disp_scale_factor); py2 = int(box[3] * disp_scale_factor)
+			cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 0, 255), max(1, line_thickness))
+			cv2.putText(frame, "? choose primary", (px1, max(py1 - 6, 10)),
+						cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 255), line_thickness, cv2.LINE_AA)
+			if is_selected:
+				cv2.rectangle(frame, (px1-3, py1-3), (px2+3, py2+3), (0, 255, 255), 1)
+			continue
 		if hierarchical_mode:
 			x1, y1, x2, y2, primary_cls, secondary_cls, conf, secondary_conf = box
 			x1 = int(x1 * disp_scale_factor); y1 = int(y1 * disp_scale_factor)
 			x2 = int(x2 * disp_scale_factor); y2 = int(y2 * disp_scale_factor)
-			if primary_classes[primary_cls] in ignore_secondary:
+			if is_selected:
+				cv2.rectangle(frame, (x1-line_thickness-3, y1-line_thickness-3), (x2+line_thickness+3, y2+line_thickness+3), (0, 255, 255), 1)
+			no_secondary = (secondary_cls is None or secondary_cls < 0 or secondary_cls >= len(secondary_classes))
+			if no_secondary or primary_classes[primary_cls] in ignore_secondary:
 				label = f"{primary_classes[primary_cls].upper()}"
 				if conf != -1:
 					label = label + f' {conf:.2f}'
@@ -759,6 +747,8 @@ def draw_boxes(frame):
 			x1, y1, x2, y2, primary_cls, conf = box
 			x1 = int(x1 * disp_scale_factor); y1 = int(y1 * disp_scale_factor)
 			x2 = int(x2 * disp_scale_factor); y2 = int(y2 * disp_scale_factor)
+			if is_selected:
+				cv2.rectangle(frame, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
 			label = f"{primary_classes[primary_cls]}"
 			if conf != -1:
 				label = label + f' {conf:.2f}'
@@ -917,9 +907,14 @@ def save_annotation_and_overwrite_current():
 	   Respects original origin directories so we don't shuffle train/val assignments.
 	"""
 	global items, current_idx, fr, original_frame, boxes, grey_boxes, annot_count
+	# Drop unclassified (pending) boxes — they have no primary class yet.
+	pending = [b for b in boxes if (len(b) <= 4 or b[4] is None or b[4] < 0)]
+	if pending:
+		print(f"Skipping {len(pending)} unclassified box(es) — assign a primary class first.")
+		boxes = [b for b in boxes if not (len(b) <= 4 or b[4] is None or b[4] < 0)]
 	item = items[current_idx]
 	base = item['basename']
-	
+
 	deleted = annotation_index.delete_frame(base)
 	if deleted:
 		print("Overwriting existing annotation")
@@ -1108,8 +1103,25 @@ class DatasetInspectorTk:
 	def __init__(self, root):
 		self.root = root
 		root.title("BehaveAI — Annotation Inspector")
-		# default larger window so panel visible
-		root.geometry("1200x900")
+
+		# Size the window to fit the current screen (any size); keep it resizable so
+		# the composite display scales down to whatever space is available.
+		sw = root.winfo_screenwidth()
+		sh = root.winfo_screenheight()
+		win_w = min(1200, sw)
+		win_h = min(900, max(400, sh - 60))  # leave room for the taskbar
+		root.geometry(f"{win_w}x{win_h}+0+0")
+		root.minsize(min(900, max(400, sw - 40)), min(600, max(300, sh - 80)))
+
+		# F11 toggles fullscreen for users who prefer it.
+		self._fullscreen = False
+		def _toggle_fullscreen(event=None):
+			self._fullscreen = not self._fullscreen
+			try:
+				root.attributes('-fullscreen', self._fullscreen)
+			except Exception:
+				pass
+		root.bind_all('<F11>', _toggle_fullscreen)
 
 		self.main = tk.Frame(root)
 		self.main.pack(fill='both', expand=True)
@@ -1120,8 +1132,10 @@ class DatasetInspectorTk:
 		self.left.columnconfigure(0, weight=1)
 		self.left.rowconfigure(0, weight=1)  # canvas row stretches
 
-		canvas_w = min(1400, video_width + right_frame_width + 60)
-		canvas_h = min(1000, video_height + 180)
+		# Clamp the initial canvas size to the screen so it never overflows; the
+		# redraw scales the composite to the actual canvas size afterwards.
+		canvas_w = min(1400, video_width + right_frame_width + 60, sw)
+		canvas_h = min(1000, video_height + 180, max(300, sh - 200))
 		self.canvas = tk.Canvas(self.left, bg='black', highlightthickness=0,
 								width=canvas_w, height=canvas_h)
 		self.canvas.grid(row=0, column=0, sticky='nsew')
@@ -1151,46 +1165,65 @@ class DatasetInspectorTk:
 		self.buttons_frame = tk.Frame(self.bottom_frame)
 		self.buttons_frame.pack(side='bottom', fill='x', pady=(4,4))
 
-		self.primary_buttons = []
-		self.secondary_buttons = []
+		# Workflow banner guiding the box-first flow (set in update_button_states).
+		self.workflow_label = tk.Label(self.buttons_frame, text='', anchor='w', fg='#444')
+		self.workflow_label.pack(side='top', fill='x', padx=2)
+
+		self.primary_buttons = []     # (btn, color_hex, global_primary_idx)
+		self.secondary_buttons = []   # (btn, color_hex, pool_idx)
 
 		# Number of buttons per row — controlled via Settings > Display Settings
 		BUTTONS_PER_ROW = buttons_per_row
+		self._secondary_per_row = BUTTONS_PER_ROW
+		n_static = len(primary_static_classes)
 
-		# create primary buttons — wrap onto multiple rows when needed
-		btn_position = 0
+		# --- Primary groups: two titled frames (Static / Motion) ---
+		self.primary_static_frame = tk.LabelFrame(self.buttons_frame, text='Primary — Static')
+		self.primary_motion_frame = tk.LabelFrame(self.buttons_frame, text='Primary — Motion')
+		self.primary_static_frame.pack(fill='x', pady=(0,2))
+		self.primary_motion_frame.pack(fill='x', pady=(0,2))
+
+		static_pos = 0
+		motion_pos = 0
 		for idx, name in enumerate(primary_classes):
 			if name == '0': continue
 			color_hex = None
 			if idx < len(primary_colors):
 				bgr = primary_colors[idx]
 				color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
-			grid_row = btn_position // BUTTONS_PER_ROW
-			grid_col = btn_position % BUTTONS_PER_ROW
-			btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, primary_classes_info[idx][0]),
-							width=12, relief='raised', command=lambda i=idx: self.select_primary(i))
+			key = primary_classes_info[idx][0] if idx < len(primary_classes_info) else ''
+			label = "{} ({})".format(name, key) if key else name
+			if idx < n_static:
+				parent = self.primary_static_frame
+				grid_row, grid_col = static_pos // BUTTONS_PER_ROW, static_pos % BUTTONS_PER_ROW
+				static_pos += 1
+			else:
+				parent = self.primary_motion_frame
+				grid_row, grid_col = motion_pos // BUTTONS_PER_ROW, motion_pos % BUTTONS_PER_ROW
+				motion_pos += 1
+			btn = tk.Button(parent, text=label, width=12, relief='raised',
+							command=lambda i=idx: self.select_primary(i))
 			btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
 			self.primary_buttons.append((btn, color_hex, idx))
-			btn_position += 1
 
-		# How many grid rows did the primary buttons use?
-		primary_row_count = max(1, (btn_position + BUTTONS_PER_ROW - 1) // BUTTONS_PER_ROW)
+		if static_pos == 0:
+			self.primary_static_frame.pack_forget()
+		if motion_pos == 0:
+			self.primary_motion_frame.pack_forget()
 
-		# secondary rows — start after the last primary row
+		# --- Secondary group: pre-created buttons, shown filtered per primary ---
+		self.secondary_frame = tk.LabelFrame(self.buttons_frame, text='Secondary (optional)')
 		if hierarchical_mode:
-			btn_position = 0
 			for idx, name in enumerate(secondary_classes):
 				color_hex = None
 				if idx < len(secondary_colors):
 					bgr = secondary_colors[idx]
 					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
-				grid_row = primary_row_count + (btn_position // BUTTONS_PER_ROW)
-				grid_col = btn_position % BUTTONS_PER_ROW
-				btn = tk.Button(self.buttons_frame, text="{} ({})".format(name, secondary_classes_info[idx][0]),
-								width=12, relief='raised', command=lambda i=idx: self.select_secondary(i))
-				btn.grid(row=grid_row, column=grid_col, padx=2, pady=2)
+				key = secondary_classes_info[idx][0] if idx < len(secondary_classes_info) else ''
+				label = "{} ({})".format(name, key) if key else name
+				btn = tk.Button(self.secondary_frame, text=label, width=12, relief='raised',
+								command=lambda i=idx: self.select_secondary(i))
 				self.secondary_buttons.append((btn, color_hex, idx))
-				btn_position += 1
 
 		# bind events to canvas (we convert canvas -> video coords inside handlers)
 		self.canvas.bind('<ButtonPress-1>', self.on_mouse_down)
@@ -1198,12 +1231,18 @@ class DatasetInspectorTk:
 		self.canvas.bind('<ButtonRelease-1>', self.on_mouse_up)
 		self.canvas.bind('<Button-3>', self.on_right_click)
 		self.canvas.bind('<Motion>', self.on_motion)
+		# Mouse-wheel zoom; middle-click (wheel click) resets it.
+		self.canvas.bind('<MouseWheel>', self.on_mouse_wheel)
+		self.canvas.bind('<Button-4>', self.on_mouse_wheel)
+		self.canvas.bind('<Button-5>', self.on_mouse_wheel)
+		self.canvas.bind('<Button-2>', self.on_reset_zoom)
 
 		root.bind_all('<Key>', self.on_key_all)
 		# ~ root.bind_all('<Left>', lambda e: self.key_step(-1))
 		# ~ root.bind_all('<Right>', lambda e: self.key_step(1))
 		root.bind_all('<space>', lambda e: self.toggle_show_mode())
 		root.bind_all('<Return>', lambda e: self.key_save())
+		root.bind_all('<Escape>', self.reset_selection)
 
 		self.display_size = (video_width, video_height)
 		self.tk_img = None
@@ -1211,34 +1250,117 @@ class DatasetInspectorTk:
 		self.drawing = False
 		self.start_canvas_xy = None
 		self.composite_scale = 1.0
+		# Indices into `boxes` of the boxes selected for (re)labelling (multi-select).
+		self.selected_boxes = set()
+		# Mouse-wheel zoom state (video coords for the centre / visible crop).
+		self.zoom = 1.0
+		self.zoom_cx = video_width / 2
+		self.zoom_cy = video_height / 2
+		self._zoom_crop = (0, 0, video_width, video_height)
 
 		self.seek.set(current_idx)
 		self.update_status()
+		self.refresh_secondary_buttons()
 		self.update_button_states()
 
 		self.root.after(30, self.loop)
 
 	def select_primary(self, class_idx):
-		global active_primary, grey_mode, show_mode
+		global active_primary, active_secondary, grey_mode, show_mode
 		active_primary = class_idx
 		grey_mode = False
-		if active_primary < len(primary_static_classes):
-			show_mode = -1
-		else:
-			show_mode = 1
+		show_mode = -1 if active_primary < len(primary_static_classes) else 1
+		allowed = allowed_secondary_idx[class_idx] if 0 <= class_idx < len(allowed_secondary_idx) else []
+		if active_secondary not in allowed:
+			active_secondary = -1
+		self._apply_classes_to_selected_boxes()
+		self.refresh_secondary_buttons()
 		self.update_button_states()
 		self.redraw()
 
 	def select_secondary(self, class_idx):
-		global active_secondary, grey_mode, show_mode
-		active_secondary = class_idx
+		global active_secondary, grey_mode
 		grey_mode = False
-		if class_idx < len(secondary_static_classes):
-			show_mode = -1
-		else:
-			show_mode = 1
+		# Toggle off if re-selected (secondary is optional). Stream is fixed by the primary.
+		active_secondary = -1 if active_secondary == class_idx else class_idx
+		self._apply_classes_to_selected_boxes()
 		self.update_button_states()
 		self.redraw()
+
+	def reset_selection(self, event=None):
+		"""Escape: deselect all boxes and go back to step 1 (no model selected)."""
+		global active_primary, active_secondary
+		active_primary = -1
+		active_secondary = -1
+		self.selected_boxes = set()
+		self.refresh_secondary_buttons()
+		self.update_button_states()
+		self.redraw()
+
+	def _apply_classes_to_selected_boxes(self):
+		"""Re-label every selected/pending box with the active classes."""
+		global boxes
+		if active_primary is None or active_primary < 0:
+			return
+		for idx in list(getattr(self, 'selected_boxes', set())):
+			if idx is None or idx < 0 or idx >= len(boxes):
+				continue
+			b = boxes[idx]
+			x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
+			if hierarchical_mode:
+				c1 = b[6] if len(b) > 6 else -1
+				c2 = b[7] if len(b) > 7 else -1
+				boxes[idx] = (x1, y1, x2, y2, active_primary, active_secondary, c1, c2)
+			else:
+				c1 = b[5] if len(b) > 5 else -1
+				boxes[idx] = (x1, y1, x2, y2, active_primary, c1)
+
+	def refresh_secondary_buttons(self):
+		"""Show only the secondaries allowed for the active primary (fast grid/forget)."""
+		if not hierarchical_mode or not self.secondary_buttons:
+			return
+		allowed = []
+		if active_primary is not None and 0 <= active_primary < len(allowed_secondary_idx):
+			allowed = allowed_secondary_idx[active_primary]
+		for btn, _col, _idx in self.secondary_buttons:
+			btn.grid_forget()
+		if not allowed:
+			self.secondary_frame.pack_forget()
+			return
+		pool_to_btn = {idx: btn for (btn, _c, idx) in self.secondary_buttons}
+		per_row = self._secondary_per_row
+		pos = 0
+		for pool_idx in allowed:
+			btn = pool_to_btn.get(pool_idx)
+			if btn is None:
+				continue
+			btn.grid(row=pos // per_row, column=pos % per_row, padx=2, pady=2)
+			pos += 1
+		if not self.secondary_frame.winfo_ismapped():
+			self.secondary_frame.pack(fill='x', pady=(0,2))
+
+	def _select_box_at(self, x, y):
+		"""Toggle the topmost box under (x, y) in the multi-selection.
+
+		Clicking a box adds it to the selection (or removes it if already
+		selected); the active classes follow the clicked box. Escape clears all.
+		"""
+		global active_primary, active_secondary, show_mode
+		for i in range(len(boxes)-1, -1, -1):
+			bx1, by1, bx2, by2 = boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3]
+			if bx1 <= x <= bx2 and by1 <= y <= by2:
+				if i in self.selected_boxes:
+					self.selected_boxes.discard(i)
+				else:
+					self.selected_boxes.add(i)
+					b = boxes[i]
+					active_primary = b[4] if len(b) > 4 else -1
+					active_secondary = b[5] if (hierarchical_mode and len(b) > 5) else -1
+					if active_primary is not None and 0 <= active_primary < len(primary_classes):
+						show_mode = -1 if active_primary < len(primary_static_classes) else 1
+				self.refresh_secondary_buttons()
+				self.update_button_states()
+				return
 
 	def toggle_grey(self):
 		global grey_mode
@@ -1264,6 +1386,24 @@ class DatasetInspectorTk:
 			else:
 				btn.config(relief='raised', bg='#888888')
 		self.grey_btn.config(relief='sunken' if grey_mode else 'raised')
+		self._update_workflow_banner()
+
+	def _update_workflow_banner(self):
+		try:
+			if active_primary is None or active_primary < 0:
+				txt = 'Step 1 — Draw a box, then choose a primary behaviour'
+			else:
+				pname = primary_classes[active_primary] if active_primary < len(primary_classes) else '?'
+				if hierarchical_mode and active_primary < len(allowed_secondary_idx) and allowed_secondary_idx[active_primary]:
+					if active_secondary is not None and 0 <= active_secondary < len(secondary_classes):
+						txt = "Primary: {}  |  Secondary: {}  (Esc = reset)".format(pname, secondary_classes[active_secondary])
+					else:
+						txt = "Primary: {}  |  Secondary: none (optional)  (Esc = reset)".format(pname)
+				else:
+					txt = "Primary: {}  (Esc = reset)".format(pname)
+			self.workflow_label.config(text=txt)
+		except Exception:
+			pass
 
 	def on_seek(self, val):
 		global current_idx, frame_updated
@@ -1298,9 +1438,13 @@ class DatasetInspectorTk:
 		# Top-left anchored, so canvas x,y map to scaled image coords
 		display_x = min(max(0, cx), int(round(disp_w * scale)) - 1) / scale
 		display_y = min(max(0, cy), int(round(disp_h * scale)) - 1) / scale
-		vx = int(round(display_x * (video_width / float(max(1, video_width)))))
-		vy = int(round(display_y * (video_height / float(max(1, video_height)))))
-		return (vx, vy)
+		vx = display_x * (video_width / float(max(1, video_width)))
+		vy = display_y * (video_height / float(max(1, video_height)))
+		# Account for the active mouse-wheel zoom crop of the video region.
+		x0, y0, cw, ch = getattr(self, '_zoom_crop', (0, 0, video_width, video_height))
+		vx = x0 + vx * (cw / float(video_width))
+		vy = y0 + vy * (ch / float(video_height))
+		return (int(round(vx)), int(round(vy)))
 
 	def video_to_canvas(self, vx, vy):
 		# map video pixels to canvas coords using current composite scaling
@@ -1336,10 +1480,10 @@ class DatasetInspectorTk:
 		self.redraw(temp_rect=(self.start_canvas_xy, (event.x, event.y)))
 
 	def on_mouse_up(self, event):
+		global ix, iy, boxes, grey_boxes, drawing, cursor_pos, active_primary, active_secondary
 		if not self.drawing:
 			return
 		self.drawing = False
-		global ix, iy, boxes, grey_boxes, drawing, cursor_pos
 		drawing = False
 		start_v = self.canvas_to_video(self.start_canvas_xy)
 		end_v = self.canvas_to_video((event.x, event.y))
@@ -1352,10 +1496,53 @@ class DatasetInspectorTk:
 			if grey_mode:
 				grey_boxes.append((x1, y1, x2, y2))
 			else:
+				# Once the current selection has been classified, drawing a new box
+				# starts a fresh selection; otherwise keep accumulating so several
+				# boxes can be drawn and assigned the same behaviour at once.
+				if active_primary is not None and active_primary >= 0:
+					self.selected_boxes = set()
+				active_primary = -1
+				active_secondary = -1
 				if hierarchical_mode:
-					boxes.append((x1, y1, x2, y2, active_primary, active_secondary, -1, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1, -1, -1))
 				else:
-					boxes.append((x1, y1, x2, y2, active_primary, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1))
+				self.selected_boxes.add(len(boxes) - 1)
+				self.refresh_secondary_buttons()
+				self.update_button_states()
+		elif not grey_mode:
+			# A click (no real drag): toggle the box under the cursor in the selection.
+			self._select_box_at(x1, y1)
+		self.redraw()
+
+	def on_mouse_wheel(self, event):
+		"""Zoom the view in/out around the cursor with the mouse wheel."""
+		direction = 0
+		if getattr(event, 'delta', 0):
+			direction = 1 if event.delta > 0 else -1
+		elif getattr(event, 'num', None) == 4:
+			direction = 1
+		elif getattr(event, 'num', None) == 5:
+			direction = -1
+		if direction == 0:
+			return
+		try:
+			vx, vy = self.canvas_to_video((event.x, event.y))
+		except Exception:
+			vx, vy = video_width / 2, video_height / 2
+		factor = 1.25 if direction > 0 else (1.0 / 1.25)
+		self.zoom = max(1.0, min(8.0, self.zoom * factor))
+		if self.zoom <= 1.0:
+			self.zoom = 1.0
+			self.zoom_cx, self.zoom_cy = video_width / 2, video_height / 2
+		else:
+			self.zoom_cx, self.zoom_cy = vx, vy
+		self.redraw()
+
+	def on_reset_zoom(self, event=None):
+		"""Middle mouse button (wheel click): reset the zoom to fit."""
+		self.zoom = 1.0
+		self.zoom_cx, self.zoom_cy = video_width / 2, video_height / 2
 		self.redraw()
 
 	def on_right_click(self, event):
@@ -1365,7 +1552,10 @@ class DatasetInspectorTk:
 		for i in range(len(boxes)-1, -1, -1):
 			bx1, by1, bx2, by2 = boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3]
 			if bx1 <= x <= bx2 and by1 <= y <= by2:
-				del boxes[i]; removed = True; break
+				del boxes[i]; removed = True
+				# Keep the selection indices consistent after deletion.
+				self.selected_boxes = {(j - 1 if j > i else j) for j in self.selected_boxes if j != i}
+				break
 		if not removed:
 			for i in range(len(grey_boxes)-1, -1, -1):
 				gx1, gy1, gx2, gy2 = grey_boxes[i]
@@ -1397,27 +1587,20 @@ class DatasetInspectorTk:
 			self.key_step(step)
 			return
 
-		if ch:
+		if ch and ch != '0':
 			try:
 				c_ord = ord(ch)
 			except Exception:
 				c_ord = None
-			if c_ord and c_ord in primary_class_dict and c_ord in secondary_class_dict:
-				if ch != '0':
-					active_primary = primary_class_dict[c_ord]
-					active_secondary = secondary_class_dict[c_ord]
-					grey_mode = False
-					self.update_button_states(); self.redraw(); return
-			if c_ord and c_ord in primary_class_dict:
-				if ch != '0':
-					active_primary = primary_class_dict[c_ord]
-					grey_mode = False
-					self.update_button_states(); self.redraw(); return
-			if c_ord and c_ord in secondary_class_dict:
-				if ch != '0':
-					active_secondary = secondary_class_dict[c_ord]
-					grey_mode = False
-					self.update_button_states(); self.redraw(); return
+			if c_ord in primary_class_dict:
+				self.select_primary(primary_class_dict[c_ord])
+				return
+			if c_ord in secondary_class_dict:
+				pool_idx = secondary_class_dict[c_ord]
+				allowed = allowed_secondary_idx[active_primary] if (active_primary is not None and 0 <= active_primary < len(allowed_secondary_idx)) else []
+				if pool_idx in allowed:
+					self.select_secondary(pool_idx)
+				return
 
 		if ch == 'u':
 			if grey_mode:
@@ -1507,11 +1690,35 @@ class DatasetInspectorTk:
 		self.seek.set(current_idx); self.update_status(); self.redraw()
 
 	def redraw(self, temp_rect=None):
+		global g_selected_boxes
+		g_selected_boxes = getattr(self, 'selected_boxes', set())
 		disp = refresh_display()
 		if disp is None:
 			self.canvas.delete('all')
 			self.canvas.create_rectangle(0,0,int(self.canvas.winfo_width()), int(self.canvas.winfo_height()), fill='black')
 			return
+
+		# Apply mouse-wheel zoom to the main video region of the composite only;
+		# the right magnifier column and bottom bar are left untouched.
+		zoom = getattr(self, 'zoom', 1.0)
+		main_w = max(1, int(round(video_width * disp_scale_factor)))
+		main_h = max(1, int(round(video_height * disp_scale_factor)))
+		if zoom and zoom > 1.0:
+			cw = max(1, int(round(video_width / zoom)))
+			ch = max(1, int(round(video_height / zoom)))
+			zcx = int(getattr(self, 'zoom_cx', video_width / 2))
+			zcy = int(getattr(self, 'zoom_cy', video_height / 2))
+			x0 = max(0, min(video_width - cw, zcx - cw // 2))
+			y0 = max(0, min(video_height - ch, zcy - ch // 2))
+			self._zoom_crop = (x0, y0, cw, ch)
+			dx0 = int(x0 * disp_scale_factor); dy0 = int(y0 * disp_scale_factor)
+			dcw = max(1, int(round(cw * disp_scale_factor))); dch = max(1, int(round(ch * disp_scale_factor)))
+			sub = disp[dy0:dy0 + dch, dx0:dx0 + dcw].copy()
+			if sub.size > 0:
+				disp[0:main_h, 0:main_w] = cv2.resize(sub, (main_w, main_h), interpolation=cv2.INTER_LINEAR)
+		else:
+			self._zoom_crop = (0, 0, video_width, video_height)
+
 		c_w = self.canvas.winfo_width() or 1
 		c_h = self.canvas.winfo_height() or 1
 		h, w = disp.shape[:2]
