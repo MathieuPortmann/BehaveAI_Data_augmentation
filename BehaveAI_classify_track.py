@@ -9,6 +9,7 @@ import configparser
 from behaveai_config import load_secondary_config
 import time
 import shutil
+import gc
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import subprocess
@@ -403,6 +404,29 @@ def count_images_in_dataset(path):
 		return 0
 
 
+def free_gpu_memory(*objs):
+	"""Release model references and clear the CUDA cache between training runs.
+
+	The pipeline trains several YOLO models sequentially in one process. On a
+	small (8 GB) GPU the allocator cache from a finished model is not returned,
+	so the next model.train() can hit CUDA out-of-memory. Dropping the model
+	references and emptying the cache avoids that.
+	"""
+	for o in objs:
+		try:
+			del o
+		except Exception:
+			pass
+	gc.collect()
+	try:
+		import torch
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+			torch.cuda.ipc_collect()
+	except Exception:
+		pass
+
+
 def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz):
 	"""
 	Decide whether to (re)train a model based on existence and image counts.
@@ -463,6 +487,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 					name="train",
 					exist_ok=True
 				)
+				free_gpu_memory(model)
 				move_to_expected(project_path, run_name="train", runs_root="runs")
 				print(f'Done training {model_type} model')
 				# Update saved train count
@@ -494,6 +519,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 			name="train",
 			exist_ok=True
 		)
+		free_gpu_memory(model)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
 		print(f'Done training {model_type} model')
 
