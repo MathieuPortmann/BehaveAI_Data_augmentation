@@ -2206,8 +2206,9 @@ class AnnotatorTk:
 					self.select_secondary(pool_idx)
 				return
 
-		# Tab — skip current frame without saving, advance to next frame
-		if ks == 'Tab':
+		# Ctrl+P — skip current frame without saving, advance to next frame
+		# (event.state & 0x4 tests the Control mask.)
+		if ks in ('p', 'P') and (event.state & 0x4):
 			boxes.clear()
 			grey_boxes.clear()
 			self.selected_boxes = set()
