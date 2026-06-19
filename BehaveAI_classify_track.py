@@ -598,22 +598,34 @@ if __name__ == '__main__':
 
 	if hierarchical_mode:
 		# Static stream (pooled over all static primaries)
-		if _count_class_subdirs(secondary_static_data_path) >= 2:
+		_static_class_count = _count_class_subdirs(secondary_static_data_path)
+		if _static_class_count >= 2:
 			maybe_retrain('secondary_static', secondary_static_data_path, secondary_static_project_path,
 				secondary_static_model_path, secondary_classifier, secondary_epochs, 224)
 			if use_ncnn == 'true':
 				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
 			else:
 				secondary_static_model = YOLO(secondary_static_model_path)
+		else:
+			print(f"WARNING: Secondary static classifier skipped: only {_static_class_count} class "
+				f"folder(s) with crops in '{secondary_static_data_path}', need >=2. "
+				f"Static secondary behaviours will not be predicted until you annotate "
+				f"at least 2 distinct secondary classes.")
 
 		# Motion stream (pooled over all motion primaries)
-		if _count_class_subdirs(secondary_motion_data_path) >= 2:
+		_motion_class_count = _count_class_subdirs(secondary_motion_data_path)
+		if _motion_class_count >= 2:
 			maybe_retrain('secondary_motion', secondary_motion_data_path, secondary_motion_project_path,
 				secondary_motion_model_path, secondary_classifier, secondary_epochs, 224)
 			if use_ncnn == 'true':
 				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
 			else:
 				secondary_motion_model = YOLO(secondary_motion_model_path)
+		else:
+			print(f"WARNING: Secondary motion classifier skipped: only {_motion_class_count} class "
+				f"folder(s) with crops in '{secondary_motion_data_path}', need >=2. "
+				f"Motion secondary behaviours will not be predicted until you annotate "
+				f"at least 2 distinct secondary classes.")
 
 
 	# --- PARAMETERS -----------------------------------------------------------
