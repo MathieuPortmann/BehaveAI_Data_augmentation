@@ -10,6 +10,8 @@ from behaveai_config import load_secondary_config
 import time
 import shutil
 import gc
+import json
+import tempfile
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import subprocess
@@ -427,6 +429,45 @@ def free_gpu_memory(*objs):
 		pass
 
 
+def train_in_subprocess(weights, data, epochs, imgsz, project, workers=4):
+	"""Train one YOLO model in an isolated subprocess.
+
+	The pipeline trains several models back-to-back. Doing so in a single
+	process intermittently crashed with `CUDA error: resource already mapped`
+	in the dataloader's pin-memory thread (cu130 / Blackwell GPUs): the second
+	training inherited a corrupted CUDA context from the first. Running each
+	training in its own process gives every model a fresh CUDA context, so the
+	carry-over can no longer happen. The parent process never initialises CUDA
+	for training, keeping it clean for later inference/tracking too.
+
+	Raises RuntimeError if the worker process exits non-zero.
+	"""
+	worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BehaveAI_train_worker.py")
+	cfg = {
+		"cwd": os.getcwd(),
+		"weights": weights,
+		"data": data,
+		"epochs": epochs,
+		"imgsz": imgsz,
+		"project": project,
+		"workers": workers,
+	}
+	with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+		json.dump(cfg, tf)
+		cfg_path = tf.name
+	try:
+		result = subprocess.run([sys.executable, worker, cfg_path])
+		if result.returncode != 0:
+			raise RuntimeError(
+				f"Training subprocess failed (exit code {result.returncode}) for project '{project}'"
+			)
+	finally:
+		try:
+			os.remove(cfg_path)
+		except OSError:
+			pass
+
+
 def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz):
 	"""
 	Decide whether to (re)train a model based on existence and image counts.
@@ -478,16 +519,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 
 				start_weights = os.path.join(final_backup, "train", "weights", "best.pt")
 				print(f'Training new {model_type} model using existing weights...')
-				model = YOLO(start_weights)
-				model.train(
-					data=yaml_path,
-					epochs=epochs,
-					imgsz=imgsz,
-					project=project_path,
-					name="train",
-					exist_ok=True
-				)
-				free_gpu_memory(model)
+				train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path)
 				move_to_expected(project_path, run_name="train", runs_root="runs")
 				print(f'Done training {model_type} model')
 				# Update saved train count
@@ -510,16 +542,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 	else:
 		# Model missing -> do first-time training
 		print(f'{model_type} model not found, building it...')
-		model = YOLO(classifier)
-		model.train(
-			data=yaml_path,
-			epochs=epochs,
-			imgsz=imgsz,
-			project=project_path,
-			name="train",
-			exist_ok=True
-		)
-		free_gpu_memory(model)
+		train_in_subprocess(classifier, yaml_path, epochs, imgsz, project_path)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
 		print(f'Done training {model_type} model')
 
