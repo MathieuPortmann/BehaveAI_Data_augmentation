@@ -493,51 +493,48 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 
 		current_count = count_images_in_dataset(yaml_path)
 
-		if current_count != last_count:
-			# Ask user whether to retrain
-			root = tk.Tk(); root.withdraw()
-			msg = (
-				f"New annotations detected for '{model_type}' model.\n"
-				f"Image count changed from {last_count} to {current_count}.\n\n"
-				"Do you want to re-train this model?"
-			)
-			response = messagebox.askyesno("Retrain model?", msg)
-			root.destroy()
+		# Counts match -> annotations unchanged, nothing to do.
+		if current_count == last_count:
+			return False
 
-			if response:
-				# Backup existing model dir/project and retrain from its weights
-				backup_dir = project_path + "_backup"
-				i = 1
-				while os.path.exists(f"{backup_dir}{i}"):
-					i += 1
-				final_backup = f"{backup_dir}{i}"
-				try:
-					shutil.copytree(project_path, final_backup)
-					print(f"Existing model copied to {final_backup}")
-				except Exception as e:
-					print(f"Warning: failed to backup {project_path}: {e}")
+		# New annotations detected -> retrain automatically, no confirmation
+		# dialog. Models whose annotation count is unchanged are skipped above, so
+		# pressing "Train" trains static/motion/secondary back-to-back with no
+		# intermediate pop-ups.
+		print(
+			f"New annotations detected for '{model_type}' model: image count "
+			f"changed from {last_count} to {current_count}. Re-training..."
+		)
+		# Backup existing model dir/project and retrain from its weights
+		backup_dir = project_path + "_backup"
+		i = 1
+		while os.path.exists(f"{backup_dir}{i}"):
+			i += 1
+		final_backup = f"{backup_dir}{i}"
+		try:
+			shutil.copytree(project_path, final_backup)
+			print(f"Existing model copied to {final_backup}")
+		except Exception as e:
+			print(f"Warning: failed to backup {project_path}: {e}")
 
-				start_weights = os.path.join(final_backup, "train", "weights", "best.pt")
-				print(f'Training new {model_type} model using existing weights...')
-				train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path)
-				move_to_expected(project_path, run_name="train", runs_root="runs")
-				print(f'Done training {model_type} model')
-				# Update saved train count
-				with open(os.path.join(project_path, 'train_count.txt'), 'w') as f:
-					f.write(str(current_count))
-				# copy existing settings ini file for reference (so you know which settings were used for each model)
-				os.makedirs(project_path, exist_ok=True)
-				# ~ dst = os.path.join(project_path, os.path.basename(config_path))
-				dst = os.path.join(project_path, 'saved_settings.ini')
-				try:
-					shutil.copy2(config_path, dst)
-					print(f"Saved settings snapshot to {dst}")
-				except Exception as e:
-					print(f"Warning: could not copy settings to model dir: {e}")
-				return True
-
-		# else counts match -> nothing to do
-		return False
+		start_weights = os.path.join(final_backup, "train", "weights", "best.pt")
+		print(f'Training new {model_type} model using existing weights...')
+		train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path)
+		move_to_expected(project_path, run_name="train", runs_root="runs")
+		print(f'Done training {model_type} model')
+		# Update saved train count
+		with open(os.path.join(project_path, 'train_count.txt'), 'w') as f:
+			f.write(str(current_count))
+		# copy existing settings ini file for reference (so you know which settings were used for each model)
+		os.makedirs(project_path, exist_ok=True)
+		# ~ dst = os.path.join(project_path, os.path.basename(config_path))
+		dst = os.path.join(project_path, 'saved_settings.ini')
+		try:
+			shutil.copy2(config_path, dst)
+			print(f"Saved settings snapshot to {dst}")
+		except Exception as e:
+			print(f"Warning: could not copy settings to model dir: {e}")
+		return True
 
 	else:
 		# Model missing -> do first-time training
