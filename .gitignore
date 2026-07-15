@@ -33,7 +33,6 @@ annot_static_crop/
 # Generated CSV outputs (additive pipeline artifacts)
 *_tracking.csv
 *_tracking_corrected.csv
-*_subgroups.csv
 *_interaction_edges.csv
 *_interaction_nodes.csv
 *_complex_behaviours.csv

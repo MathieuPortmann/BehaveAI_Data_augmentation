@@ -38,7 +38,7 @@ import glob
 import argparse
 import configparser
 import shutil
-from collections import defaultdict, Counter
+from collections import defaultdict
 
 import numpy as np
 
@@ -183,7 +183,7 @@ def segment_feature_dict(cache, ids, start, end):
 
 	Pools the dyadic features of all ordered pairs among `ids` over the window
 	(aggregate_window -> scalars + YOLO label bag), adds aggregated group features
-	for the ad-hoc sub-group of `ids`, plus size/foal/individual-count meta.
+	for the ad-hoc group of `ids`, plus size/foal/individual-count meta.
 	Returns (feature_dict, quality_weight).
 	"""
 	ids = [str(t) for t in ids]
@@ -201,7 +201,7 @@ def segment_feature_dict(cache, ids, start, end):
 					pooled.append(r)
 	feat = {f'dy_{k}': v for k, v in CF.aggregate_window(pooled, start, end).items()}
 
-	# --- Group: treat ids as an ad-hoc sub-group over the window ---
+	# --- Group: treat ids as an ad-hoc group over the window ---
 	sub = {}
 	for f in td['frames']:
 		if start <= f <= end:
@@ -452,8 +452,9 @@ def _write_merge_suggestions(project_dir, classes, cm, rate):
 
 def classify_video(project_path, video_name):
 	"""Predict complex behaviours over a video using sliding windows on each
-	interacting ordered pair and each sub-group; write <video>_complex_predictions.csv
-	and populate interaction_type in the edges file where possible."""
+	interacting ordered pair and the whole co-present herd; write
+	<video>_complex_predictions.csv and populate interaction_type in the edges
+	file where possible."""
 	if not _SKLEARN_AVAILABLE:
 		print("scikit-learn is required to classify; install it first.")
 		return
@@ -505,23 +506,9 @@ def classify_video(project_path, video_name):
 		while s <= f1:
 			candidates.append((s, s + win - 1, [a, b]))
 			s += win
-	# Sub-groups (group behaviours): membership per window.
-	sg_path = os.path.join(output_dir, stem + '_subgroups.csv')
-	if os.path.exists(sg_path):
-		sg = CF.load_subgroups_csv(sg_path)
-		members_by_sg = defaultdict(lambda: defaultdict(Counter))  # sgid -> wstart -> Counter(ids)
-		fmax = max(sg.keys()) if sg else 0
-		for f, groups in sg.items():
-			wstart = (f // win) * win
-			for sgid, ids in groups:
-				if len(ids) >= 3:
-					for t in ids:
-						members_by_sg[sgid][wstart][t] += 1
-		for sgid, wins in members_by_sg.items():
-			for wstart, cnt in wins.items():
-				ids = [t for t, _ in cnt.most_common()]
-				if len(ids) >= 3:
-					candidates.append((wstart, wstart + win - 1, ids))
+	# Whole co-present herd (group behaviours): membership per window.
+	for (wstart, wend, ids) in CF.whole_herd_window_candidates(cache['track_data'], win, min_members=3):
+		candidates.append((wstart, wend, ids))
 
 	# Predict each candidate; keep those above the probability threshold.
 	preds = []

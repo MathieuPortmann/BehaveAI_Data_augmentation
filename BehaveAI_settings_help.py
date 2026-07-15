@@ -616,18 +616,7 @@ PARAM_HELP = {
                      "the entire video.",
     },
 
-    # ---------------- Sub-grouping ----------------
-    "subgroup_eps_bodylen": {
-        "short": "DBSCAN clustering radius, expressed in reference body lengths (not pixels).",
-        "what": "Neighbourhood radius used to group co-present subjects into spatial sub-groups.",
-        "influence": "Larger merges loosely spread animals into one sub-group; smaller splits into "
-                     "more, tighter sub-groups. Body-length units make it scale-invariant.",
-    },
-    "subgroup_min_stable": {
-        "short": "Frames a sub-group change must persist before it is accepted (anti-flicker).",
-        "what": "Temporal stability requirement for fission/fusion events.",
-        "influence": "Higher suppresses flickering splits/merges but delays detecting real changes.",
-    },
+    # ---------------- Reference body length ----------------
     "foal_size_ratio": {
         "short": "body_len / reference below this flags a likely foal.",
         "what": "Relative size threshold to tag small individuals as foals.",
@@ -767,7 +756,7 @@ PARAM_HELP = {
         "influence": "Tunes what 'fast' means when surfacing candidate windows.",
     },
     "complex_polarisation_high": {
-        "short": "Sub-group alignment above this suggests trek/stampede.",
+        "short": "Group alignment above this suggests trek/stampede.",
         "what": "Polarisation threshold (how aligned headings are) for candidate proposals.",
         "influence": "Higher requires stronger collective alignment to flag directed group motion.",
     },

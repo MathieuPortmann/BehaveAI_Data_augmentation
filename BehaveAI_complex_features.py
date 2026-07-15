@@ -2,10 +2,14 @@
 """
 BehaveAI Complex Features + Interaction Graph
 
-Deterministic layer that turns a (drone-corrected) tracking CSV plus its
-sub-groups into per-frame DYADIC and GROUP features, and aggregates them into
-the INTERACTION GRAPH — the primary analysis output of the HERDWISE
-multi-individual pipeline, directly importable into R igraph.
+Deterministic layer that turns a (drone-corrected) tracking CSV into per-frame
+DYADIC and GROUP features, and aggregates them into the INTERACTION GRAPH — the
+primary analysis output of the HERDWISE multi-individual pipeline, directly
+importable into R igraph.
+
+Group features are computed over the WHOLE co-present herd per frame (no
+spatial sub-grouping): every individual present in a frame counts as one group
+for that frame.
 
 Everything stays in image space (no metric conversion). All sizes/speeds are
 normalised by a reference body length body_len_ref = robust median box diagonal
@@ -13,7 +17,6 @@ of ADULT-sized horses (clarification 3), never each horse's own size.
 
 Inputs (per video, from the project output folder):
   - <video>_tracking_corrected.csv  (preferred; falls back to <video>_tracking.csv)
-  - <video>_subgroups.csv           (auto-generated via BehaveAI_subgroups if missing)
 
 Outputs (overwritten on every run / parameter change):
   - <video>_interaction_edges.csv   (one row per ordered dyad, episode, or frame)
@@ -370,60 +373,75 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 
 
 # ---------------------------------------------------------------------------
-# 4.2 Group (sub-group) features
+# 4.2 Group (whole co-present herd) features
 # ---------------------------------------------------------------------------
 
-def load_subgroups_csv(csv_path):
-	"""Read a *_subgroups.csv into {frame -> [(subgroup_id, [track_ids]), ...]}."""
-	out = defaultdict(list)
-	with open(csv_path, newline='', encoding='utf-8') as f:
-		for r in csv.DictReader(f):
-			try:
-				frame = int(r['frame'])
-				sgid = str(r['subgroup_id'])
-				ids = [t for t in str(r['track_ids']).split(';') if t]
-			except (ValueError, KeyError):
-				continue
-			out[frame].append((sgid, ids))
+def whole_herd_groups(track_data):
+	"""Trivial grouping: every individual present in a frame is one group ('herd')
+	for that frame — no spatial partitioning. Same {frame -> [(group_id, ids)]}
+	shape as any other grouping passed to compute_group_features."""
+	return {f: [('herd', track_data['present'][f])] for f in track_data['frames']}
+
+
+def whole_herd_window_candidates(track_data, win, min_members=3):
+	"""Non-overlapping windows of length `win` where at least `min_members` of
+	the whole co-present herd were seen; members = most frequent per-frame
+	presence within the window. Returns [(wstart, wend, ids), ...]."""
+	if not track_data['frames']:
+		return []
+	counts_by_window = defaultdict(Counter)
+	for f in track_data['frames']:
+		wstart = (f // win) * win
+		for t in track_data['present'][f]:
+			counts_by_window[wstart][t] += 1
+	out = []
+	for wstart, cnt in counts_by_window.items():
+		ids = [t for t, _ in cnt.most_common()]
+		if len(ids) >= min_members:
+			out.append((wstart, wstart + win - 1, ids))
 	return out
 
 
-def compute_group_features(track_data, subgroups, body_len_ref):
-	"""Per-frame, per-sub-group fixed-size feature vector (see module docstring).
+def compute_group_features(track_data, groups, body_len_ref):
+	"""Per-frame, per-group fixed-size feature vector (see module docstring).
+
+	`groups` maps frame -> [(group_id, [track_ids]), ...]; use whole_herd_groups()
+	for the whole co-present herd, or an ad-hoc single-group mapping (e.g. a
+	labelled segment's own ids) for other callers.
 
 	Returns a list of dicts. Independent of N (the number of members). Centroid
 	speed is derived from the barycentre trajectory over consecutive frames.
 	"""
 	ref = body_len_ref if body_len_ref and body_len_ref > 0 else 1.0
-	# Pre-compute per-(frame, subgroup) barycentre for centroid-speed differencing.
+	# Pre-compute per-(frame, group) barycentre for centroid-speed differencing.
 	bary = {}
 	for f in track_data['frames']:
-		for sgid, ids in subgroups.get(f, []):
+		for gid, ids in groups.get(f, []):
 			pts = [track_data['pos'][(f, t)] for t in ids if (f, t) in track_data['pos']]
 			if pts:
-				bary[(f, sgid)] = np.mean(np.array(pts, dtype=float), axis=0)
+				bary[(f, gid)] = np.mean(np.array(pts, dtype=float), axis=0)
 
-	# Barycentre speed per sub-group lineage over its observed frames.
-	sg_frames = defaultdict(list)
-	for (f, sgid) in bary:
-		sg_frames[sgid].append(f)
+	# Barycentre speed per group lineage over its observed frames.
+	g_frames = defaultdict(list)
+	for (f, gid) in bary:
+		g_frames[gid].append(f)
 	centroid_speed = {}
-	for sgid, fs in sg_frames.items():
+	for gid, fs in g_frames.items():
 		fs = sorted(fs)
 		for k, f in enumerate(fs):
 			if k == 0:
-				centroid_speed[(f, sgid)] = 0.0
+				centroid_speed[(f, gid)] = 0.0
 			else:
 				dfr = f - fs[k - 1]
 				if dfr > 0:
-					d = np.linalg.norm(bary[(f, sgid)] - bary[(fs[k - 1], sgid)])
-					centroid_speed[(f, sgid)] = float(d / dfr / ref)
+					d = np.linalg.norm(bary[(f, gid)] - bary[(fs[k - 1], gid)])
+					centroid_speed[(f, gid)] = float(d / dfr / ref)
 				else:
-					centroid_speed[(f, sgid)] = 0.0
+					centroid_speed[(f, gid)] = 0.0
 
 	rows = []
 	for f in track_data['frames']:
-		for sgid, ids in subgroups.get(f, []):
+		for gid, ids in groups.get(f, []):
 			ids = [t for t in ids if (f, t) in track_data['pos']]
 			n = len(ids)
 			if n == 0:
@@ -459,12 +477,12 @@ def compute_group_features(track_data, subgroups, body_len_ref):
 			elongation = _elongation(pts)
 
 			rows.append({
-				'frame': f, 'subgroup_id': sgid, 'n_members': n,
+				'frame': f, 'group_id': gid, 'n_members': n,
 				'mean_speed': float(speeds.mean()),
 				'polarisation': polarisation,
 				'cohesion': cohesion,
 				'area': area,
-				'centroid_speed': centroid_speed.get((f, sgid), 0.0),
+				'centroid_speed': centroid_speed.get((f, gid), 0.0),
 				'synchrony': synchrony,
 				'elongation': elongation,
 			})
@@ -700,16 +718,10 @@ def _graph_summary(edges, granularity):
 # Node attributes
 # ---------------------------------------------------------------------------
 
-def build_nodes(track_data, subgroups, size_ratio, is_foal):
+def build_nodes(track_data, size_ratio, is_foal):
 	"""Build per-track node-attribute rows for the nodes CSV."""
 	total_span = (max(track_data['frames']) - min(track_data['frames']) + 1) \
 		if track_data['frames'] else 1
-	# Dominant sub-group per track over its frames.
-	sg_per_track = defaultdict(list)
-	for f, groups in subgroups.items():
-		for sgid, ids in groups:
-			for t in ids:
-				sg_per_track[t].append(sgid)
 
 	nodes = []
 	for tid, frames in track_data['id_frames'].items():
@@ -719,7 +731,6 @@ def build_nodes(track_data, subgroups, size_ratio, is_foal):
 			'track_id': tid,
 			'first_frame': min(frames),
 			'last_frame': max(frames),
-			'subgroup_id_dominant': _dominant(sg_per_track.get(tid, [])),
 			'size_ratio': round(size_ratio.get(tid, 1.0), 4),
 			'is_foal': int(bool(is_foal.get(tid, False))),
 			'primary_class_dominant': _dominant(prim),
@@ -752,7 +763,7 @@ _EDGE_COLS = {
 				  'class_source_primary', 'class_source_secondary',
 				  'class_target_primary', 'class_target_secondary'],
 }
-_NODE_COLS = ['track_id', 'first_frame', 'last_frame', 'subgroup_id_dominant',
+_NODE_COLS = ['track_id', 'first_frame', 'last_frame',
 			  'size_ratio', 'is_foal', 'primary_class_dominant',
 			  'secondary_class_dominant', 'presence_ratio']
 
@@ -780,9 +791,8 @@ def write_interaction_graph(edges_rows, nodes_rows, edges_path, nodes_path,
 def run_complex_features(config_path):
 	"""Build the interaction graph for every tracking CSV in the output folder.
 
-	Prefers <video>_tracking_corrected.csv; auto-generates <video>_subgroups.csv
-	via BehaveAI_subgroups when missing; writes <video>_interaction_edges.csv and
-	<video>_interaction_nodes.csv (overwritten each run / parameter change).
+	Prefers <video>_tracking_corrected.csv; writes <video>_interaction_edges.csv
+	and <video>_interaction_nodes.csv (overwritten each run / parameter change).
 	"""
 	config_path = os.path.abspath(config_path)
 	project_dir = os.path.dirname(config_path)
@@ -832,31 +842,21 @@ def _process_one(stem, csv_path, output_dir, params):
 	print(f"  {stem}: body_len_ref={ref:.1f}px, {len(track_data['id_frames'])} tracks "
 		  f"({n_foal} likely foal(s)).")
 
-	# Sub-groups: load, or auto-generate via TASK 3 if missing.
-	sg_path = os.path.join(output_dir, stem + '_subgroups.csv')
-	if not os.path.exists(sg_path):
-		try:
-			from BehaveAI_subgroups import compute_subgroups
-			print(f"  {stem}: subgroups missing — generating with TASK 3 defaults.")
-			compute_subgroups(csv_path, sg_path)
-		except Exception as e:
-			print(f"  {stem}: could not generate subgroups ({e}); group features skipped.")
-	subgroups = load_subgroups_csv(sg_path) if os.path.exists(sg_path) else {}
-
 	pairwise = compute_pairwise_features(
 		track_data, ref, size_ratio,
 		max_distance=params['max_interaction_distance'],
 		contact_iou_thresh=params['contact_iou_thresh'],
 		contact_dist_bodylen=params['contact_dist_bodylen'])
 
-	# Group features are computed for downstream use (TASK 7) and summarised here.
-	if subgroups:
-		gfeat = compute_group_features(track_data, subgroups, ref)
-		if gfeat:
-			pol = np.mean([g['polarisation'] for g in gfeat])
-			print(f"  {stem}: {len(gfeat)} group-feature rows (mean polarisation={pol:.2f}).")
+	# Group features (whole co-present herd per frame) computed for downstream
+	# use (TASK 7) and summarised here.
+	groups = whole_herd_groups(track_data)
+	gfeat = compute_group_features(track_data, groups, ref)
+	if gfeat:
+		pol = np.mean([g['polarisation'] for g in gfeat])
+		print(f"  {stem}: {len(gfeat)} group-feature rows (mean polarisation={pol:.2f}).")
 
-	nodes = build_nodes(track_data, subgroups, size_ratio, is_foal)
+	nodes = build_nodes(track_data, size_ratio, is_foal)
 	edges, nodes = build_interaction_graph(
 		pairwise, nodes,
 		granularity=params['edge_granularity'],

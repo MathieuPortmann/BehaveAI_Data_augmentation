@@ -620,9 +620,7 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_max_position_var     = tk.DoubleVar(value=500.0)
 		self.ab_min_classified_var     = tk.IntVar(value=5)
 
-		# Sub-grouping (fission-fusion) parameters
-		self.subgroup_eps_bodylen_var  = tk.DoubleVar(value=4.0)
-		self.subgroup_min_stable_var   = tk.IntVar(value=10)
+		# Reference body length parameters
 		self.foal_size_ratio_var       = tk.DoubleVar(value=0.7)
 		self.body_len_ref_scope_var    = tk.StringVar(value='video')
 
@@ -1342,59 +1340,32 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_checkpoint_var.trace_add('write', lambda *a: self._set_dirty())
 		help_line(tab_reid, 'reid_checkpoint').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
 
-		# TAB: Sub-grouping (fission-fusion) — observed spatial clusters per frame
-		tab_sg = self._scroll_tab(notebook, 'Sub-grouping')
-		sr = 0
-
-		ttk.Label(tab_sg, text='Sub-grouping (fission-fusion)',
-			font=('TkDefaultFont', 10, 'bold')).grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); sr += 1
-		ttk.Label(tab_sg, text='Partition co-present horses into spatial sub-groups, stable in time.',
-			font=_help_font, foreground='grey').grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); sr += 1
-
-		help_label(tab_sg, 'DBSCAN radius (body lengths)', 'subgroup_eps_bodylen').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_sg, from_=0.5, to=50.0, increment=0.5,
-			textvariable=self.subgroup_eps_bodylen_var, width=6, command=self._set_dirty).grid(
-			row=sr, column=1, sticky='w', padx=8); sr += 1
-		ttk.Label(tab_sg, text='Clustering radius in reference body lengths (not pixels).',
-			font=_help_font, foreground='grey').grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
-
-		help_label(tab_sg, 'Min stable frames', 'subgroup_min_stable').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_sg, from_=1, to=100000,
-			textvariable=self.subgroup_min_stable_var, width=8, command=self._set_dirty).grid(
-			row=sr, column=1, sticky='w', padx=8); sr += 1
-		ttk.Label(tab_sg, text='A sub-group change must persist this many frames (anti-flicker).',
-			font=_help_font, foreground='grey').grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
-
-		help_label(tab_sg, 'Foal size ratio threshold', 'foal_size_ratio').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_sg, from_=0.0, to=1.0, increment=0.05,
-			textvariable=self.foal_size_ratio_var, width=6, command=self._set_dirty).grid(
-			row=sr, column=1, sticky='w', padx=8); sr += 1
-		ttk.Label(tab_sg, text='body_len / reference below this flags a likely foal.',
-			font=_help_font, foreground='grey').grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
-
-		help_label(tab_sg, 'Body-length reference scope', 'body_len_ref_scope').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_sg, values=['video', 'segment'],
-			textvariable=self.body_len_ref_scope_var, state='readonly', width=12).grid(
-			row=sr, column=1, sticky='w', padx=8); sr += 1
-		ttk.Label(tab_sg, text='video = one reference; segment = recompute on altitude/zoom drift.',
-			font=_help_font, foreground='grey').grid(
-			row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); sr += 1
-		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
-
 		# TAB: Interaction features / graph (TASK 4 primary output)
 		tab_int = self._scroll_tab(notebook, 'Interaction')
 		ir = 0
 		ttk.Label(tab_int, text='Interaction features & graph',
 			font=('TkDefaultFont', 10, 'bold')).grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); ir += 1
-		ttk.Label(tab_int, text='Per-frame dyadic/group features aggregated into the interaction graph (edges/nodes CSVs).',
+		ttk.Label(tab_int, text='Per-frame dyadic/group features aggregated into the interaction graph (edges/nodes CSVs). Group features are computed over the whole co-present herd per frame.',
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
+
+		help_label(tab_int, 'Foal size ratio threshold', 'foal_size_ratio').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=0.0, to=1.0, increment=0.05,
+			textvariable=self.foal_size_ratio_var, width=6, command=self._set_dirty).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+		ttk.Label(tab_int, text='body_len / reference below this flags a likely foal.',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
+
+		help_label(tab_int, 'Body-length reference scope', 'body_len_ref_scope').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(tab_int, values=['video', 'segment'],
+			textvariable=self.body_len_ref_scope_var, state='readonly', width=12).grid(
+			row=ir, column=1, sticky='w', padx=8); ir += 1
+		ttk.Label(tab_int, text='video = one reference; segment = recompute on altitude/zoom drift.',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
+		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
 
 		help_label(tab_int, 'Max interaction distance (px)', 'complex_max_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=1.0, to=100000.0, increment=10.0,
@@ -1462,8 +1433,7 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_baseline_clf_var.trace_add('write', lambda *a: self._set_dirty())
 		ttk.Label(tab_cb,
 			text="baseline = scikit-learn classifier; lstm/transformer need torch. "
-				 "Interaction & sub-grouping thresholds are on the 'Interaction' and "
-				 "'Sub-grouping' tabs.",
+				 "Interaction thresholds are on the 'Interaction' tab.",
 			font=_help_font, foreground='grey').pack(anchor='w', padx=8, pady=(8, 0))
 
 		# Model + candidate-heuristic thresholds
@@ -1484,7 +1454,7 @@ class SettingsEditorApp(tk.Tk):
 		_thr_row(3, 'Speed fast (body len/frame)', self.complex_speed_high_var, 0.0, 10.0, 0.05,
 				 'Speeds above this count as fast (gallop / chase).', 'complex_speed_high')
 		_thr_row(4, 'Polarisation high', self.complex_polarisation_high_var, 0.0, 1.0, 0.05,
-				 'Sub-group alignment above this suggests trek/stampede.', 'complex_polarisation_high')
+				 'Group alignment above this suggests trek/stampede.', 'complex_polarisation_high')
 		_thr_row(5, 'Synchrony high', self.complex_synchrony_high_var, 0.0, 1.0, 0.05,
 				 'Behavioural synchrony above this suggests synchronised rest/graze.', 'complex_synchrony_high')
 		_thr_row(6, 'Active-learning top-K', self.complex_candidate_topk_var, 1, 100000, 1,
@@ -1711,9 +1681,7 @@ class SettingsEditorApp(tk.Tk):
 		self.reid_backbone_var.set(d.get('reid_backbone', fallback='T-224'))
 		self.reid_checkpoint_var.set(d.get('reid_checkpoint', fallback=''))
 
-		# sub-grouping (fission-fusion)
-		self.subgroup_eps_bodylen_var.set(float(d.get('subgroup_eps_bodylen', fallback='4.0')))
-		self.subgroup_min_stable_var.set(int(float(d.get('subgroup_min_stable_frames', fallback='10'))))
+		# reference body length
 		self.foal_size_ratio_var.set(float(d.get('foal_size_ratio_thresh', fallback='0.7')))
 		self.body_len_ref_scope_var.set(d.get('body_len_ref_scope', fallback='video'))
 
@@ -2204,9 +2172,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['reid_backbone'] = self.reid_backbone_var.get()
 		new_default['reid_checkpoint'] = self.reid_checkpoint_var.get().strip()
 
-		# sub-grouping (fission-fusion)
-		new_default['subgroup_eps_bodylen'] = str(self.subgroup_eps_bodylen_var.get())
-		new_default['subgroup_min_stable_frames'] = str(self.subgroup_min_stable_var.get())
+		# reference body length
 		new_default['foal_size_ratio_thresh'] = str(self.foal_size_ratio_var.get())
 		new_default['body_len_ref_scope'] = self.body_len_ref_scope_var.get()
 

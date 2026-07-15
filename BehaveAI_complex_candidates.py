@@ -15,7 +15,7 @@ Two complementary sources:
        - allogrooming           : in_contact AND both speeds ~0, sustained.
        - chase                  : high speed_similarity AND ~constant distance AND
                                   both speeds high, sustained.
-       - stampede               : high sub-group mean speed AND high polarisation.
+       - stampede               : high whole-herd mean speed AND high polarisation.
        - trek                   : high polarisation AND moderate speed AND non-zero
                                   centroid speed (high elongation reinforces).
        - synchronised_rest_graze: speed ~0 AND high synchrony AND low dispersion.
@@ -35,7 +35,7 @@ import csv
 import glob
 import argparse
 import configparser
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import numpy as np
 
@@ -148,7 +148,7 @@ def _heuristic_candidates(cache, params):
 			for (s, e) in _find_runs(seq, min_dur, tol):
 				out.append((s, e, [a, b], 'chase'))
 
-	# --- Group rules per sub-group ---
+	# --- Group rules over the whole co-present herd ---
 	group_rules = {'stampede', 'trek', 'synchronised_rest_graze'} & allowed
 	if group_rules:
 		out += _group_heuristics(cache, params, tol, min_dur, lo, hi, group_rules)
@@ -156,62 +156,47 @@ def _heuristic_candidates(cache, params):
 
 
 def _group_heuristics(cache, params, tol, min_dur, lo, hi, group_rules):
-	"""Group-level heuristic candidates from the sub-group feature streams."""
+	"""Group-level heuristic candidates from the whole co-present herd's feature
+	stream (no spatial sub-grouping — every co-present individual counts)."""
 	out = []
-	sg_path = os.path.join(cache['output_dir'], cache['stem'] + '_subgroups.csv')
-	if not os.path.exists(sg_path):
+	td = cache['track_data']
+	gfeat = CF.compute_group_features(td, CF.whole_herd_groups(td), cache['ref'])
+	if not gfeat:
 		return out
-	subgroups = CF.load_subgroups_csv(sg_path)
-	if not subgroups:
-		return out
-	gfeat = CF.compute_group_features(cache['track_data'], subgroups, cache['ref'])
-	# Member set per (frame, subgroup) for emitting track_ids.
-	members = {}
-	for f, groups in subgroups.items():
-		for sgid, ids in groups:
-			members[(f, sgid)] = ids
-
-	by_sg = defaultdict(list)
-	for g in gfeat:
-		by_sg[g['subgroup_id']].append(g)
+	gfeat.sort(key=lambda g: g['frame'])
 	pol_hi, syn_hi = params['polarisation_high'], params['synchrony_high']
 
-	for sgid, rows in by_sg.items():
-		rows.sort(key=lambda g: g['frame'])
-		rules = {
-			'stampede': lambda g: g['mean_speed'] > hi and g['polarisation'] > pol_hi,
-			'trek': lambda g: (g['polarisation'] > pol_hi and lo <= g['mean_speed'] <= hi
-							   and g['centroid_speed'] > lo),
-			'synchronised_rest_graze': lambda g: (g['mean_speed'] < lo and g['synchrony'] > syn_hi
-												  and g['cohesion'] < 1.0),
-		}
-		for beh in group_rules:
-			cond = rules[beh]
-			seq = [(g['frame'], cond(g)) for g in rows]
-			for (s, e) in _find_runs(seq, min_dur, tol):
-				# Use the most-populated member set within the run for track_ids.
-				ids = _dominant_members(members, sgid, s, e)
-				if ids:
-					out.append((s, e, ids, beh))
+	rules = {
+		'stampede': lambda g: g['mean_speed'] > hi and g['polarisation'] > pol_hi,
+		'trek': lambda g: (g['polarisation'] > pol_hi and lo <= g['mean_speed'] <= hi
+						   and g['centroid_speed'] > lo),
+		'synchronised_rest_graze': lambda g: (g['mean_speed'] < lo and g['synchrony'] > syn_hi
+											  and g['cohesion'] < 1.0),
+	}
+	for beh in group_rules:
+		cond = rules[beh]
+		seq = [(g['frame'], cond(g)) for g in gfeat]
+		for (s, e) in _find_runs(seq, min_dur, tol):
+			# Use the most-present members within the run for track_ids.
+			ids = _dominant_members(td, s, e)
+			if ids:
+				out.append((s, e, ids, beh))
 	return out
 
 
-def _dominant_members(members, sgid, s, e):
-	"""Most frequent member set (ordered) of a sub-group across [s, e]."""
-	from collections import Counter
+def _dominant_members(track_data, s, e):
+	"""Most frequent co-present members (ordered) across [s, e]."""
 	cnt = Counter()
-	chosen = []
-	for (f, g), ids in members.items():
-		if g == sgid and s <= f <= e:
-			for t in ids:
+	span = 0
+	for f in track_data['frames']:
+		if s <= f <= e:
+			span += 1
+			for t in track_data['present'][f]:
 				cnt[t] += 1
 	if not cnt:
 		return []
 	# Keep members present in at least half the run's observed frames.
-	span = sum(1 for (f, g) in members if g == sgid and s <= f <= e)
-	for t, c in cnt.most_common():
-		if c >= max(1, span // 2):
-			chosen.append(t)
+	chosen = [t for t, c in cnt.most_common() if c >= max(1, span // 2)]
 	return chosen or [t for t, _ in cnt.most_common()]
 
 
@@ -238,19 +223,8 @@ def _active_learning_candidates(cache, params, bundle):
 			cand.append((s, s + win - 1, [a, b]))
 			s += win
 
-	sg_path = os.path.join(cache['output_dir'], cache['stem'] + '_subgroups.csv')
-	if os.path.exists(sg_path):
-		subgroups = CF.load_subgroups_csv(sg_path)
-		wins = defaultdict(lambda: defaultdict(set))
-		for f, groups in subgroups.items():
-			wstart = (f // win) * win
-			for sgid, ids in groups:
-				if len(ids) >= 3:
-					wins[sgid][wstart].update(ids)
-		for sgid, ws in wins.items():
-			for wstart, ids in ws.items():
-				if len(ids) >= 3:
-					cand.append((wstart, wstart + win - 1, sorted(ids, key=lambda t: (len(t), t))))
+	for (wstart, wend, ids) in CF.whole_herd_window_candidates(cache['track_data'], win, min_members=3):
+		cand.append((wstart, wend, sorted(ids, key=lambda t: (len(t), t))))
 
 	if not cand:
 		return []

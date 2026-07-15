@@ -724,11 +724,7 @@ reid_checkpoint =
 # Min classified frames for group_member in the activity budget (0 = skip).
 ab_min_classified_frames = 5
 
-# === Sub-grouping (fission-fusion) ===
-# DBSCAN radius in reference body lengths.
-subgroup_eps_bodylen = 4.0
-# Persistence (frames) required to accept a sub-group change (anti-flicker).
-subgroup_min_stable_frames = 10
+# === Reference body length ===
 # body_len_i / body_len_ref below this flags a likely foal.
 foal_size_ratio_thresh = 0.7
 # Reference body-length scope: video | segment (segment recomputes on scale drift).
@@ -778,7 +774,7 @@ complex_predict_min_proba = 0.5
 complex_speed_low_bodylen = 0.05
 # Speeds above 'high' count as fast (gallop/chase).
 complex_speed_high_bodylen = 0.25
-# Sub-group polarisation above this counts as aligned (trek/stampede).
+# Group polarisation above this counts as aligned (trek/stampede).
 complex_polarisation_high = 0.7
 # Behavioural synchrony above this counts as synchronised.
 complex_synchrony_high = 0.7
