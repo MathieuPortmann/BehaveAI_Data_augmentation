@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
 from behaveai_config import load_secondary_config
+from behaveai_holdout import is_holdout_video
 
 
 # Try to import YOLO
@@ -912,9 +913,10 @@ def save_annotation():
 	if pending:
 		print(f"Skipping {len(pending)} unclassified box(es) — assign a primary class first.")
 		boxes = [b for b in boxes if not (len(b) <= 4 or b[4] is None or b[4] < 0)]
-	# randomly assign to valdiation
-	randVal = random.random()
-	is_val = randVal < val_frequency
+	# Whole-video assignment to train/validation (deterministic, stable — see
+	# behaveai_holdout.is_holdout_video). Every frame from this video lands in
+	# the same split, avoiding cross-split leakage of near-duplicate frames.
+	is_val = is_holdout_video(video_label, val_frequency)
 
 	motion_target_img_dir = motion_val_images_dir if is_val else motion_train_images_dir
 	motion_target_lbl_dir = motion_val_labels_dir if is_val else motion_train_labels_dir

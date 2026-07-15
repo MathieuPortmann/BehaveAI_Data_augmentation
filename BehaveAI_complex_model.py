@@ -25,6 +25,15 @@ individuals across train/val; reports per-class F1, macro-F1 and a confusion
 matrix; handles class imbalance via balanced sample weights; and down-weights
 windows whose drone-correction quality is not 'ok'.
 
+A permanent, deterministic holdout set of whole videos (see
+behaveai_holdout.is_holdout_video, keyed off val_frequency) is excluded from
+ALL training — the final model is fit on the train pool only. metrics.txt
+reports two distinct numbers: "By-video CV macro-F1 (train pool)" (diagnostic
+cross-validation among training videos) and "Held-out video macro-F1 (never
+trained on)" (true generalization to videos the deployed model has never
+seen). Holdout membership is stable across runs and adapts automatically as
+videos are added — no list is stored.
+
 Public functions: build_dataset, train_model, classify_video, analyse_confusion.
 
 Outputs under model_complex/: pipeline.joblib, train_count.txt,
@@ -43,6 +52,7 @@ from collections import defaultdict
 import numpy as np
 
 import BehaveAI_complex_features as CF
+from behaveai_holdout import is_holdout_video, split_groups
 
 # scikit-learn is required for the baseline; degrade with a clear message.
 try:
@@ -89,6 +99,7 @@ def load_model_config(config_path):
 		'weight_metric':       d.get('interaction_weight_metric', 'duration'),
 		'confusion_merge_rate': float(d.get('complex_confusion_merge_rate', '0.20')),
 		'predict_min_proba':   float(d.get('complex_predict_min_proba', '0.5')),
+		'holdout_fraction':    float(d.get('val_frequency', '0.1')),
 		# --- Deep sequence model (lstm/transformer) hyper-parameters ---
 		# All read with safe defaults so the deep path works even if these keys
 		# are absent from an older INI.
@@ -245,9 +256,14 @@ def segment_feature_dict(cache, ids, start, end):
 # Dataset
 # ---------------------------------------------------------------------------
 
-def build_dataset(project_path):
+def build_dataset(project_path, include_holdout='train'):
 	"""Gather all *_complex_behaviours.csv, extract one window feature vector per
 	annotation, and split metadata BY VIDEO.
+
+	`include_holdout` selects which videos to include, using the same
+	deterministic per-video assignment as the YOLO split (see
+	behaveai_holdout.is_holdout_video): 'train' (default) skips holdout videos,
+	'holdout' returns only holdout videos, 'all' applies no filter.
 
 	Returns (X, y, groups, weights) where X is a list of feature dicts, y the
 	behaviour labels, groups the video stems (for by-video CV), weights the
@@ -264,6 +280,10 @@ def build_dataset(project_path):
 
 	for ann_path in ann_files:
 		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
+		if include_holdout != 'all':
+			is_ho = is_holdout_video(stem, params['holdout_fraction'])
+			if (include_holdout == 'train') == is_ho:
+				continue
 		# Locate the tracking CSV (corrected preferred).
 		csv_path = None
 		for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
@@ -332,7 +352,7 @@ def train_model(project_path, config=None):
 
 def _train_baseline(project_path, params, project_dir, config_path):
 	"""Train and save the scikit-learn baseline (the supported default path)."""
-	X, y, groups, weights = build_dataset(project_path)
+	X, y, groups, weights = build_dataset(project_path, include_holdout='train')
 	if len(X) < 2:
 		print(f"Not enough annotations to train ({len(X)} found). "
 			  "Annotate more segments first.")
@@ -358,17 +378,17 @@ def _train_baseline(project_path, params, project_dir, config_path):
 			y_pred = cross_val_predict(pipe, X, y, groups=groups, cv=splitter,
 									   fit_params={'clf__sample_weight': sample_weight})
 		macro = f1_score(y, y_pred, average='macro', labels=classes, zero_division=0)
-		metrics_lines.append(f"By-video CV macro-F1: {macro:.3f}\n")
+		metrics_lines.append(f"By-video CV macro-F1 (train pool): {macro:.3f}\n")
 		metrics_lines.append(classification_report(y, y_pred, labels=classes, zero_division=0))
 		cm = confusion_matrix(y, y_pred, labels=classes)
 		metrics_lines.append("\nConfusion matrix (rows=true, cols=pred):\n")
 		metrics_lines.append("labels: " + ", ".join(classes) + "\n")
 		metrics_lines.append(np.array2string(cm))
 		_write_merge_suggestions(project_dir, classes, cm, params['confusion_merge_rate'])
-		print(f"  By-video CV macro-F1 = {macro:.3f}")
+		print(f"  By-video CV macro-F1 (train pool) = {macro:.3f}")
 	else:
-		metrics_lines.append("Only one annotated video — no by-video held-out "
-							 "evaluation possible. Metrics below are TRAIN-ONLY "
+		metrics_lines.append("Only one annotated video in the train pool — no by-video "
+							 "held-out CV possible. Metrics below are TRAIN-ONLY "
 							 "(optimistic); annotate a second video for honest scores.\n")
 		pipe.fit(X, y, clf__sample_weight=sample_weight)
 		y_pred = pipe.predict(X)
@@ -377,8 +397,22 @@ def _train_baseline(project_path, params, project_dir, config_path):
 		metrics_lines.append(classification_report(y, y_pred, labels=classes, zero_division=0))
 		print(f"  TRAIN-ONLY macro-F1 = {macro:.3f} (single video; not held-out)")
 
-	# --- Fit the final model on ALL data and save ---
+	# --- Fit the final model on the train pool ONLY (holdout videos never seen) ---
 	pipe.fit(X, y, clf__sample_weight=sample_weight)
+
+	# --- Evaluate on the permanent holdout set (videos never trained on) ---
+	X_ho, y_ho, groups_ho, _ = build_dataset(project_path, include_holdout='holdout')
+	if X_ho:
+		y_pred_ho = pipe.predict(X_ho)
+		macro_ho = f1_score(y_ho, y_pred_ho, average='macro', labels=classes, zero_division=0)
+		metrics_lines.append(f"\nHeld-out video macro-F1 (never trained on): {macro_ho:.3f}\n")
+		metrics_lines.append(classification_report(y_ho, y_pred_ho, labels=classes, zero_division=0))
+		metrics_lines.append("Held-out videos: " + ", ".join(sorted(set(groups_ho))) + "\n")
+		print(f"  Held-out video macro-F1 = {macro_ho:.3f} ({len(set(groups_ho))} video(s))")
+	else:
+		metrics_lines.append("\nNo videos currently fall in the holdout set (small corpus) — "
+							 "no never-trained-on evaluation available yet.\n")
+
 	model_dir = os.path.join(project_dir, MODEL_DIR_NAME)
 	os.makedirs(model_dir, exist_ok=True)
 	joblib.dump({'model_kind': 'baseline', 'pipeline': pipe,
@@ -608,7 +642,7 @@ def analyse_confusion(project_path):
 	config_path = _config_path_for(project_path)
 	params = load_model_config(config_path)
 	project_dir = os.path.dirname(config_path)
-	X, y, groups, weights = build_dataset(project_path)
+	X, y, groups, weights = build_dataset(project_path, include_holdout='train')
 	if len(X) < 2 or len(set(groups)) < 2:
 		print("Confusion analysis needs >=2 annotated videos for by-video CV.")
 		return None
@@ -669,9 +703,10 @@ def _segment_sequence_dicts(cache, ids, start, end, n_steps):
 	return seq, qw
 
 
-def build_sequence_dataset(project_path, params=None):
+def build_sequence_dataset(project_path, params=None, include_holdout='train'):
 	"""Like build_dataset, but each sample is a *sequence* of per-timestep feature
-	dicts. Returns (X_seq, y, groups, weights)."""
+	dicts. Returns (X_seq, y, groups, weights). See build_dataset for
+	`include_holdout` semantics."""
 	config_path = _config_path_for(project_path)
 	if params is None:
 		params = load_model_config(config_path)
@@ -685,6 +720,10 @@ def build_sequence_dataset(project_path, params=None):
 	n_steps = params['seq_steps']
 	for ann_path in ann_files:
 		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
+		if include_holdout != 'all':
+			is_ho = is_holdout_video(stem, params['holdout_fraction'])
+			if (include_holdout == 'train') == is_ho:
+				continue
 		csv_path = None
 		for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
 			p = os.path.join(output_dir, cand)
@@ -909,7 +948,7 @@ def _train_deep_model(project_path, params, project_dir, config_path):
 		base = dict(params); base['model_type'] = 'baseline'
 		return _train_baseline(project_path, base, project_dir, config_path)
 
-	X_seq, y, groups, weights = build_sequence_dataset(project_path, params)
+	X_seq, y, groups, weights = build_sequence_dataset(project_path, params, include_holdout='train')
 	if len(X_seq) < 2:
 		print(f"Not enough annotations to train ({len(X_seq)} found). "
 			  "Annotate more segments first.")
@@ -961,7 +1000,7 @@ def _train_deep_model(project_path, params, project_dir, config_path):
 		if y_true_cv:
 			macro = f1_score(y_true_cv, y_pred_cv, average='macro',
 							 labels=classes, zero_division=0)
-			metrics_lines.append(f"By-video CV macro-F1: {macro:.3f}\n")
+			metrics_lines.append(f"By-video CV macro-F1 (train pool): {macro:.3f}\n")
 			metrics_lines.append(classification_report(
 				y_true_cv, y_pred_cv, labels=classes, zero_division=0))
 			cm = confusion_matrix(y_true_cv, y_pred_cv, labels=classes)
@@ -969,16 +1008,32 @@ def _train_deep_model(project_path, params, project_dir, config_path):
 			metrics_lines.append("labels: " + ", ".join(classes) + "\n")
 			metrics_lines.append(np.array2string(cm))
 			_write_merge_suggestions(project_dir, classes, cm, params['confusion_merge_rate'])
-			print(f"  By-video CV macro-F1 = {macro:.3f}")
+			print(f"  By-video CV macro-F1 (train pool) = {macro:.3f}")
 	else:
-		metrics_lines.append("Only one annotated video — no by-video held-out "
-							 "evaluation possible. Annotate a second video for "
+		metrics_lines.append("Only one annotated video in the train pool — no by-video "
+							 "held-out CV possible. Annotate a second video for "
 							 "honest scores.\n")
 		print("  Single video; metrics not held-out.")
 
-	# --- Fit the final model on ALL data and save ---
+	# --- Fit the final model on the train pool ONLY (holdout videos never seen) ---
 	model, vec, mean, std, final_arch = _train_deep_fold(
 		comp, X_seq, y_idx, weights, n_classes, arch, params)
+
+	# --- Evaluate on the permanent holdout set (videos never trained on) ---
+	X_seq_ho, y_ho, groups_ho, _ = build_sequence_dataset(project_path, params, include_holdout='holdout')
+	if X_seq_ho:
+		te_list_ho = _vectorize_sequences(X_seq_ho, vec, mean, std)
+		proba_ho = comp['predict_proba'](model, te_list_ho, params['deep_batch'])
+		pred_idx_ho = proba_ho.argmax(axis=1)
+		y_pred_ho = [classes[int(j)] for j in pred_idx_ho]
+		macro_ho = f1_score(y_ho, y_pred_ho, average='macro', labels=classes, zero_division=0)
+		metrics_lines.append(f"\nHeld-out video macro-F1 (never trained on): {macro_ho:.3f}\n")
+		metrics_lines.append(classification_report(y_ho, y_pred_ho, labels=classes, zero_division=0))
+		metrics_lines.append("Held-out videos: " + ", ".join(sorted(set(groups_ho))) + "\n")
+		print(f"  Held-out video macro-F1 = {macro_ho:.3f} ({len(set(groups_ho))} video(s))")
+	else:
+		metrics_lines.append("\nNo videos currently fall in the holdout set (small corpus) — "
+							 "no never-trained-on evaluation available yet.\n")
 
 	model_dir = os.path.join(project_dir, MODEL_DIR_NAME)
 	os.makedirs(model_dir, exist_ok=True)

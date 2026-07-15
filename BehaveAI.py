@@ -25,6 +25,7 @@ from pathlib import Path
 import configparser
 from BehaveAI_augmentation import load_augmentation_config
 from BehaveAI_settings_help import apply_theme, Tooltip, BUTTON_HELP
+from behaveai_holdout import is_holdout_video
 
 
 # -------------------------- utils --------------------------
@@ -364,6 +365,28 @@ class ScriptRunnerApp:
 	            lines.append(f"  {'Train / Val split':<35} "
 	                          f"{orig_train} / {orig_val}  "
 	                          f"({actual_val_pct:.1f}% val, target {val_frequency*100:.0f}%)")
+
+	        # ── Holdout videos (permanent, deterministic, whole-video) ─────
+	        lines.append(f"\n  HOLDOUT VIDEOS")
+	        input_dir = project_path / 'input'
+	        if not input_dir.is_dir():
+	            lines.append("  No input/ folder found.")
+	        else:
+	            video_exts = ('.mp4', '.avi', '.mov', '.mkv')
+	            stems = sorted({
+	                f.stem for f in input_dir.rglob('*')
+	                if f.is_file() and f.suffix.lower() in video_exts
+	            })
+	            if not stems:
+	                lines.append("  No videos found in input/.")
+	            else:
+	                holdout_stems = [s for s in stems if is_holdout_video(s, val_frequency)]
+	                pct = 100.0 * len(holdout_stems) / len(stems)
+	                lines.append(f"  {'Videos in holdout':<35} "
+	                              f"{len(holdout_stems)} / {len(stems)}  "
+	                              f"({pct:.1f}%, target {val_frequency*100:.0f}%)")
+	                if holdout_stems:
+	                    lines.append("  " + ", ".join(holdout_stems))
 
 	        # ── Per-class annotation counts ────────────────────────────
 	        if all_primary_classes:

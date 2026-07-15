@@ -396,10 +396,13 @@ PARAM_HELP = {
 
     # ---------------- Model type ----------------
     "val_frequency": {
-        "short": "Fraction of annotated frames held out for validation.",
-        "what": "Share of frames routed to the validation set instead of training.",
-        "influence": "Bigger validation = more reliable metrics but fewer training images. ~0.1–0.2 "
-                     "is typical.",
+        "short": "Fraction of whole videos permanently held out from training.",
+        "what": "Share of videos (never partial videos) assigned to a held-out set, used for both "
+                "the YOLO train/val split and the complex-behaviour model's honest evaluation. "
+                "Assignment is deterministic by video name: an existing video's status never "
+                "changes, and new videos are classified automatically.",
+        "influence": "Bigger holdout = more reliable, honest metrics but fewer training videos. "
+                     "~0.1–0.2 is typical.",
     },
     "primary_classifier": {
         "short": "Base YOLO detector for the primary models (size n/s/m/l).",
