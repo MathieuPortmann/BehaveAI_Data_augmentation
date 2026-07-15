@@ -807,7 +807,7 @@ def auto_annotate_local():
 
 
 # draw boxes onto a frame copy
-def draw_boxes_on_image(base_img, selected_set=None):
+def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=None):
 	"""
 	Draw hierarchical boxes onto a *copy* of base_img.
 	- Outer rectangle uses primary color (slightly thicker)
@@ -815,7 +815,13 @@ def draw_boxes_on_image(base_img, selected_set=None):
 	- Label shows PRIMARY conf SECONDARY conf (primary uppercased)
 	- Unclassified boxes (primary_cls < 0) are drawn dashed-red as "pending".
 	- The selected box gets a bright highlight.
+
+	`thickness`/`font_scale` default to the configured line_thickness/font_size
+	(native-video-pixel units) but callers may pass display-scale-adjusted
+	values so lines/labels stay a consistent, readable size on screen.
 	"""
+	th = line_thickness if thickness is None else thickness
+	fs = font_size if font_scale is None else font_scale
 	out = base_img.copy()
 	for bi, box in enumerate(boxes):
 
@@ -825,9 +831,9 @@ def draw_boxes_on_image(base_img, selected_set=None):
 
 		# --- Pending / unclassified box (no primary chosen yet) ---
 		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
-			cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), max(1, line_thickness))
+			cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), max(1, th))
 			cv2.putText(out, "? choose primary", (x1, max(y1 - 6, 10)),
-						cv2.FONT_HERSHEY_SIMPLEX, font_size, (0, 0, 255), line_thickness, cv2.LINE_AA)
+						cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), th, cv2.LINE_AA)
 			if is_selected:
 				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
 			continue
@@ -841,12 +847,12 @@ def draw_boxes_on_image(base_img, selected_set=None):
 			scol = secondary_colors[secondary_cls] if has_secondary else pcol
 
 			# draw outer box (primary) slightly thicker
-			outer_th = max(1, line_thickness + 2)
+			outer_th = max(1, th + 2)
 			cv2.rectangle(out, (x1-outer_th, y1-outer_th), (x2+outer_th, y2+outer_th), pcol, outer_th)
 
 			# draw inner box (secondary) only when a secondary is set
 			if has_secondary:
-				cv2.rectangle(out, (x1, y1), (x2, y2), scol, line_thickness)
+				cv2.rectangle(out, (x1, y1), (x2, y2), scol, th)
 
 			# compose label: PRIMARY (upper) [+ conf], then secondary [+ conf]
 			label = f"{primary_classes[primary_cls].upper()}"
@@ -866,25 +872,25 @@ def draw_boxes_on_image(base_img, selected_set=None):
 				label = label + " " + label2
 
 			# draw label background and text
-			label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
+			label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, th)
 			label_w, label_h = label_size
 			lx, ly = x1, y1
-			cv2.rectangle(out, (lx - line_thickness, ly - label_h - line_thickness*4), (lx + label_w + line_thickness*2, ly), (0,0,0), -1)
-			cv2.putText(out, label, (lx, ly - line_thickness*2), cv2.FONT_HERSHEY_SIMPLEX, font_size, pcol, line_thickness, cv2.LINE_AA)
+			cv2.rectangle(out, (lx - th, ly - label_h - th*4), (lx + label_w + th*2, ly), (0,0,0), -1)
+			cv2.putText(out, label, (lx, ly - th*2), cv2.FONT_HERSHEY_SIMPLEX, fs, pcol, th, cv2.LINE_AA)
 			if is_selected:
 				cv2.rectangle(out, (x1-outer_th-2, y1-outer_th-2), (x2+outer_th+2, y2+outer_th+2), (0, 255, 255), 1)
 
 		else:
 			conf = box[5] if len(box) > 5 else -1
 			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
-			cv2.rectangle(out, (x1, y1), (x2, y2), pcol, line_thickness)
+			cv2.rectangle(out, (x1, y1), (x2, y2), pcol, th)
 			label = f"{primary_classes[primary_cls]}"
 			if conf != -1 and conf is not None:
 				try:
 					label = label + f" {conf:.2f}"
 				except Exception:
 					pass
-			cv2.putText(out, label, (x1, max(y1 - 6, 10)), cv2.FONT_HERSHEY_SIMPLEX, font_size, pcol, line_thickness, cv2.LINE_AA)
+			cv2.putText(out, label, (x1, max(y1 - 6, 10)), cv2.FONT_HERSHEY_SIMPLEX, fs, pcol, th, cv2.LINE_AA)
 			if is_selected:
 				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
 
@@ -2334,8 +2340,20 @@ class AnnotatorTk:
 		else:
 			base = motion_image.copy() if motion_image is not None else np.zeros((video_height, video_width, 3), dtype=np.uint8)
 
+		# Effective display-to-native scale (ignoring mouse-wheel zoom, which is
+		# applied afterwards via the crop+resize below). Boxes are drawn here in
+		# native video coordinates, so line/label sizes must be inflated by the
+		# inverse of this ratio to stay a consistent, readable size on screen
+		# regardless of video resolution; the zoom crop then further enlarges
+		# them naturally, so thicker/bigger lines when zoomed in.
+		disp_w0, disp_h0 = self.display_size
+		base_scale = float(disp_w0) / float(max(1, video_width))
+		eff_thickness = max(1, int(round(line_thickness / max(base_scale, 1e-6))))
+		eff_font_size = max(0.15, font_size / max(base_scale, 1e-6))
+
 		# draw boxes/grey boxes onto base (works in video/native coords)
-		display = draw_boxes_on_image(base, selected_set=getattr(self, 'selected_boxes', None))
+		display = draw_boxes_on_image(base, selected_set=getattr(self, 'selected_boxes', None),
+									   thickness=eff_thickness, font_scale=eff_font_size)
 
 		# Apply mouse-wheel zoom: crop a sub-region of the (box-annotated) frame
 		# around the zoom centre; it is then scaled up to the display size.
@@ -2527,12 +2545,18 @@ class AnnotatorTk:
 		scaled_disp_w = max(1, int(round(disp_w * scale)))
 		scaled_disp_h = max(1, int(round(disp_h * scale)))
 
+		# These overlays are drawn directly onto the final screen-space image
+		# (after the zoom crop/resize and canvas-fit scale already applied), so
+		# scale their thickness by the same factors to match the placed boxes'
+		# on-screen size and grow with mouse-wheel zoom instead of staying fixed.
+		overlay_thickness = max(1, int(round(line_thickness * zoom * scale)))
+
 		if self.last_mouse is not None:
 			mx, my = self.last_mouse
 			# only draw if the mouse is inside the scaled main-display region
 			if 0 <= mx < scaled_disp_w and 0 <= my < scaled_disp_h:
-				cv2.line(scaled, (int(mx), 0), (int(mx), scaled_disp_h), (255,255,255), max(1, line_thickness))
-				cv2.line(scaled, (0, int(my)), (scaled_disp_w, int(my)), (255,255,255), max(1, line_thickness))
+				cv2.line(scaled, (int(mx), 0), (int(mx), scaled_disp_h), (255,255,255), overlay_thickness)
+				cv2.line(scaled, (0, int(my)), (scaled_disp_w, int(my)), (255,255,255), overlay_thickness)
 
 
 		# determine temporary rectangle to draw (if drawing and no explicit temp_rect provided)
@@ -2546,7 +2570,7 @@ class AnnotatorTk:
 			# clip to scaled image
 			rx1 = max(0, min(sx, scaled_w-1)); ry1 = max(0, min(sy, scaled_h-1))
 			rx2 = max(0, min(ex, scaled_w-1)); ry2 = max(0, min(ey, scaled_h-1))
-			cv2.rectangle(scaled, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (255,255,255), max(1, line_thickness))
+			cv2.rectangle(scaled, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (255,255,255), overlay_thickness)
 
 		# convert and display
 		self.tk_img = cv2_to_photoimage(scaled)
