@@ -787,6 +787,20 @@ PARAM_HELP = {
         "what": "Text size multiplier for drawn labels.",
         "influence": "Display only. Larger is readable but clutters crowded scenes.",
     },
+    "box_line_scale": {
+        "short": "Extra thinning applied to box borders in the annotation tool's live view.",
+        "what": "Multiplier on line_thickness for the on-screen boxes only (zoomed with the "
+                "mouse wheel); does not affect line_thickness itself or saved crop masks.",
+        "influence": "Display only, annotation tool. Lower values keep borders thinner at any "
+                     "zoom level; 1.0 matches the un-thinned line_thickness.",
+    },
+    "box_font_scale": {
+        "short": "Extra shrinking applied to label text in the annotation tool's live view.",
+        "what": "Multiplier on font_size for the on-screen labels only (zoomed with the mouse "
+                "wheel); does not affect font_size itself or saved crop masks.",
+        "influence": "Display only, annotation tool. Lower values keep labels smaller at any "
+                     "zoom level; 1.0 matches the un-shrunk font_size.",
+    },
     "buttons_per_row": {
         "short": "Number of class buttons shown per row in the annotation window.",
         "what": "Grid width of the class button panel in the annotation/inspect tools.",
