@@ -21,13 +21,18 @@ import re
 from BehaveAI_settings_help import (
     PARAM_HELP, Tooltip, apply_theme, tooltip_text, help_label, help_line,
 )
-from behaveai_config import parse_secondary_map, format_secondary_map, load_secondary_config
+from behaveai_config import (
+	parse_secondary_map, format_secondary_map, load_secondary_config,
+	species_key, get_species_list, load_ethogram_for_species, load_age_classes,
+	DEFAULT_SPECIES,
+)
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
 
 CLASS_GROUPS = [
 	('primary_static', 'Primary static'),
 	('primary_motion', 'Primary motion'),
+	('age', 'Age'),
 	('secondary', 'Secondary (shared pool)'),
 ]
 
@@ -652,6 +657,13 @@ class SettingsEditorApp(tk.Tk):
 		# store loaded motion settings for later comparison
 		self._loaded_motion_settings = {}
 
+		# Per-species CLASS_GROUPS + secondary-map state, keyed by species name.
+		# Only holds species the user has actually switched to/edited this session;
+		# untouched species are read straight from the ini on demand (see
+		# _read_species_group_state). Flushed into new_default wholesale on save.
+		self._species_group_cache = {}
+		self._current_editing_species = None
+
 		self._build_ui()
 		self.load_ini(self.ini_path)
 
@@ -669,50 +681,170 @@ class SettingsEditorApp(tk.Tk):
 			return "The following paths are missing:\n\n" + "\n".join(f"• {m}" for m in missing)
 		return None
 
+	# ----------------------- Per-species state (Species tab + Model structure) -----------------------
+
+	def _species_names(self):
+		names = [lbl for lbl, _hk, _c, _i in self.species_editor.get() if lbl]
+		return names if names else [DEFAULT_SPECIES]
+
+	def _capture_species_group_state(self):
+		"""Snapshot the on-screen CLASS_GROUPS editors + secondary map (whichever
+		species is currently being edited)."""
+		state = {key: self.class_editors[key].get() for key, _title in CLASS_GROUPS}
+		state['secondary_map'] = self.secondary_map_editor.get()
+		return state
+
+	def _read_species_group_state(self, species, species_list=None):
+		"""Read a species' CLASS_GROUPS + secondary map straight from the loaded
+		ini (used for species not touched yet this session). Reuses
+		load_ethogram_for_species/load_age_classes (behaveai_config.py) so the
+		legacy secondary-schema fallback stays in one place."""
+		if species_list is None:
+			species_list = self._species_names()
+		eth = load_ethogram_for_species(self.cfg, species, species_list)
+		age = load_age_classes(self.cfg, species, species_list)
+
+		def _rows(names, hotkeys, colors_bgr):
+			rows = []
+			for i, name in enumerate(names):
+				hot = hotkeys[i] if i < len(hotkeys) else ''
+				bgr = colors_bgr[i] if i < len(colors_bgr) else (200, 200, 200)
+				rgb = (bgr[2], bgr[1], bgr[0])  # behaveai_config stores BGR; the GUI edits RGB
+				rows.append((name, hot, rgb, False))
+			return rows
+
+		return {
+			'primary_static': _rows(eth['primary_static_classes'], eth['primary_static_hotkeys'], eth['primary_static_colors']),
+			'primary_motion': _rows(eth['primary_motion_classes'], eth['primary_motion_hotkeys'], eth['primary_motion_colors']),
+			'age': _rows(age['age_classes'], age['age_hotkeys'], age['age_colors']),
+			'secondary': _rows(eth['secondary_classes'], eth['secondary_hotkeys'], eth['secondary_colors']),
+			'secondary_map': eth['secondary_map'],
+		}
+
+	def _apply_species_group_state(self, state):
+		"""Populate the CLASS_GROUPS editors + secondary map editor from a state dict."""
+		for ed in self.class_editors.values():
+			ed.set_suppress_confirm(True)
+		for key, _title in CLASS_GROUPS:
+			editor = self.class_editors[key]
+			editor.clear()
+			for label, hotkey, color, _ignored in state.get(key, []):
+				editor.add_row(label=label, hotkey=hotkey, color=color)
+		for ed in self.class_editors.values():
+			ed.set_suppress_confirm(False)
+		self.secondary_map_editor.set(state.get('secondary_map', {}))
+
+	def _all_species_states(self):
+		"""Return ({species_name: state_dict}, species_list), flushing the
+		currently-edited species' on-screen state into the cache first so nothing
+		edited this session is lost when validating/saving."""
+		if self._current_editing_species:
+			self._species_group_cache[self._current_editing_species] = self._capture_species_group_state()
+		species_list = self._species_names()
+		out = {}
+		for sp in species_list:
+			out[sp] = self._species_group_cache.get(sp) or self._read_species_group_state(sp, species_list)
+		return out, species_list
+
+	def _on_species_list_changed(self):
+		self._set_dirty()
+		self._refresh_species_combo()
+
+	def _refresh_species_combo(self):
+		names = self._species_names()
+		self._editing_species_combo['values'] = names
+		if self._current_editing_species not in names:
+			if self._current_editing_species:
+				self._species_group_cache.pop(self._current_editing_species, None)
+			self._editing_species_var.set(names[0])
+			self._current_editing_species = names[0]
+			state = self._species_group_cache.get(names[0]) or self._read_species_group_state(names[0], names)
+			self._apply_species_group_state(state)
+
+	def _on_editing_species_changed(self, event=None):
+		new_species = self._editing_species_var.get()
+		if new_species == self._current_editing_species:
+			return
+		if self._current_editing_species:
+			self._species_group_cache[self._current_editing_species] = self._capture_species_group_state()
+		species_list = self._species_names()
+		state = self._species_group_cache.get(new_species) or self._read_species_group_state(new_species, species_list)
+		self._apply_species_group_state(state)
+		self._current_editing_species = new_species
+
+	def _validate_species_list(self):
+		names = [lbl for lbl, _hk, _c, _i in self.species_editor.get() if lbl]
+		if not names:
+			return "You must define at least one species."
+		seen = set()
+		dupes = set()
+		for n in names:
+			if n in seen:
+				dupes.add(n)
+			seen.add(n)
+		if dupes:
+			return "Duplicate species name(s): " + ", ".join(sorted(dupes)) + ". Species names must be unique."
+		return None
+
 	def _validate_hotkeys(self):
-		used = {}
 		errors = []
 
-		for key, editor in self.class_editors.items():
-			for label, hotkey, _, _ in editor.get():
+		# Species-selector hotkeys (a single top-level list, not itself species-scoped).
+		used_species = {}
+		for label, hotkey, _c, _i in self.species_editor.get():
+			if not hotkey:
+				continue  # empty hotkey allowed - mouse click only
+			if len(hotkey) != 1:
+				errors.append(f"Hotkey '{hotkey}' for species '{label}' must be a single character.")
+				continue
+			hk = hotkey.lower()
+			if hk in RESERVED_HOTKEYS:
+				errors.append(f"Hotkey '{hotkey}' for species '{label}' is reserved (undo / grey-out).")
+				continue
+			if hk in used_species:
+				errors.append(f"Species hotkey '{hotkey}' is used by both '{used_species[hk]}' and '{label}'.")
+			else:
+				used_species[hk] = label
 
-				if not hotkey:
-					errors.append(
-						f"Class '{label}' does not have a hotkey assigned."
-					)
-					continue
+		states, species_list = self._all_species_states()
+		multi = len(species_list) > 1
+		for sp, state in states.items():
+			used = {}
+			for key, _title in CLASS_GROUPS:
+				for label, hotkey, _c, _i in state.get(key, []):
+					if not hotkey:
+						continue  # empty hotkey allowed - mouse click only, no forced letter
 
-				if len(hotkey) != 1:
-					errors.append(
-						f"Hotkey '{hotkey}' for class '{label}' must be a single character."
-					)
-					continue
+					if len(hotkey) != 1:
+						suffix = f" ({sp})" if multi else ""
+						errors.append(f"Hotkey '{hotkey}' for class '{label}'{suffix} must be a single character.")
+						continue
 
-				hk = hotkey.lower()
+					hk = hotkey.lower()
 
-				if hk in RESERVED_HOTKEYS:
-					errors.append(
-						f"Hotkey '{hotkey}' for class '{label}' is reserved "
-						f"(undo / grey-out)."
-					)
-					continue
+					if hk in RESERVED_HOTKEYS:
+						suffix = f" ({sp})" if multi else ""
+						errors.append(f"Hotkey '{hotkey}' for class '{label}'{suffix} is reserved (undo / grey-out).")
+						continue
 
-				if hk in used:
-					errors.append(
-						f"Hotkey '{hotkey}' is used by both "
-						f"'{used[hk]}' and '{label}'."
-					)
-				else:
-					used[hk] = label
+					if hk in used:
+						suffix = f" for species '{sp}'" if multi else ""
+						errors.append(f"Hotkey '{hotkey}'{suffix} is used by both '{used[hk]}' and '{label}'.")
+					else:
+						used[hk] = label
 
 		return errors
 
 
 	def _validate_primary_classes(self):
-		pm = self.class_editors['primary_motion'].get()
-		ps = self.class_editors['primary_static'].get()
-
-		if not pm and not ps:
+		states, species_list = self._all_species_states()
+		missing = [sp for sp, state in states.items()
+		           if not state.get('primary_motion') and not state.get('primary_static')]
+		if missing:
+			if len(species_list) > 1:
+				names = ", ".join(f"'{m}'" for m in missing)
+				return (f"The following species have no PRIMARY class defined "
+				        f"(need Primary motion OR Primary static): {names}")
 			return (
 				"You must define at least one PRIMARY class:\n\n"
 				"• Primary motion OR\n"
@@ -736,22 +868,26 @@ class SettingsEditorApp(tk.Tk):
 		return [label for label, _hk, _col, _ig in self.class_editors['secondary'].get() if label]
 
 	def _validate_secondary_classes(self):
-		"""Validate the shared secondary pool + mapping.
-		- every secondary referenced in the map exists in the pool
-		- every primary referenced in the map exists
+		"""Validate the shared secondary pool + mapping, for every species.
+		- every secondary referenced in the map exists in that species' pool
+		- every primary referenced in the map exists for that species
 		Returns (is_valid: bool, error_message: str)
 		"""
-		pool = set(self._get_pool_for_map())
-		primaries = set(n for (n, _s) in self._get_primaries_for_map())
-		mapping = self.secondary_map_editor.get() if hasattr(self, 'secondary_map_editor') else {}
-
+		states, species_list = self._all_species_states()
+		multi = len(species_list) > 1
 		errors = []
-		for prim, secs in mapping.items():
-			if prim not in primaries:
-				errors.append(f"Mapping refers to unknown primary '{prim}'.")
-			for s in secs:
-				if s not in pool:
-					errors.append(f"Mapping refers to unknown secondary '{s}' (not in the pool).")
+		for sp, state in states.items():
+			pool = set(lbl for lbl, _hk, _c, _i in state.get('secondary', []) if lbl)
+			primaries = set(lbl for lbl, _hk, _c, _i in state.get('primary_static', []) if lbl)
+			primaries |= set(lbl for lbl, _hk, _c, _i in state.get('primary_motion', []) if lbl)
+			mapping = state.get('secondary_map', {})
+			suffix = f" ({sp})" if multi else ""
+			for prim, secs in mapping.items():
+				if prim not in primaries:
+					errors.append(f"Mapping refers to unknown primary '{prim}'{suffix}.")
+				for s in secs:
+					if s not in pool:
+						errors.append(f"Mapping refers to unknown secondary '{s}' (not in the pool){suffix}.")
 
 		if errors:
 			# de-duplicate while preserving order
@@ -841,15 +977,40 @@ class SettingsEditorApp(tk.Tk):
 		notebook = ttk.Notebook(self)
 		notebook.pack(fill='both', expand=True, padx=8, pady=6)
 
+		# TAB 0: Species (model 0, run before primary/secondary)
+		tab_species = self._scroll_tab(notebook, 'Species')
+		ttk.Label(tab_species, text='Species', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 0))
+		ttk.Label(tab_species,
+			text=('Species detected before the behaviour models (model 0). Use scientific names '
+			      '(e.g. "Equus caballus"). The first species keeps this project\'s existing '
+			      'behaviour lists and model/annotation folders; additional species get their own '
+			      '(configured per-species on the "Model structure" tab) without touching the '
+			      'first species\' data.'),
+			style='Help.TLabel', wraplength=700, justify='left').pack(anchor='w', padx=8, pady=(0, 6))
+		self.species_editor = ClassListEditor(
+			tab_species, title='Species', on_change=self._on_species_list_changed,
+			confirm_modify=self._confirm_modify_structure)
+		self.species_editor.pack(fill='x', pady=(6,6), anchor='w', padx=8)
+
 		# TAB 1: Model structure
 		tab1 = self._scroll_tab(notebook, 'Model structure')
 
 		ttk.Label(tab1, text='Model structure', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 0))
 		ttk.Label(tab1,
-			text=('Define the behaviour classes for each stream. Each class needs a name, a '
-			      'colour (display only) and a unique single-character hotkey. Changing classes '
+			text=('Define the behaviour classes for each stream. Each class needs a name and a '
+			      'colour (display only); a single-character hotkey is optional (classes without '
+			      'one are still selectable, by mouse click only). Changing classes '
 			      'after annotating may require rebuilding the dataset.'),
 			style='Help.TLabel', wraplength=700, justify='left').pack(anchor='w', padx=8, pady=(0, 6))
+
+		species_row = ttk.Frame(tab1)
+		species_row.pack(fill='x', padx=8, pady=(0, 6), anchor='w')
+		ttk.Label(species_row, text='Editing species:').pack(side='left')
+		self._editing_species_var = tk.StringVar()
+		self._editing_species_combo = ttk.Combobox(
+			species_row, textvariable=self._editing_species_var, state='readonly', width=30)
+		self._editing_species_combo.pack(side='left', padx=(6, 0))
+		self._editing_species_combo.bind('<<ComboboxSelected>>', self._on_editing_species_changed)
 
 		self.class_editors = {}
 		for key, title in CLASS_GROUPS:
@@ -1476,6 +1637,16 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.font_size_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
 		help_line(tab5, 'font_size').pack(anchor='w', padx=24, pady=(0, 4))
 
+		self.box_line_scale_var = tk.DoubleVar(value=0.5)
+		help_label(tab5, 'Annotation tool box line scale', 'box_line_scale').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.05, to=2.0, increment=0.05, textvariable=self.box_line_scale_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'box_line_scale').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.box_font_scale_var = tk.DoubleVar(value=0.35)
+		help_label(tab5, 'Annotation tool box font scale', 'box_font_scale').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.05, to=2.0, increment=0.05, textvariable=self.box_font_scale_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'box_font_scale').pack(anchor='w', padx=24, pady=(0, 4))
+
 		self.buttons_per_row_var = tk.IntVar(value=8)
 		help_label(tab5, 'Class buttons per row', 'buttons_per_row').pack(anchor='w', padx=8, pady=(6,0))
 		ttk.Spinbox(tab5, from_=1, to=20, textvariable=self.buttons_per_row_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
@@ -1561,54 +1732,34 @@ class SettingsEditorApp(tk.Tk):
 		)
 
 
-		# classes
-		# Suppress confirmation dialogs while populating editors at startup
-		for ed in self.class_editors.values():
-			ed.set_suppress_confirm(True)
+		# species
+		self.species_editor.set_suppress_confirm(True)
+		self.species_editor.clear()
+		species_list = get_species_list(self.cfg)
+		sp_hotkeys = parse_list_field(d.get('species_hotkeys', fallback='0'))
+		sp_colors = parse_colors_field(d.get('species_colors', fallback='0'))
+		for i, name in enumerate(species_list):
+			hot = sp_hotkeys[i] if i < len(sp_hotkeys) else ''
+			col = sp_colors[i] if i < len(sp_colors) else (200, 200, 200)
+			self.species_editor.add_row(label=name, hotkey=hot, color=col)
+		self.species_editor.set_suppress_confirm(False)
 
-		for key, _title in CLASS_GROUPS:
-			classes_s = d.get(f'{key}_classes', fallback='0')
-			colors_s = d.get(f'{key}_colors', fallback='0')
-			hotkeys_s = d.get(f'{key}_hotkeys', fallback='0')
-			cls = parse_list_field(classes_s)
-			cols = parse_colors_field(colors_s)
-			hks = parse_list_field(hotkeys_s)
-			editor = self.class_editors[key]
-			editor.clear()
-			for i, label in enumerate(cls):
-				hot = hks[i] if i < len(hks) else ''
-				col = cols[i] if i < len(cols) else (200,200,200)
-				editor.add_row(label=label, hotkey=hot, color=col)
-
-		# Secondary mapping (new schema) with legacy fallback reconstruction.
-		mapping = parse_secondary_map(d.get('secondary_map', fallback=''))
-		if not self._get_pool_for_map() or not mapping:
-			# Reconstruct pool + map from the legacy keys if the new schema is absent.
-			ps = [l for l, _h, _c, _i in self.class_editors['primary_static'].get()]
-			pm = [l for l, _h, _c, _i in self.class_editors['primary_motion'].get()]
-			cfgres = load_secondary_config(self.cfg, ps, pm)
-			if not self._get_pool_for_map() and cfgres['secondary_classes']:
-				ed = self.class_editors['secondary']
-				ed.clear()
-				for i, nm in enumerate(cfgres['secondary_classes']):
-					bgr = cfgres['secondary_colors'][i] if i < len(cfgres['secondary_colors']) else (200, 200, 200)
-					rgb = (bgr[2], bgr[1], bgr[0])
-					hot = cfgres['secondary_hotkeys'][i] if i < len(cfgres['secondary_hotkeys']) else ''
-					ed.add_row(label=nm, hotkey=hot, color=rgb)
-			if not mapping:
-				mapping = cfgres['secondary_map']
-
-		# Re-enable confirmation dialogs after load
-		for ed in self.class_editors.values():
-			ed.set_suppress_confirm(False)
-
-		# Populate the mapping editor from the (possibly reconstructed) mapping.
-		self.secondary_map_editor.set(mapping)
+		# classes, for the currently-selected species (species_list[0] on load).
+		# Identical to the legacy unscoped behaviour for a single-species project,
+		# since species_key() resolves to the bare key for species_list[0].
+		self._species_group_cache = {}
+		self._editing_species_combo['values'] = species_list
+		self._editing_species_var.set(species_list[0])
+		self._current_editing_species = species_list[0]
+		state = self._read_species_group_state(species_list[0], species_list)
+		self._apply_species_group_state(state)
 
 
 		# viewing
 		self.line_thickness_var.set(int(d.get('line_thickness', fallback='1')))
 		self.font_size_var.set(float(d.get('font_size', fallback='0.6')))
+		self.box_line_scale_var.set(float(d.get('box_line_scale', fallback='0.5')))
+		self.box_font_scale_var.set(float(d.get('box_font_scale', fallback='0.35')))
 		self.buttons_per_row_var.set(int(d.get('buttons_per_row', fallback='8')))
 
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
@@ -2018,6 +2169,11 @@ class SettingsEditorApp(tk.Tk):
 
 	def on_save(self):
 		# ---- validation ----
+		species_error = self._validate_species_list()
+		if species_error:
+			messagebox.showwarning("Invalid species list", species_error)
+			return
+
 		hotkey_errors = self._validate_hotkeys()
 		if hotkey_errors:
 			messagebox.showwarning(
@@ -2052,23 +2208,31 @@ class SettingsEditorApp(tk.Tk):
 		# ---- build a fresh DEFAULT dict from the current GUI state ----
 		new_default = {}
 
-		for key, _title in CLASS_GROUPS:
-			editor = self.class_editors[key]
-			items = editor.get()  # list of (label, hotkey, (r,g,b), ignore_flag[unused])
-			labels = []
-			hks = []
-			cols = []
-			for label, hk, col, _ignored in items:
-				labels.append(label)
-				hks.append(hk)
-				cols.append(col)
+		# Species list itself (top-level, not species-scoped).
+		species_items = self.species_editor.get()
+		new_default['species_list'] = list_to_field([lbl for lbl, _hk, _c, _i in species_items])
+		new_default['species_hotkeys'] = list_to_field([hk for _l, hk, _c, _i in species_items])
+		new_default['species_colors'] = colors_to_field([c for _l, _hk, c, _i in species_items])
 
-			new_default[f'{key}_classes'] = list_to_field(labels)
-			new_default[f'{key}_hotkeys'] = list_to_field(hks)
-			new_default[f'{key}_colors'] = colors_to_field(cols)
+		# CLASS_GROUPS (primary_static/primary_motion/age/secondary) + secondary_map,
+		# written out for every species using species-scoped key names (species_key
+		# resolves to the bare key for the first species, so an existing
+		# single-species project's keys are byte-identical to before).
+		states, species_list = self._all_species_states()
+		for sp in species_list:
+			state = states[sp]
+			for key, _title in CLASS_GROUPS:
+				labels, hks, cols = [], [], []
+				for label, hk, col, _ignored in state.get(key, []):
+					labels.append(label)
+					hks.append(hk)
+					cols.append(col)
+				new_default[species_key(f'{key}_classes', sp, species_list)] = list_to_field(labels)
+				new_default[species_key(f'{key}_hotkeys', sp, species_list)] = list_to_field(hks)
+				new_default[species_key(f'{key}_colors', sp, species_list)] = colors_to_field(cols)
 
-		# Shared secondary mapping (new schema). ignore_secondary is obsolete.
-		new_default['secondary_map'] = format_secondary_map(self.secondary_map_editor.get())
+			new_default[species_key('secondary_map', sp, species_list)] = format_secondary_map(
+				state.get('secondary_map', {}))
 
 		# paths
 		new_default['clips_dir'] = self.clips_dir_var.get()
@@ -2085,6 +2249,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['scale_factor'] = '1.0'
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
 		new_default['font_size'] = str(self.font_size_var.get())
+		new_default['box_line_scale'] = str(self.box_line_scale_var.get())
+		new_default['box_font_scale'] = str(self.box_font_scale_var.get())
 		new_default['buttons_per_row'] = str(self.buttons_per_row_var.get())
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
 

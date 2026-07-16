@@ -20,6 +20,107 @@
 
 DEFAULT_SECONDARY_COLOR = (200, 200, 200)  # BGR, used when a colour is missing
 
+# Reserved class name for the "no secondary" negative in the secondary classifier.
+# Boxes of a secondary-eligible primary that carry no real secondary are cropped into
+# annot_<stream>_crop/__none__/ so the classifier learns an explicit "none" class and is
+# no longer forced to emit a secondary. Cannot collide with a real secondary name.
+NONE_LABEL = "__none__"
+
+# Default species when a project predates the species feature (species_list absent).
+# Scientific name, matching the convention used for every entry in species_list.
+DEFAULT_SPECIES = "Equus caballus"
+
+
+def species_slug(name):
+    """Filesystem-safe version of a scientific species name (space -> underscore).
+    Used only for folder/file naming; the raw name (with space) is what's stored in
+    the INI, shown in the GUI/annotation tool and written to CSVs."""
+    return str(name or '').strip().replace(' ', '_')
+
+
+def get_species_list(config):
+    """Parse `species_list` from [DEFAULT]; defaults to a single species so projects
+    that predate this feature keep working unchanged."""
+    raw = config['DEFAULT'].get('species_list', '')
+    species = parse_class_list(raw)
+    return species if species else [DEFAULT_SPECIES]
+
+
+def species_key(base_key, species, species_list):
+    """Resolve the INI key to use for `base_key` under `species`.
+
+    The first species in species_list keeps the bare, legacy key name (so an
+    existing single-species project's ini needs zero migration). Every other
+    species gets a `<base_key>__<slug>` key."""
+    if not species_list or species == species_list[0]:
+        return base_key
+    return f"{base_key}__{species_slug(species)}"
+
+
+def species_folder(base_name, species, species_list):
+    """Resolve the folder name to use for `base_name` under `species` (same
+    first-species-is-bare rule as species_key, applied to directory names)."""
+    if not species_list or species == species_list[0]:
+        return base_name
+    return f"{base_name}__{species_slug(species)}"
+
+
+def load_ethogram_for_species(config, species, species_list):
+    """Load primary static/motion classes+hotkeys+colors and the secondary pool
+    for a given species, using species-scoped keys (species_key). Reuses
+    parse_class_list/_parse_colors/load_secondary_config as-is."""
+    d = config['DEFAULT']
+
+    def _classes(base):
+        return parse_class_list(d.get(species_key(base, species, species_list), ''))
+
+    def _hotkeys(base, n):
+        raw = d.get(species_key(f'{base}_hotkeys', species, species_list), '')
+        return _align([h.strip() for h in str(raw).split(',')], n, '')
+
+    def _colors(base, n):
+        raw = d.get(species_key(f'{base}_colors', species, species_list), '')
+        return _align(_parse_colors(raw), n, DEFAULT_SECONDARY_COLOR)
+
+    primary_static_classes = _classes('primary_static_classes')
+    primary_motion_classes = _classes('primary_motion_classes')
+    primary_static_hotkeys = _hotkeys('primary_static', len(primary_static_classes))
+    primary_motion_hotkeys = _hotkeys('primary_motion', len(primary_motion_classes))
+    primary_static_colors = _colors('primary_static', len(primary_static_classes))
+    primary_motion_colors = _colors('primary_motion', len(primary_motion_classes))
+
+    # load_secondary_config reads secondary_* keys straight off config['DEFAULT'];
+    # build a scoped shim so it picks up this species' secondary_* keys.
+    secondary_keys = ('secondary_classes', 'secondary_hotkeys', 'secondary_colors',
+                      'secondary_map', 'secondary_static_classes', 'secondary_motion_classes',
+                      'secondary_static_colors', 'secondary_motion_colors',
+                      'secondary_static_hotkeys', 'secondary_motion_hotkeys', 'ignore_secondary')
+    shim = {k: d.get(species_key(k, species, species_list), '') for k in secondary_keys}
+    secondary_cfg = load_secondary_config({'DEFAULT': shim}, primary_static_classes, primary_motion_classes)
+
+    return {
+        'primary_static_classes': primary_static_classes,
+        'primary_motion_classes': primary_motion_classes,
+        'primary_static_hotkeys': primary_static_hotkeys,
+        'primary_motion_hotkeys': primary_motion_hotkeys,
+        'primary_static_colors': primary_static_colors,
+        'primary_motion_colors': primary_motion_colors,
+        **secondary_cfg,
+    }
+
+
+def load_age_classes(config, species, species_list):
+    """Load the age classes+hotkeys+colors defined for a given species (same
+    scoping/pattern as the ethogram groups)."""
+    d = config['DEFAULT']
+    classes = parse_class_list(d.get(species_key('age_classes', species, species_list), ''))
+    hotkeys = _align(
+        [h.strip() for h in str(d.get(species_key('age_hotkeys', species, species_list), '')).split(',')],
+        len(classes), '')
+    colors = _align(_parse_colors(d.get(species_key('age_colors', species, species_list), '')),
+                     len(classes), DEFAULT_SECONDARY_COLOR)
+    return {'age_classes': classes, 'age_hotkeys': hotkeys, 'age_colors': colors}
+
 
 def parse_class_list(raw):
     """Split a comma-separated INI list, dropping blanks and the '0' sentinel."""

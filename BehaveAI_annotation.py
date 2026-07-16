@@ -18,7 +18,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
-from behaveai_config import load_secondary_config
+from behaveai_config import (
+	load_secondary_config, NONE_LABEL,
+	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
+)
 from behaveai_holdout import is_holdout_video
 
 
@@ -85,69 +88,130 @@ input_dir_for_annotation = resolve_project_path(input_dir_ini, '') if input_dir_
 
 
 
-# Read parameters
-try:
+# ---- Species (model 0) + per-species ethogram/age (model 0.5) ----
+# The first species keeps every bare/legacy key and folder name below byte-for-byte
+# (species_key/species_folder resolve to the unscoped name for species_list[0]), so
+# an existing single-species project is completely unaffected until a 2nd species
+# is added via the settings GUI.
+species_list = get_species_list(config)
+_sp_cols = [c.strip() for c in config['DEFAULT'].get('species_colors', '').split(';') if c.strip()]
+species_colors = [tuple(map(int, c.split(',')))[::-1] for c in _sp_cols]
+species_hotkeys = [key.strip() for key in config['DEFAULT'].get('species_hotkeys', '').split(',')]
+species_classes_info = list(zip(species_hotkeys, species_list))
+species_class_dict = {ord(key): idx for idx, (key, _) in enumerate(species_classes_info) if key}
 
-	primary_motion_classes = [name.strip() for name in config['DEFAULT']['primary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('primary_motion_colors', '').split(';') if c.strip()]
-	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
+# Secondary sentinels: -1 = "not applicable" (primary has no allowed secondary, no crop);
+# -2 = explicit "none" (eligible primary, no real secondary -> a __none__ negative crop).
+NONE_SEC = -2
 
-	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
-	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
-
-	primary_static_project_path = 'model_primary_static'
-	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
-	primary_static_yaml_path = 'static_annotations.yaml'
-
-	primary_motion_project_path = 'model_primary_motion'
-	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
-	primary_motion_yaml_path = 'motion_annotations.yaml'
-
-	dominant_source = config['DEFAULT']['dominant_source'].lower()
+# Species/age crops are pooled project-wide (not scoped per active species): they are
+# model 0/0.5's own training data, keyed by the crop's own predicted class name -
+# exactly like the secondary pool is keyed by secondary name, not by primary.
+species_cropped_base_dir = 'annot_species_crop'
+age_cropped_base_dir = 'annot_age_crop'
 
 
-	motion_cropped_base_dir = 'annot_motion_crop'
-	static_cropped_base_dir = 'annot_static_crop'
+def _load_ethogram_globals(species):
+	"""(Re)compute every species-scoped global (primary/secondary/age classes,
+	colors, hotkeys, model + dataset folder paths) for `species`. Called once at
+	startup for species_list[0] and again whenever the user switches species in
+	the new Espèce button group."""
+	global primary_static_classes, primary_motion_classes
+	global primary_static_colors, primary_motion_colors
+	global primary_static_hotkeys, primary_motion_hotkeys
+	global primary_classes, primary_colors, primary_hotkeys
+	global primary_classes_info, primary_class_dict
+	global secondary_classes, secondary_colors, secondary_hotkeys, secondary_map
+	global allowed_secondary_idx, hierarchical_mode
+	global secondary_classes_info, secondary_class_dict, ignore_secondary
+	global age_classes, age_colors, age_hotkeys, age_classes_info, age_class_dict
+	global primary_static_project_path, primary_static_model_path, primary_static_yaml_path
+	global primary_motion_project_path, primary_motion_model_path, primary_motion_yaml_path
+	global secondary_static_project_path, secondary_static_data_path, secondary_static_model_path
+	global secondary_motion_project_path, secondary_motion_data_path, secondary_motion_model_path
+	global motion_cropped_base_dir, static_cropped_base_dir
+	global static_train_images_dir, static_val_images_dir
+	global static_train_labels_dir, static_val_labels_dir
+	global motion_train_images_dir, motion_val_images_dir
+	global motion_train_labels_dir, motion_val_labels_dir
+
+	eth = load_ethogram_for_species(config, species, species_list)
+	primary_static_classes = eth['primary_static_classes']
+	primary_motion_classes = eth['primary_motion_classes']
+	primary_static_colors = eth['primary_static_colors']
+	primary_motion_colors = eth['primary_motion_colors']
+	primary_static_hotkeys = eth['primary_static_hotkeys']
+	primary_motion_hotkeys = eth['primary_motion_hotkeys']
 
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
+	primary_classes_info = list(zip(primary_hotkeys, primary_classes))
+	primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info) if key}
 
-	# ---- Shared secondary configuration (pool + per-primary mapping) ----
-	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
-	secondary_classes = _sec_cfg['secondary_classes']
-	secondary_colors = _sec_cfg['secondary_colors']
-	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
-	secondary_map = _sec_cfg['secondary_map']
-	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
-	hierarchical_mode = _sec_cfg['hierarchical_mode']
-
-	# Derived: primaries that have no secondary at all (kept for legacy guards).
+	secondary_classes = eth['secondary_classes']
+	secondary_colors = eth['secondary_colors']
+	secondary_hotkeys = eth['secondary_hotkeys']
+	secondary_map = eth['secondary_map']
+	allowed_secondary_idx = eth['allowed_secondary_idx']
+	hierarchical_mode = eth['hierarchical_mode']
+	secondary_classes_info = list(zip(secondary_hotkeys, secondary_classes))
+	secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info) if key}
 	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
 						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 
+	age = load_age_classes(config, species, species_list)
+	age_classes = age['age_classes']
+	age_colors = age['age_colors']
+	age_hotkeys = age['age_hotkeys']
+	age_classes_info = list(zip(age_hotkeys, age_classes))
+	age_class_dict = {ord(key): idx for idx, (key, _) in enumerate(age_classes_info) if key}
+
+	primary_static_project_path = species_folder('model_primary_static', species, species_list)
+	primary_static_model_path = os.path.join(primary_static_project_path, "train", "weights", "best.pt")
+	primary_static_yaml_path = species_folder('static_annotations', species, species_list) + '.yaml'
+
+	primary_motion_project_path = species_folder('model_primary_motion', species, species_list)
+	primary_motion_model_path = os.path.join(primary_motion_project_path, "train", "weights", "best.pt")
+	primary_motion_yaml_path = species_folder('motion_annotations', species, species_list) + '.yaml'
+
+	motion_cropped_base_dir = species_folder('annot_motion_crop', species, species_list)
+	static_cropped_base_dir = species_folder('annot_static_crop', species, species_list)
+
+	secondary_static_project_path = None
+	secondary_static_data_path = None
+	secondary_static_model_path = None
+	secondary_motion_project_path = None
+	secondary_motion_data_path = None
+	secondary_motion_model_path = None
 	if hierarchical_mode:
-		secondary_static_project_path = 'model_secondary_static'
-		secondary_static_data_path = 'annot_static_crop'
-		secondary_static_model_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
+		secondary_static_project_path = species_folder('model_secondary_static', species, species_list)
+		secondary_static_data_path = static_cropped_base_dir
+		secondary_static_model_path = os.path.join(secondary_static_project_path, "train", "weights", "best.pt")
 
-		secondary_motion_project_path = 'model_secondary_motion'
-		secondary_motion_data_path = 'annot_motion_crop'
-		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
+		secondary_motion_project_path = species_folder('model_secondary_motion', species, species_list)
+		secondary_motion_data_path = motion_cropped_base_dir
+		secondary_motion_model_path = os.path.join(secondary_motion_project_path, "train", "weights", "best.pt")
+
+	annot_static_dir = species_folder('annot_static', species, species_list)
+	annot_motion_dir = species_folder('annot_motion', species, species_list)
+	static_train_images_dir = f'{annot_static_dir}/images/train'
+	static_val_images_dir = f'{annot_static_dir}/images/val'
+	static_train_labels_dir = f'{annot_static_dir}/labels/train'
+	static_val_labels_dir = f'{annot_static_dir}/labels/val'
+
+	motion_train_images_dir = f'{annot_motion_dir}/images/train'
+	motion_val_images_dir = f'{annot_motion_dir}/images/val'
+	motion_train_labels_dir = f'{annot_motion_dir}/labels/train'
+	motion_val_labels_dir = f'{annot_motion_dir}/labels/val'
 
 
-	static_train_images_dir = 'annot_static/images/train'
-	static_val_images_dir = 'annot_static/images/val'
-	static_train_labels_dir = 'annot_static/labels/train'
-	static_val_labels_dir = 'annot_static/labels/val'
+# Read parameters
+try:
 
-	motion_train_images_dir = 'annot_motion/images/train'
-	motion_val_images_dir = 'annot_motion/images/val'
-	motion_train_labels_dir = 'annot_motion/labels/train'
-	motion_val_labels_dir = 'annot_motion/labels/val'
+	dominant_source = config['DEFAULT']['dominant_source'].lower()
+
+	_load_ethogram_globals(species_list[0])
 
 	# Common parameters
 	scale_factor = float(config['DEFAULT'].get('scale_factor', '1.0'))
@@ -163,6 +227,8 @@ try:
 	rgb_multipliers = [float(x) for x in config['DEFAULT']['rgb_multipliers'].split(',')]
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
+	box_line_scale = float(config['DEFAULT'].get('box_line_scale', '0.5'))
+	box_font_scale = float(config['DEFAULT'].get('box_font_scale', '0.35'))
 	buttons_per_row = int(config['DEFAULT'].get('buttons_per_row', '8'))
 	# ~ cross_blocking = config['DEFAULT']['cross_blocking'].lower()
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
@@ -184,37 +250,53 @@ if static_blocks_motion not in ('true', 'false'):
 if save_empty_frames not in ('true', 'false'):
 	raise ValueError("save_empty_frames must be 'true' or 'false'")
 
-primary_classes_info = list(zip(primary_hotkeys, primary_classes))
-secondary_classes_info = list(zip(secondary_hotkeys, secondary_classes))
-primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info) if key}
-secondary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(secondary_classes_info) if key}
+def default_secondary_for(primary_idx):
+	"""Default secondary for a primary: -2 ('none') when the primary is secondary-eligible,
+	else -1 (not applicable). Making 'none' the default collects negatives automatically."""
+	if primary_idx is not None and 0 <= primary_idx < len(allowed_secondary_idx) and allowed_secondary_idx[primary_idx]:
+		return NONE_SEC
+	return -1
+
+# Espèce (model 0) / Âge (model 0.5): always-valid sticky defaults, unlike
+# active_primary/active_secondary which start "pending" (box-first workflow).
+# They default to the first configured entry and simply ride along with every
+# new box until the annotator clicks a different one - see _apply_classes_to_selected_boxes.
+active_species = 0
+active_age = 0 if age_classes else -1
 
 # initial selections
 active_primary = 0
 if len(primary_static_classes) <= 1:
 	active_primary = 1
-# -1 is the "no secondary" sentinel (secondary is optional per box)
-active_secondary = -1
+active_secondary = default_secondary_for(active_primary)
 
 
-annotation_index = AnnotationIndex(
-	static_train_images_dir,
-	static_val_images_dir,
-	static_train_labels_dir,
-	static_val_labels_dir,
-	motion_train_images_dir,
-	motion_val_images_dir,
-	motion_train_labels_dir,
-	motion_val_labels_dir,
-	motion_cropped_base_dir,
-	static_cropped_base_dir,
-	clips_dir,
-	primary_static_classes,
-	primary_classes,
-	secondary_classes,
-	hierarchical_mode,
-	ignore_secondary=ignore_secondary
-)
+def _build_annotation_index():
+	return AnnotationIndex(
+		static_train_images_dir,
+		static_val_images_dir,
+		static_train_labels_dir,
+		static_val_labels_dir,
+		motion_train_images_dir,
+		motion_val_images_dir,
+		motion_train_labels_dir,
+		motion_val_labels_dir,
+		motion_cropped_base_dir,
+		static_cropped_base_dir,
+		clips_dir,
+		primary_static_classes,
+		primary_classes,
+		secondary_classes,
+		hierarchical_mode,
+		ignore_secondary=ignore_secondary,
+		species_list=species_list,
+		age_classes=age_classes,
+		species_cropped_base_dir=species_cropped_base_dir,
+		age_cropped_base_dir=age_cropped_base_dir,
+	)
+
+
+annotation_index = _build_annotation_index()
 
 items = annotation_index.list_images_labels_and_masks()
 
@@ -593,7 +675,24 @@ ANIM_DT = 1.0 / ANIM_FPS
 # Load models
 model_static = None
 model_motion = None
-if YOLO is not None:
+# Two per-stream secondary classifiers (shared pool of secondary labels).
+# Crops are routed by the primary's stream; each model's classes are the union
+# of secondaries mapped to that stream's primaries.
+secondary_static_model = None
+secondary_motion_model = None
+
+
+def _load_models_for_active_species():
+	"""(Re)load the primary/secondary models for whichever species is currently
+	active (species_static_model_path etc. are already species-scoped by
+	_load_ethogram_globals). Called once at startup and again on species switch."""
+	global model_static, model_motion, secondary_static_model, secondary_motion_model
+	model_static = None
+	model_motion = None
+	secondary_static_model = None
+	secondary_motion_model = None
+	if YOLO is None:
+		return
 	if os.path.exists(primary_static_model_path):
 		try:
 			model_static = YOLO(primary_static_model_path)
@@ -605,32 +704,49 @@ if YOLO is not None:
 		except Exception as e:
 			print("Failed to load primary motion model:", e)
 
-# Two per-stream secondary classifiers (shared pool of secondary labels).
-# Crops are routed by the primary's stream; each model's classes are the union
-# of secondaries mapped to that stream's primaries.
-secondary_static_model = None
-secondary_motion_model = None
+	if hierarchical_mode:
+		if secondary_static_model_path and os.path.exists(secondary_static_model_path):
+			try:
+				secondary_static_model = YOLO(secondary_static_model_path)
+				print('Secondary static model found')
+			except Exception as e:
+				print("Failed to load secondary static model:", e)
+		else:
+			print('Secondary static model not found')
 
-if hierarchical_mode and YOLO is not None:
-	_ss_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
-	if os.path.exists(_ss_path):
-		try:
-			secondary_static_model = YOLO(_ss_path)
-			print('Secondary static model found')
-		except Exception as e:
-			print("Failed to load secondary static model:", e)
-	else:
-		print('Secondary static model not found')
+		if secondary_motion_model_path and os.path.exists(secondary_motion_model_path):
+			try:
+				secondary_motion_model = YOLO(secondary_motion_model_path)
+				print('Secondary motion model found')
+			except Exception as e:
+				print("Failed to load secondary motion model:", e)
+		else:
+			print('Secondary motion model not found')
 
-	_sm_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
-	if os.path.exists(_sm_path):
+
+_load_models_for_active_species()
+
+# Species (model 0) / age (model 0.5) classifiers: single models, project-wide
+# (not species-scoped - species_list[0] IS what model 0 discriminates between),
+# loaded once. Absent until the user has annotated enough to train them.
+model_species = None
+model_age = None
+if YOLO is not None:
+	_species_path = os.path.join('model_species', "train", "weights", "best.pt")
+	if os.path.exists(_species_path):
 		try:
-			secondary_motion_model = YOLO(_sm_path)
-			print('Secondary motion model found')
+			model_species = YOLO(_species_path)
+			print('Species model found')
 		except Exception as e:
-			print("Failed to load secondary motion model:", e)
-	else:
-		print('Secondary motion model not found')
+			print("Failed to load species model:", e)
+
+	_age_path = os.path.join('model_age', "train", "weights", "best.pt")
+	if os.path.exists(_age_path):
+		try:
+			model_age = YOLO(_age_path)
+			print('Age model found')
+		except Exception as e:
+			print("Failed to load age model:", e)
 
 
 def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_img):
@@ -662,8 +778,9 @@ def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_im
 	if not res or res[0].probs is None:
 		return -1, -1.0
 	allowed_names = set(secondary_classes[i] for i in allowed)
+	allowed_names.add(NONE_LABEL)   # the classifier may vote "no secondary"
 	probs = res[0].probs.data
-	best_pool_idx, best_conf = -1, -1.0
+	best_name, best_conf = None, -1.0
 	for m_idx, nm in model.names.items():
 		if nm not in allowed_names:
 			continue
@@ -673,8 +790,58 @@ def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_im
 			continue
 		if c > best_conf:
 			best_conf = c
-			best_pool_idx = secondary_classes.index(nm)
-	return best_pool_idx, best_conf
+			best_name = nm
+	if best_name == NONE_LABEL:
+		return NONE_SEC, best_conf   # explicit "none"
+	if best_name is None:
+		return -1, -1.0
+	return secondary_classes.index(best_name), best_conf
+
+
+def _classify_pooled(model, class_names, x1, y1, x2, y2, crop_src):
+	"""Run a plain (non-hierarchical) crop classifier - used for the species
+	(model 0) and age (model 0.5) classifiers, which have no allowed-subset
+	restriction and no '__none__' sentinel (both are mandatory per box)."""
+	if model is None or crop_src is None or not class_names:
+		return -1, -1.0
+	crop = crop_src[y1:y2, x1:x2]
+	if crop is None or crop.size == 0:
+		return -1, -1.0
+	try:
+		res = model.predict(crop, verbose=False)
+	except Exception:
+		return -1, -1.0
+	if not res or res[0].probs is None:
+		return -1, -1.0
+	probs = res[0].probs.data
+	best_name, best_conf = None, -1.0
+	for m_idx, nm in model.names.items():
+		if nm not in class_names:
+			continue
+		try:
+			c = float(probs[m_idx])
+		except Exception:
+			continue
+		if c > best_conf:
+			best_conf = c
+			best_name = nm
+	if best_name is None:
+		return -1, -1.0
+	return class_names.index(best_name), best_conf
+
+
+def classify_species(x1, y1, x2, y2, static_img, motion_img, source):
+	"""Run the species classifier (model 0) on a crop. Pooled (not per-stream);
+	crop is taken from whichever stream the primary detection came from."""
+	crop_src = static_img if source == 'static' else motion_img
+	return _classify_pooled(model_species, species_list, x1, y1, x2, y2, crop_src)
+
+
+def classify_age(x1, y1, x2, y2, static_img, motion_img, source):
+	"""Run the age classifier (model 0.5) on a crop, restricted to the active
+	species' age classes. Pooled (not per-stream)."""
+	crop_src = static_img if source == 'static' else motion_img
+	return _classify_pooled(model_age, age_classes, x1, y1, x2, y2, crop_src)
 
 
 # Helper: convert BGR -> PhotoImage
@@ -759,13 +926,26 @@ def norm_to_pixels(xc, yc, bw, bh, w, h):
 
 
 # Auto-annotate: uses model_static / model_motion and per-primary secondary models
+def _classify_species_and_age(x1, y1, x2, y2, source):
+	"""Model-assisted species/age suggestion for an auto-detected box: use the
+	trained model 0/0.5 when available, else fall back to the sticky active_species/
+	active_age default (same rationale as classify_secondary falling back to -1)."""
+	species_idx, species_conf = classify_species(x1, y1, x2, y2, fr, motion_image, source)
+	if species_idx < 0:
+		species_idx, species_conf = active_species, -1.0
+	age_idx, age_conf = classify_age(x1, y1, x2, y2, fr, motion_image, source)
+	if age_idx < 0:
+		age_idx, age_conf = active_age, -1.0
+	return species_idx, species_conf, age_idx, age_conf
+
+
 def auto_annotate_local():
 	# Collect all primary detections
 	# ~ all_detections = []
 	global boxes
 
 	# Primary static detection
-	if primary_static_classes[0] != '0' and model_static != None:
+	if primary_static_classes and model_static != None:
 		results_static = model_static.predict(fr, conf=primary_conf_thresh, verbose=False)
 		for box in results_static[0].boxes:
 			# ~ coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -773,34 +953,39 @@ def auto_annotate_local():
 			primary_class = primary_static_classes[class_idx]
 			conf = float(box.conf[0])
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
+			sp_idx, sp_conf, ag_idx, ag_conf = _classify_species_and_age(x1, y1, x2, y2, 'static')
 
 			if hierarchical_mode:
 				secondary_class_idx, secondary_conf = classify_secondary(
 					class_idx, x1, y1, x2, y2, fr, motion_image)
-				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf))
+				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf,
+							  sp_idx, sp_conf, ag_idx, ag_conf))
 
 
 			else:
-				boxes.append((x1, y1, x2, y2, class_idx, conf))
+				boxes.append((x1, y1, x2, y2, class_idx, conf, sp_idx, sp_conf, ag_idx, ag_conf))
 
 
 	# Primary motion detection
-	if primary_motion_classes[0] != '0' and model_motion != None:
+	if primary_motion_classes and model_motion != None:
 		results_motion = model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
 		for box in results_motion[0].boxes:
 			class_idx = int(box.cls[0])
 			primary_class = primary_motion_classes[class_idx]
 			conf = float(box.conf[0])
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
+			sp_idx, sp_conf, ag_idx, ag_conf = _classify_species_and_age(x1, y1, x2, y2, 'motion')
 
 			if hierarchical_mode:
 				global_primary_idx = class_idx + len(primary_static_classes)
 				secondary_class_idx, secondary_conf = classify_secondary(
 					global_primary_idx, x1, y1, x2, y2, fr, motion_image)
-				boxes.append((x1, y1, x2, y2, global_primary_idx, secondary_class_idx, conf, secondary_conf))
+				boxes.append((x1, y1, x2, y2, global_primary_idx, secondary_class_idx, conf, secondary_conf,
+							  sp_idx, sp_conf, ag_idx, ag_conf))
 
 			else:
-				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), conf))
+				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), conf,
+							  sp_idx, sp_conf, ag_idx, ag_conf))
 
 	if boxes:
 		boxes = non_max_suppression(boxes)
@@ -832,6 +1017,37 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 	fs = font_size if font_scale is None else font_scale
 	xf = to_screen if to_screen is not None else (lambda vx, vy: (vx, vy))
 	out = base_img.copy()
+
+	def _species_age_label(box):
+		"""Species/age always occupy the box's last 4 slots - see
+		_load_ethogram_globals / index_annotations._attach_species_and_age_crops.
+		The 10-element floor is the shortest real box shape (non-hierarchical);
+		anything shorter has no species/age fields at all. Returned as separate
+		lines (not joined with '/') so each stacks on its own row."""
+		species_idx = box[-4] if len(box) >= 10 else -1
+		age_idx = box[-2] if len(box) >= 10 else -1
+		parts = []
+		if species_idx is not None and 0 <= species_idx < len(species_list):
+			parts.append(species_list[species_idx])
+		if age_idx is not None and 0 <= age_idx < len(age_classes):
+			parts.append(age_classes[age_idx])
+		return parts
+
+	def _draw_stacked_label(lines, lx, ly, color):
+		"""Draw `lines` (top to bottom) stacked immediately above (lx, ly),
+		each on its own row, with a single shared background rectangle."""
+		lines = [l for l in lines if l]
+		if not lines:
+			return
+		sizes = [cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, fs, th)[0] for l in lines]
+		total_h = sum(h for _w, h in sizes) + th * 4 * len(lines)
+		max_w = max(w for w, _h in sizes)
+		cv2.rectangle(out, (lx - th, ly - total_h), (lx + max_w + th*2, ly), (0, 0, 0), -1)
+		y = ly - th * 2
+		for line, (_w, h) in zip(reversed(lines), reversed(sizes)):
+			cv2.putText(out, line, (lx, y), cv2.FONT_HERSHEY_SIMPLEX, fs, color, th, cv2.LINE_AA)
+			y -= h + th * 4
+
 	for bi, box in enumerate(boxes):
 
 		primary_cls = box[4] if len(box) > 4 else -1
@@ -843,6 +1059,7 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 			if x2 < 0 or y2 < 0 or x1 > max_x or y1 > max_y:
 				continue
 		is_selected = (selected_set is not None and bi in selected_set)
+		species_age_lines = _species_age_label(box)
 
 		# --- Pending / unclassified box (no primary chosen yet) ---
 		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
@@ -886,12 +1103,8 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 						pass
 				label = label + " " + label2
 
-			# draw label background and text
-			label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, th)
-			label_w, label_h = label_size
-			lx, ly = x1, y1
-			cv2.rectangle(out, (lx - th, ly - label_h - th*4), (lx + label_w + th*2, ly), (0,0,0), -1)
-			cv2.putText(out, label, (lx, ly - th*2), cv2.FONT_HERSHEY_SIMPLEX, fs, pcol, th, cv2.LINE_AA)
+			# draw label background and text - species/age line above primary/secondary
+			_draw_stacked_label([*species_age_lines, label], x1, y1, pcol)
 			if is_selected:
 				cv2.rectangle(out, (x1-outer_th-2, y1-outer_th-2), (x2+outer_th+2, y2+outer_th+2), (0, 255, 255), 1)
 
@@ -905,7 +1118,7 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 					label = label + f" {conf:.2f}"
 				except Exception:
 					pass
-			cv2.putText(out, label, (x1, max(y1 - 6, 10)), cv2.FONT_HERSHEY_SIMPLEX, fs, pcol, th, cv2.LINE_AA)
+			_draw_stacked_label([*species_age_lines, label], x1, y1, pcol)
 			if is_selected:
 				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
 
@@ -959,9 +1172,9 @@ def save_annotation():
 
 	for box in boxes:
 		if hierarchical_mode:
-			x1, y1, x2, y2, primary_cls, _ , _ , _ = box
+			x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 		else:
-			x1, y1, x2, y2, primary_cls, _ = box
+			x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 		if primary_cls < len(primary_static_classes): # primary class is static
 			static_count +=1
 			if static_blocks_motion == 'true':
@@ -991,9 +1204,9 @@ def save_annotation():
 		with open(static_ann_path, 'w') as f:
 			for box in boxes:
 				if hierarchical_mode:
-					x1, y1, x2, y2, primary_cls, _ , _ , _ = box
+					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				else:
-					x1, y1, x2, y2, primary_cls, _  = box
+					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				if primary_cls < len(primary_static_classes):
 					# ~ if y1 < button_height:
 						# ~ continue
@@ -1012,9 +1225,9 @@ def save_annotation():
 		with open(motion_ann_path, 'w') as f:
 			for box in boxes:
 				if hierarchical_mode:
-					x1, y1, x2, y2, primary_cls, _ , _ , _ = box
+					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				else:
-					x1, y1, x2, y2, primary_cls, _ = box
+					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				if primary_cls >= len(primary_static_classes):
 					# ~ if y1 < button_height:
 						# ~ continue
@@ -1039,17 +1252,22 @@ def save_annotation():
 	if hierarchical_mode:
 
 		for box in boxes:
-			x1, y1, x2, y2, primary_cls, secondary_cls, _ , _ = box
-			# Skip boxes without a secondary (secondary is optional).
-			if secondary_cls is None or secondary_cls < 0 or secondary_cls >= len(secondary_classes):
-				continue
+			x1, y1, x2, y2, primary_cls, secondary_cls = box[0], box[1], box[2], box[3], box[4], box[5]
 			if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
 				continue
 
-			secondary_class_name = secondary_classes[secondary_cls]
+			# Determine the crop class folder: a real secondary, or the explicit
+			# "none" negative (__none__) for a secondary-eligible primary. Untouched
+			# boxes (-1) / primaries with no allowed secondary produce no crop.
+			if secondary_cls is not None and 0 <= secondary_cls < len(secondary_classes):
+				secondary_class_name = secondary_classes[secondary_cls]
+			elif secondary_cls == NONE_SEC and primary_cls < len(allowed_secondary_idx) and allowed_secondary_idx[primary_cls]:
+				secondary_class_name = NONE_LABEL
+			else:
+				continue
 
 			# Route the crop to the stream of the primary only; pooled layout
-			# annot_<stream>_crop/<secondary>/ (no per-primary level).
+			# annot_<stream>_crop/<secondary | __none__>/ (no per-primary level).
 			if primary_cls < len(primary_static_classes):
 				base_crop_dir = static_cropped_base_dir
 				crop_src = static_ann_frame
@@ -1065,6 +1283,32 @@ def save_annotation():
 			os.makedirs(class_dir, exist_ok=True)
 			crop_path = os.path.join(class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg")
 			cv2.imwrite(crop_path, crop)
+
+	# Species (model 0) / age (model 0.5) crops - pooled project-wide, unconditional
+	# (mandatory per box, unlike the optional/hierarchical-only secondary above).
+	for box in boxes:
+		x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
+		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
+			continue
+		species_idx, age_idx = box[-4], box[-2]
+
+		if primary_cls < len(primary_static_classes):
+			crop_src = static_ann_frame
+		else:
+			crop_src = motion_ann_frame
+		crop = crop_src[y1:y2, x1:x2]
+		if crop is None or crop.size == 0:
+			continue
+
+		if species_idx is not None and 0 <= species_idx < len(species_list):
+			species_class_dir = os.path.join(species_cropped_base_dir, species_list[species_idx])
+			os.makedirs(species_class_dir, exist_ok=True)
+			cv2.imwrite(os.path.join(species_class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg"), crop)
+
+		if age_idx is not None and 0 <= age_idx < len(age_classes):
+			age_class_dir = os.path.join(age_cropped_base_dir, age_classes[age_idx])
+			os.makedirs(age_class_dir, exist_ok=True)
+			cv2.imwrite(os.path.join(age_class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg"), crop)
 
 
 	# Create mask directories
@@ -1617,10 +1861,50 @@ class AnnotatorTk:
 
 		self.primary_buttons = []     # (btn, color_hex, global_primary_idx)
 		self.secondary_buttons = []   # (btn, color_hex, pool_idx)
+		self.species_buttons = []     # (btn, color_hex, species_idx)
+		self.age_buttons = []         # (btn, color_hex, age_idx)
 
 		# Number of buttons per row — controlled via Settings > Display Settings
 		BUTTONS_PER_ROW = buttons_per_row
 		n_static = len(primary_static_classes)
+
+		# --- Species group (model 0): always-valid sticky selection, pre-selected
+		# to the first configured species. Hidden when only one species is defined
+		# (today's single-species projects look exactly as before). Live reload of
+		# the primary/secondary/age ethogram on species switch is a follow-up TODO
+		# for when a 2nd species actually exists - selecting the (only) species
+		# today is a no-op beyond keeping active_species in sync.
+		self.species_frame = tk.LabelFrame(self.buttons_frame, text='Espèce')
+		if len(species_list) > 1:
+			for idx, name in enumerate(species_list):
+				color_hex = None
+				if idx < len(species_colors):
+					bgr = species_colors[idx]
+					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+				key = species_classes_info[idx][0] if idx < len(species_classes_info) else ''
+				label = "{} ({})".format(name, key) if key else name
+				btn = tk.Button(self.species_frame, text=label, width=14, relief='raised',
+								command=lambda i=idx: self.select_species(i))
+				btn.grid(row=0, column=idx, padx=2, pady=2)
+				self.species_buttons.append((btn, color_hex, idx))
+			self.species_frame.pack(fill='x', pady=(0,2))
+
+		# --- Age group (model 0.5): same always-valid sticky pattern, scoped to
+		# the active species' age_classes. Hidden when no age classes are defined.
+		self.age_frame = tk.LabelFrame(self.buttons_frame, text='Âge')
+		if age_classes:
+			for idx, name in enumerate(age_classes):
+				color_hex = None
+				if idx < len(age_colors):
+					bgr = age_colors[idx]
+					color_hex = '#%02x%02x%02x' % (bgr[2], bgr[1], bgr[0])
+				key = age_classes_info[idx][0] if idx < len(age_classes_info) else ''
+				label = "{} ({})".format(name, key) if key else name
+				btn = tk.Button(self.age_frame, text=label, width=12, relief='raised',
+								command=lambda i=idx: self.select_age(i))
+				btn.grid(row=0, column=idx, padx=2, pady=2)
+				self.age_buttons.append((btn, color_hex, idx))
+			self.age_frame.pack(fill='x', pady=(0,2))
 
 		# --- Primary groups: two titled frames (Static / Motion) ---
 		self.primary_static_frame = tk.LabelFrame(self.buttons_frame, text='Primary — Static')
@@ -1673,6 +1957,11 @@ class AnnotatorTk:
 								command=lambda i=idx: self.select_secondary(i))
 				# Pre-created but not gridded; refresh_secondary_buttons() shows the allowed subset.
 				self.secondary_buttons.append((btn, color_hex, idx))
+				# Explicit "none" option (pool index -2). Shown first for eligible primaries;
+				# selected by default so untouched eligible boxes become __none__ negatives.
+			none_btn = tk.Button(self.secondary_frame, text="none (n)", width=12, relief='raised',
+								 command=self.select_none)
+			self.secondary_buttons.append((none_btn, None, NONE_SEC))
 
 
 		# bind events
@@ -1732,10 +2021,11 @@ class AnnotatorTk:
 		active_primary = class_idx
 		grey_mode = False
 		show_mode = -1 if active_primary < len(primary_static_classes) else 1
-		# Drop the current secondary if it is not allowed for this primary.
+		# Drop the current secondary if it is not allowed for this primary; fall back
+		# to the primary's default ('none' when eligible, else not-applicable).
 		allowed = allowed_secondary_idx[class_idx] if 0 <= class_idx < len(allowed_secondary_idx) else []
 		if active_secondary not in allowed:
-			active_secondary = -1
+			active_secondary = default_secondary_for(class_idx)
 		self._apply_classes_to_selected_boxes()
 		self.refresh_secondary_buttons()
 		self.update_button_states()
@@ -1744,8 +2034,35 @@ class AnnotatorTk:
 	def select_secondary(self, class_idx):
 		global active_secondary, grey_mode
 		grey_mode = False
-		# Toggle: clicking the active secondary again clears it (secondary is optional).
-		active_secondary = -1 if active_secondary == class_idx else class_idx
+		# Toggle: clicking the active secondary again returns to 'none' (-2), not
+		# 'untouched' (-1), so the box still produces a __none__ negative crop.
+		active_secondary = default_secondary_for(active_primary) if active_secondary == class_idx else class_idx
+		self._apply_classes_to_selected_boxes()
+		self.update_button_states()
+		self.redraw()
+
+	def select_none(self):
+		"""Explicitly mark the selected box(es) as having no secondary (-2)."""
+		global active_secondary, grey_mode
+		grey_mode = False
+		active_secondary = NONE_SEC
+		self._apply_classes_to_selected_boxes()
+		self.update_button_states()
+		self.redraw()
+
+	def select_species(self, idx):
+		"""Espèce (model 0): always-valid sticky selection - takes effect on
+		selected/pending boxes immediately, independent of primary/secondary state."""
+		global active_species
+		active_species = idx
+		self._apply_classes_to_selected_boxes()
+		self.update_button_states()
+		self.redraw()
+
+	def select_age(self, idx):
+		"""Âge (model 0.5): same always-valid sticky pattern as select_species."""
+		global active_age
+		active_age = idx
 		self._apply_classes_to_selected_boxes()
 		self.update_button_states()
 		self.redraw()
@@ -1761,22 +2078,34 @@ class AnnotatorTk:
 		self.redraw()
 
 	def _apply_classes_to_selected_boxes(self):
-		"""Re-label every selected/pending box with the active classes."""
+		"""Re-label every selected/pending box with the active classes. Species/age
+		are always-valid stickies and are rewritten unconditionally (so clicking
+		Espèce/Âge takes effect even before a primary has been chosen); primary/
+		secondary are only rewritten once a primary is actually active (box-first
+		workflow) - otherwise the box's existing primary/secondary is preserved."""
 		global boxes
-		if active_primary is None or active_primary < 0:
-			return
+		has_primary = active_primary is not None and active_primary >= 0
 		for idx in list(getattr(self, 'selected_boxes', set())):
 			if idx is None or idx < 0 or idx >= len(boxes):
 				continue
 			b = boxes[idx]
 			x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
 			if hierarchical_mode:
+				primary_cls = active_primary if has_primary else b[4]
+				secondary_cls = active_secondary if has_primary else (b[5] if len(b) > 5 else -1)
 				c1 = b[6] if len(b) > 6 else -1
 				c2 = b[7] if len(b) > 7 else -1
-				boxes[idx] = (x1, y1, x2, y2, active_primary, active_secondary, c1, c2)
+				sp_conf = b[9] if len(b) > 9 else -1.0
+				ag_conf = b[11] if len(b) > 11 else -1.0
+				boxes[idx] = (x1, y1, x2, y2, primary_cls, secondary_cls, c1, c2,
+							  active_species, sp_conf, active_age, ag_conf)
 			else:
+				primary_cls = active_primary if has_primary else b[4]
 				c1 = b[5] if len(b) > 5 else -1
-				boxes[idx] = (x1, y1, x2, y2, active_primary, c1)
+				sp_conf = b[7] if len(b) > 7 else -1.0
+				ag_conf = b[9] if len(b) > 9 else -1.0
+				boxes[idx] = (x1, y1, x2, y2, primary_cls, c1,
+							  active_species, sp_conf, active_age, ag_conf)
 
 	def refresh_secondary_buttons(self):
 		"""Show only the secondaries allowed for the active primary (fast grid/forget)."""
@@ -1790,10 +2119,12 @@ class AnnotatorTk:
 		if not allowed:
 			self.secondary_frame.pack_forget()
 			return
+		# 'none' (NONE_SEC) shown first, then the secondaries allowed for this primary.
+		display = [NONE_SEC] + list(allowed)
 		pool_to_btn = {idx: btn for (btn, _c, idx) in self.secondary_buttons}
 		per_row = self._secondary_per_row
 		pos = 0
-		for pool_idx in allowed:
+		for pool_idx in display:
 			btn = pool_to_btn.get(pool_idx)
 			if btn is None:
 				continue
@@ -1890,6 +2221,26 @@ class AnnotatorTk:
 		load_next_target(self)
 
 	def update_button_states(self):
+		for btn, col, cls in self.species_buttons:
+			if cls == active_species:
+				btn.config(relief='sunken')
+				if col:
+					try:
+						btn.config(bg=col)
+					except Exception:
+						pass
+			else:
+				btn.config(relief='raised', bg='#888888')
+		for btn, col, cls in self.age_buttons:
+			if cls == active_age:
+				btn.config(relief='sunken')
+				if col:
+					try:
+						btn.config(bg=col)
+					except Exception:
+						pass
+			else:
+				btn.config(relief='raised', bg='#888888')
 		for btn, col, cls in self.primary_buttons:
 			if cls == active_primary:
 				btn.config(relief='sunken')
@@ -1915,18 +2266,27 @@ class AnnotatorTk:
 
 	def _update_status_banner(self):
 		try:
+			prefix_parts = []
+			if 0 <= active_species < len(species_list):
+				prefix_parts.append(species_list[active_species])
+			if age_classes and 0 <= active_age < len(age_classes):
+				prefix_parts.append(age_classes[active_age])
+			prefix = "  |  ".join(prefix_parts)
+			if prefix:
+				prefix = prefix + "  ||  "
+
 			if active_primary is None or active_primary < 0:
-				txt = 'Step 1 — Draw a box, then choose a primary behaviour'
+				txt = prefix + 'Step 1 — Draw a box, then choose a primary behaviour'
 			else:
 				pname = primary_classes[active_primary] if active_primary < len(primary_classes) else '?'
 				if hierarchical_mode and active_primary < len(allowed_secondary_idx) and allowed_secondary_idx[active_primary]:
 					if active_secondary is not None and active_secondary >= 0 and active_secondary < len(secondary_classes):
 						sname = secondary_classes[active_secondary]
-						txt = "Primary: {}  |  Secondary: {}  (Esc = reset)".format(pname, sname)
+						txt = prefix + "Primary: {}  |  Secondary: {}  (Esc = reset)".format(pname, sname)
 					else:
-						txt = "Primary: {}  |  Secondary: none (optional)  (Esc = reset)".format(pname)
+						txt = prefix + "Primary: {}  |  Secondary: none (optional)  (Esc = reset)".format(pname)
 				else:
-					txt = "Primary: {}  (Esc = reset)".format(pname)
+					txt = prefix + "Primary: {}  (Esc = reset)".format(pname)
 			self.status_label.config(text=txt)
 		except Exception:
 			pass
@@ -2099,10 +2459,12 @@ class AnnotatorTk:
 					self.selected_boxes = set()
 				active_primary = -1
 				active_secondary = -1
+				# Species/age are always-valid stickies (unlike primary/secondary,
+				# a new box is born already carrying the current active_species/age).
 				if hierarchical_mode:
-					boxes.append((x1, y1, x2, y2, -1, -1, -1, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1, -1, -1, active_species, -1.0, active_age, -1.0))
 				else:
-					boxes.append((x1, y1, x2, y2, -1, -1))
+					boxes.append((x1, y1, x2, y2, -1, -1, active_species, -1.0, active_age, -1.0))
 				self.selected_boxes.add(len(boxes) - 1)
 				self.refresh_secondary_buttons()
 				self.update_button_states()
@@ -2218,6 +2580,18 @@ class AnnotatorTk:
 
 		if ch and ch != '0':
 			c_ord = ord(ch)
+			# 'n' -> explicit "none" secondary (only for secondary-eligible primaries).
+			if ch in ('n', 'N'):
+				if active_primary is not None and 0 <= active_primary < len(allowed_secondary_idx) and allowed_secondary_idx[active_primary]:
+					self.select_none()
+				return
+			# Espèce/Âge hotkeys take priority over primary/secondary.
+			if c_ord in species_class_dict:
+				self.select_species(species_class_dict[c_ord])
+				return
+			if c_ord in age_class_dict:
+				self.select_age(age_class_dict[c_ord])
+				return
 			# Primary hotkey takes priority; reuse select_primary (sticky + relabel + refresh).
 			if c_ord in primary_class_dict:
 				self.select_primary(primary_class_dict[c_ord])
@@ -2564,14 +2938,12 @@ class AnnotatorTk:
 		crop_to_disp = float(disp_w) / float(max(1, cw))
 		def _box_to_screen(vx, vy, _x0=x0, _y0=y0, _s=crop_to_disp * scale):
 			return (vx - _x0) * _s, (vy - _y0) * _s
-		# Extra reduction on top of the raw config values: borders read as too
-		# thick and labels too large at typical zoom levels, so shrink both
-		# before scaling with zoom (BOX_LINE_SCALE keeps borders thinner,
-		# BOX_FONT_SCALE shrinks the label text more aggressively).
-		BOX_LINE_SCALE = 0.5
-		BOX_FONT_SCALE = 0.35
-		box_thickness = max(1, int(round(line_thickness * zoom * scale * BOX_LINE_SCALE)))
-		box_font_size = max(0.15, font_size * zoom * scale * BOX_FONT_SCALE)
+		# box_line_scale/box_font_scale (user-configurable, see Display Settings)
+		# apply extra reduction on top of line_thickness/font_size before
+		# scaling with zoom, so borders/labels can be tuned thinner/smaller
+		# than the base config values used elsewhere (e.g. saved crop masks).
+		box_thickness = max(1, int(round(line_thickness * zoom * scale * box_line_scale)))
+		box_font_size = max(0.15, font_size * zoom * scale * box_font_scale)
 		scaled = draw_boxes_on_image(scaled, selected_set=getattr(self, 'selected_boxes', None),
 									  thickness=box_thickness, font_scale=box_font_size,
 									  to_screen=_box_to_screen, bounds=(scaled_disp_w, scaled_disp_h))

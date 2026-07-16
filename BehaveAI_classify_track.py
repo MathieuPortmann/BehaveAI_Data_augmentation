@@ -6,7 +6,10 @@ import glob
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
 import configparser
-from behaveai_config import load_secondary_config
+from behaveai_config import (
+	load_secondary_config, NONE_LABEL,
+	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
+)
 import time
 import shutil
 import gc
@@ -219,46 +222,61 @@ input_folder = resolve_project_path(input_dir_ini, 'input')
 output_folder = resolve_project_path(output_dir_ini, 'output')
 
 
+# ---- Species (model 0) + per-species ethogram/age (model 0.5) ----
+# The first species keeps every bare/legacy key and folder name below byte-for-byte
+# (species_key/species_folder resolve to the unscoped name for species_list[0]), so
+# an existing single-species project is completely unaffected until a 2nd species
+# is added via the settings GUI.
+#
+# NOTE (scope of this increment): the primary static/motion DETECTORS below still
+# run once, for species_list[0] only - a true per-species multi-detector loop
+# (one full detection pass per species, merged) is future work for when a 2nd
+# species actually has its own annotated primary behaviours (untestable today with
+# only one species; see BehaveAI_features_and_settings.md). Model 0 (species) and
+# model 0.5 (age) below DO run per detection today, exactly as scoped.
+species_list = get_species_list(config)
+species_cropped_base_dir = 'annot_species_crop'
+age_cropped_base_dir = 'annot_age_crop'
+species_model_path = os.path.join('model_species', "train", "weights", "best.pt")
+age_model_path = os.path.join('model_age', "train", "weights", "best.pt")
+
 # Read parameters
 try:
 
-	primary_motion_classes = [name.strip() for name in config['DEFAULT']['primary_motion_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('primary_motion_colors', '').split(';') if c.strip()]
-	primary_motion_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	primary_motion_hotkeys = [key.strip() for key in config['DEFAULT']['primary_motion_hotkeys'].split(',')]
+	_eth = load_ethogram_for_species(config, species_list[0], species_list)
+	primary_static_classes = _eth['primary_static_classes']
+	primary_motion_classes = _eth['primary_motion_classes']
+	primary_static_colors = _eth['primary_static_colors']
+	primary_motion_colors = _eth['primary_motion_colors']
+	primary_static_hotkeys = _eth['primary_static_hotkeys']
+	primary_motion_hotkeys = _eth['primary_motion_hotkeys']
 
-	primary_static_classes = [name.strip() for name in config['DEFAULT']['primary_static_classes'].split(',')]
-	cols = [c.strip() for c in config['DEFAULT'].get('primary_static_colors', '').split(';') if c.strip()]
-	primary_static_colors = [tuple(map(int, c.split(',')))[::-1] for c in cols]
-	primary_static_hotkeys = [key.strip() for key in config['DEFAULT']['primary_static_hotkeys'].split(',')]
-
-	motion_cropped_base_dir = 'annot_motion_crop'
-	static_cropped_base_dir = 'annot_static_crop'
+	motion_cropped_base_dir = species_folder('annot_motion_crop', species_list[0], species_list)
+	static_cropped_base_dir = species_folder('annot_static_crop', species_list[0], species_list)
 
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
-	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
-	# ---- Shared secondary configuration (pool + per-primary mapping) ----
-	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
-	secondary_classes = _sec_cfg['secondary_classes']
-	secondary_colors = _sec_cfg['secondary_colors']
-	secondary_hotkeys = _sec_cfg['secondary_hotkeys']
-	secondary_map = _sec_cfg['secondary_map']
-	allowed_secondary_idx = _sec_cfg['allowed_secondary_idx']
-	hierarchical_mode = _sec_cfg['hierarchical_mode']
+	secondary_classes = _eth['secondary_classes']
+	secondary_colors = _eth['secondary_colors']
+	secondary_hotkeys = _eth['secondary_hotkeys']
+	secondary_map = _eth['secondary_map']
+	allowed_secondary_idx = _eth['allowed_secondary_idx']
+	hierarchical_mode = _eth['hierarchical_mode']
+
+	age_classes = load_age_classes(config, species_list[0], species_list)['age_classes']
 
 	# Derived: primaries that have no secondary at all (kept for legacy guards).
 	ignore_secondary = [primary_classes[i] for i in range(len(primary_classes))
 						if i >= len(allowed_secondary_idx) or not allowed_secondary_idx[i]]
 
-	primary_static_project_path = 'model_primary_static'
-	primary_static_model_path = os.path.join('model_primary_static', "train", "weights", "best.pt")
-	primary_static_yaml_path = 'static_annotations.yaml'
+	primary_static_project_path = species_folder('model_primary_static', species_list[0], species_list)
+	primary_static_model_path = os.path.join(primary_static_project_path, "train", "weights", "best.pt")
+	primary_static_yaml_path = species_folder('static_annotations', species_list[0], species_list) + '.yaml'
 
-	primary_motion_project_path = 'model_primary_motion'
-	primary_motion_model_path = os.path.join('model_primary_motion', "train", "weights", "best.pt")
-	primary_motion_yaml_path = 'motion_annotations.yaml'
+	primary_motion_project_path = species_folder('model_primary_motion', species_list[0], species_list)
+	primary_motion_model_path = os.path.join(primary_motion_project_path, "train", "weights", "best.pt")
+	primary_motion_yaml_path = species_folder('motion_annotations', species_list[0], species_list) + '.yaml'
 
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
@@ -268,13 +286,13 @@ try:
 	secondary_epochs = int(config['DEFAULT'].get('secondary_epochs', '50'))
 
 	if hierarchical_mode:
-		secondary_static_project_path = 'model_secondary_static'
-		secondary_static_data_path = 'annot_static_crop'
-		secondary_static_model_path = os.path.join('model_secondary_static', "train", "weights", "best.pt")
+		secondary_static_project_path = species_folder('model_secondary_static', species_list[0], species_list)
+		secondary_static_data_path = static_cropped_base_dir
+		secondary_static_model_path = os.path.join(secondary_static_project_path, "train", "weights", "best.pt")
 
-		secondary_motion_project_path = 'model_secondary_motion'
-		secondary_motion_data_path = 'annot_motion_crop'
-		secondary_motion_model_path = os.path.join('model_secondary_motion', "train", "weights", "best.pt")
+		secondary_motion_project_path = species_folder('model_secondary_motion', species_list[0], species_list)
+		secondary_motion_data_path = motion_cropped_base_dir
+		secondary_motion_model_path = os.path.join(secondary_motion_project_path, "train", "weights", "best.pt")
 
 	# Common parameters
 	scale_factor = float(config['DEFAULT'].get('scale_factor', '1.0'))
@@ -566,6 +584,12 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 secondary_static_model = None
 secondary_motion_model = None
 
+# Species (model 0) / age (model 0.5) classifiers: single models, project-wide
+# (not species-scoped), loaded once. Absent until enough species/age crops have
+# been annotated to train them (see _count_class_subdirs gate in __main__ below).
+model_species = None
+model_age = None
+
 
 def _count_class_subdirs(d):
 	"""Count immediate subfolders of `d` that contain at least one image."""
@@ -582,14 +606,60 @@ def _count_class_subdirs(d):
 	return n
 
 
+def _classify_pooled(model, class_names, crop):
+	"""Run a plain (non-hierarchical) crop classifier - used for the species
+	(model 0) and age (model 0.5) classifiers, which have no allowed-subset
+	restriction and no '__none__' sentinel (unlike the per-primary secondary
+	classifiers above). Returns (class_name, confidence) or ('', 0.0)."""
+	if model is None or crop is None or crop.size == 0 or not class_names:
+		return '', 0.0
+	try:
+		res = model.predict(crop, verbose=False)
+	except Exception:
+		return '', 0.0
+	if not res or res[0].probs is None:
+		return '', 0.0
+	probs = res[0].probs.data
+	best_name, best_conf = '', -1.0
+	for m_idx, nm in model.names.items():
+		if nm not in class_names:
+			continue
+		try:
+			c = float(probs[m_idx])
+		except Exception:
+			continue
+		if c > best_conf:
+			best_conf = c
+			best_name = nm
+	return (best_name, best_conf) if best_name else ('', 0.0)
+
+
+def _draw_stacked_label(frame, lines, lx, ly, color, font_size, line_thickness):
+	"""Draw `lines` (top to bottom) stacked immediately above (lx, ly), each on
+	its own row, with a single shared background rectangle - used to put the
+	species/age line above the existing primary/secondary label."""
+	lines = [l for l in lines if l]
+	if not lines:
+		return
+	th = line_thickness
+	sizes = [cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, font_size, th)[0] for l in lines]
+	total_h = sum(h for _w, h in sizes) + th * 4 * len(lines)
+	max_w = max(w for w, _h in sizes)
+	cv2.rectangle(frame, (lx - th, ly - total_h), (lx + max_w + th*2, ly), (0, 0, 0), -1)
+	y = ly - th * 2
+	for line, (_w, h) in zip(reversed(lines), reversed(sizes)):
+		cv2.putText(frame, line, (lx, y), cv2.FONT_HERSHEY_SIMPLEX, font_size, color, th, cv2.LINE_AA)
+		y -= h + th * 4
+
+
 if __name__ == '__main__':
 	#-------CHECK PRIMARY MODEL EXISTS----------
-	if primary_static_classes[0] != '0':
+	if primary_static_classes:
 		maybe_retrain('primary static', primary_static_yaml_path, primary_static_project_path,
 			primary_static_model_path, primary_classifier, primary_epochs, 640)
 
 
-	if primary_motion_classes[0] != '0':
+	if primary_motion_classes:
 		maybe_retrain('primary motion', primary_motion_yaml_path, primary_motion_project_path,
 			primary_motion_model_path, primary_classifier, primary_epochs, 640)
 
@@ -623,6 +693,36 @@ if __name__ == '__main__':
 				f"folder(s) with crops in '{secondary_motion_data_path}', need >=2. "
 				f"Motion secondary behaviours will not be predicted until you annotate "
 				f"at least 2 distinct secondary classes.")
+
+	# Species (model 0) / age (model 0.5): same pooled-classifier pattern as the
+	# secondary models above, gated on >=2 annotated classes (can't train a
+	# classifier to distinguish only one class - e.g. model 0 needs a 2nd species
+	# actually annotated before it can do anything).
+	_species_class_count = _count_class_subdirs(species_cropped_base_dir)
+	if _species_class_count >= 2:
+		maybe_retrain('species', species_cropped_base_dir, 'model_species',
+			species_model_path, secondary_classifier, secondary_epochs, 224)
+		if use_ncnn == 'true':
+			model_species = load_model_with_ncnn_preference(species_model_path, "classify")
+		else:
+			model_species = YOLO(species_model_path)
+	else:
+		print(f"WARNING: Species classifier (model 0) skipped: only {_species_class_count} class "
+			f"folder(s) with crops in '{species_cropped_base_dir}', need >=2. Species will not be "
+			f"predicted until you annotate at least 2 distinct species.")
+
+	_age_class_count = _count_class_subdirs(age_cropped_base_dir)
+	if _age_class_count >= 2:
+		maybe_retrain('age', age_cropped_base_dir, 'model_age',
+			age_model_path, secondary_classifier, secondary_epochs, 224)
+		if use_ncnn == 'true':
+			model_age = load_model_with_ncnn_preference(age_model_path, "classify")
+		else:
+			model_age = YOLO(age_model_path)
+	else:
+		print(f"WARNING: Age classifier (model 0.5) skipped: only {_age_class_count} class "
+			f"folder(s) with crops in '{age_cropped_base_dir}', need >=2. Age will not be "
+			f"predicted until you annotate at least 2 distinct age classes.")
 
 
 	# --- PARAMETERS -----------------------------------------------------------
@@ -904,13 +1004,13 @@ if __name__ == '__main__':
 			cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h)
 		)
 
-		if primary_static_classes[0] != '0':
+		if primary_static_classes:
 			if use_ncnn == 'true':
 				model_static = load_model_with_ncnn_preference(primary_static_model_path, "detect")
 			else:
 				model_static = YOLO(primary_static_model_path)
 
-		if primary_motion_classes[0] != '0':
+		if primary_motion_classes:
 			if use_ncnn == 'true':
 				model_motion = load_model_with_ncnn_preference(primary_motion_model_path, "detect")
 			else:
@@ -951,13 +1051,16 @@ if __name__ == '__main__':
 		# The first 12 columns keep their original order/meaning; the bounding-box
 		# geometry (x1, y1, x2, y2) is appended additively so downstream tools that
 		# only read the first 12 columns (e.g. activity budget) are unaffected.
+		# species_class/age_class (model 0/0.5) are appended after x1,y1,x2,y2 -
+		# same additive convention, existing readers of the first 16 columns unaffected.
 		csv_writer.writerow([
 			"frame", "id", "x", "y",
 			"primary_static_class", "primary_static_conf",
 			"primary_motion_class", "primary_motion_conf",
 			"secondary_static_class", "secondary_static_conf",
 			"secondary_motion_class", "secondary_motion_conf",
-			"x1", "y1", "x2", "y2"
+			"x1", "y1", "x2", "y2",
+			"species_class", "species_conf", "age_class", "age_conf"
 		])
 
 		print(f"Processing video: {file}")
@@ -987,7 +1090,7 @@ if __name__ == '__main__':
 					continue
 
 				# only process motion information if necessary
-				if primary_motion_classes[0] != '0':
+				if primary_motion_classes:
 
 					diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 
@@ -1020,7 +1123,7 @@ if __name__ == '__main__':
 				all_detections = []
 
 				# Primary static detection
-				if primary_static_classes[0] != '0':
+				if primary_static_classes:
 					results_static = model_static.predict(frame, conf=primary_conf_thresh, verbose=False)
 					for box in results_static[0].boxes:
 						coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -1037,7 +1140,7 @@ if __name__ == '__main__':
 						})
 
 				# Primary motion detection
-				if primary_motion_classes[0] != '0':
+				if primary_motion_classes:
 					results_motion = model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
 					for box in results_motion[0].boxes:
 						coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -1164,6 +1267,19 @@ if __name__ == '__main__':
 						det['primary_static_class'] = primary_class_combined
 						det['primary_static_conf'] = primary_conf_combined
 
+					# Species (model 0) / age (model 0.5): run on the same crop the
+					# secondary classifiers use below, unconditionally (mandatory per
+					# detection, unlike the optional/hierarchical-only secondary).
+					x1, y1, x2, y2 = coords
+					crop_img_sa = frame if source == 'static' else motion_image
+					crop_sa = crop_img_sa[y1:y2, x1:x2] if crop_img_sa is not None else None
+					species_class, species_conf = _classify_pooled(model_species, species_list, crop_sa)
+					age_class, age_conf = _classify_pooled(model_age, age_classes, crop_sa)
+					det['species_class'] = species_class
+					det['species_conf'] = species_conf
+					det['age_class'] = age_class
+					det['age_conf'] = age_conf
+
 					if hierarchical_mode:
 						x1, y1, x2, y2 = coords
 
@@ -1200,8 +1316,10 @@ if __name__ == '__main__':
 									sec_results = None
 								if sec_results and sec_results[0].probs is not None:
 									allowed_names = set(secondary_classes[i] for i in allowed)
+									allowed_names.add(NONE_LABEL)   # model may vote "no secondary"
 									probs = sec_results[0].probs.data
 									best_conf = -1.0
+									best_name = ''
 									for m_idx, nm in sec_model.names.items():
 										if nm not in allowed_names:
 											continue
@@ -1211,8 +1329,12 @@ if __name__ == '__main__':
 											continue
 										if c > best_conf:
 											best_conf = c
-											secondary_class = nm
-											secondary_conf = c
+											best_name = nm
+									# The explicit __none__ class winning means "no secondary";
+									# otherwise report the winner. Replaces the threshold-only reject.
+									if best_name and best_name != NONE_LABEL:
+										secondary_class = best_name
+										secondary_conf = best_conf
 
 						# Add secondary results to detection
 						if source == 'static':
@@ -1265,6 +1387,11 @@ if __name__ == '__main__':
 					sm_class = det.get('secondary_motion_class', '')
 					sm_conf = det.get('secondary_motion_conf', 0)
 					p_source = det.get('source', '')
+					sp_class = det.get('species_class', '')
+					sp_conf = det.get('species_conf', 0)
+					ag_class = det.get('age_class', '')
+					ag_conf = det.get('age_conf', 0)
+					species_age_label = " / ".join(p for p in (sp_class, ag_class) if p)
 
 
 					# Create display label
@@ -1279,6 +1406,7 @@ if __name__ == '__main__':
 
 					primary_col = primary_colors[primary_classes.index(primary_cls)]
 					secondary_col = (255, 255, 255)
+					secondary_cls = ''      # reset per detection to avoid leaking the previous box's secondary
 
 					if hierarchical_mode:
 
@@ -1290,14 +1418,13 @@ if __name__ == '__main__':
 							secondary_col = secondary_colors[secondary_classes.index(secondary_cls)]
 
 
-						if primary_cls in ignore_secondary:
+						# Primary-only label when this primary forbids secondaries OR the
+						# secondary was rejected (below threshold) -> secondary_cls stayed ''.
+						if primary_cls in ignore_secondary or secondary_cls == '':
 							label = f"{tid} {primary_cls.upper()}"
-							label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
-							label_w, label_h = label_size
-							cv2.rectangle(frame, (x1-line_thickness, y1 - label_h - line_thickness*4), (x1 + label_w + line_thickness*2, y1), (0, 0, 0), -1)
 							cv2.rectangle(frame, (x1, y1), (x2, y2), primary_col, line_thickness)
-							cv2.putText(frame, label, (x1, y1 - line_thickness*2), cv2.FONT_HERSHEY_SIMPLEX,
-										font_size, primary_col, line_thickness, cv2.LINE_AA)
+							_draw_stacked_label(frame, [species_age_label, label], x1, y1,
+												 primary_col, font_size, line_thickness)
 						else:
 							# Draw outer static box (slightly larger)
 							outer_thickness = line_thickness + 2
@@ -1305,20 +1432,14 @@ if __name__ == '__main__':
 										 (x2+outer_thickness, y2+outer_thickness),
 										primary_col, outer_thickness)
 							label = f"{tid} {primary_cls.upper()} {secondary_cls}"
-							label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
-							label_w, label_h = label_size
-							cv2.rectangle(frame, (x1-line_thickness, y1 - label_h - line_thickness*4), (x1 + label_w + line_thickness*2, y1), (0, 0, 0), -1)
 							cv2.rectangle(frame, (x1, y1), (x2, y2), secondary_col, line_thickness)
-							cv2.putText(frame, label, (x1, y1 - line_thickness*2), cv2.FONT_HERSHEY_SIMPLEX,
-										font_size, secondary_col, line_thickness, cv2.LINE_AA)
+							_draw_stacked_label(frame, [species_age_label, label], x1, y1,
+												 secondary_col, font_size, line_thickness)
 					else:
 						label = f"{tid} {primary_cls}"
-						label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
-						label_w, label_h = label_size
-						cv2.rectangle(frame, (x1-line_thickness, y1 - label_h - line_thickness*4), (x1 + label_w + line_thickness*2, y1), (0, 0, 0), -1)
 						cv2.rectangle(frame, (x1, y1), (x2, y2), primary_col, line_thickness)
-						cv2.putText(frame, label, (x1, y1 - line_thickness*3), cv2.FONT_HERSHEY_SIMPLEX,
-									font_size, primary_col, line_thickness, cv2.LINE_AA)
+						_draw_stacked_label(frame, [species_age_label, label], x1, y1,
+											 primary_col, font_size, line_thickness)
 
 
 
@@ -1347,7 +1468,8 @@ if __name__ == '__main__':
 						pm_class, f"{pm_conf:.3f}",
 						ss_class, f"{ss_conf:.3f}",
 						sm_class, f"{sm_conf:.3f}",
-						x1, y1, x2, y2
+						x1, y1, x2, y2,
+						sp_class, f"{sp_conf:.3f}", ag_class, f"{ag_conf:.3f}"
 					])
 
 

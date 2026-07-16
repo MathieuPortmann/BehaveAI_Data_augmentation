@@ -686,6 +686,19 @@ primary_static_classes = 0
 primary_static_colors = 0
 primary_static_hotkeys = 0
 
+# Species detected before the primary/secondary models (model 0). The first entry
+# keeps the bare primary_*/secondary_*/age_* keys above; additional species use
+# suffixed keys (e.g. primary_static_classes__Bos_taurus) - see behaveai_config.py.
+species_list = Equus caballus
+species_colors = 0
+species_hotkeys = e
+
+# Age classes detected after species and before the primary behaviour (model 0.5).
+# Predefined per species (same suffixing rule as the ethogram keys above).
+age_classes = 0
+age_colors = 0
+age_hotkeys = 0
+
 # Shared pool of secondary behaviours (reused across static/motion primaries).
 secondary_classes = 0
 secondary_colors = 0
