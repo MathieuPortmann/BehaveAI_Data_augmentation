@@ -380,8 +380,6 @@ class ScriptRunnerApp:
 	            lines.append(f"  {'Videos in holdout':<35} "
 	                          f"{len(holdout_stems)} / {len(stems)}  "
 	                          f"({pct:.1f}%, target {val_frequency*100:.0f}%)")
-	            if holdout_stems:
-	                lines.append("  " + ", ".join(holdout_stems))
 
 	        # ── Per-class annotation counts ────────────────────────────
 	        if all_primary_classes:
