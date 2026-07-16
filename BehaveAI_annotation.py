@@ -2564,8 +2564,14 @@ class AnnotatorTk:
 		crop_to_disp = float(disp_w) / float(max(1, cw))
 		def _box_to_screen(vx, vy, _x0=x0, _y0=y0, _s=crop_to_disp * scale):
 			return (vx - _x0) * _s, (vy - _y0) * _s
-		box_thickness = max(1, int(round(line_thickness * zoom * scale)))
-		box_font_size = max(0.15, font_size * zoom * scale)
+		# Extra reduction on top of the raw config values: borders read as too
+		# thick and labels too large at typical zoom levels, so shrink both
+		# before scaling with zoom (BOX_LINE_SCALE keeps borders thinner,
+		# BOX_FONT_SCALE shrinks the label text more aggressively).
+		BOX_LINE_SCALE = 0.5
+		BOX_FONT_SCALE = 0.35
+		box_thickness = max(1, int(round(line_thickness * zoom * scale * BOX_LINE_SCALE)))
+		box_font_size = max(0.15, font_size * zoom * scale * BOX_FONT_SCALE)
 		scaled = draw_boxes_on_image(scaled, selected_set=getattr(self, 'selected_boxes', None),
 									  thickness=box_thickness, font_scale=box_font_size,
 									  to_screen=_box_to_screen, bounds=(scaled_disp_w, scaled_disp_h))
