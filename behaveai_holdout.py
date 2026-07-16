@@ -38,3 +38,12 @@ def split_groups(groups, fraction, salt=_SALT):
     for stem in groups:
         (holdout if is_holdout_video(stem, fraction, salt) else train).add(stem)
     return sorted(train), sorted(holdout)
+
+
+def video_label_for_annotation(basename):
+    """Recover the source video stem from an annotation basename, which is
+    always <video_label>_<frame_number>[_aug_<param>[_<idx>]] (see
+    BehaveAI_annotation.py:save_annotation and BehaveAI_augmentation.py)."""
+    name = basename.split('_aug_', 1)[0]
+    stem, sep, tail = name.rpartition('_')
+    return stem if sep and tail.isdigit() else name

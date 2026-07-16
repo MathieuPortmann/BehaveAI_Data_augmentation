@@ -24,17 +24,9 @@ import sys
 import argparse
 import configparser
 
-from behaveai_holdout import is_holdout_video
+from behaveai_holdout import is_holdout_video, video_label_for_annotation
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
-
-
-def _video_label_for(basename):
-    """Recover the source video stem from an annotation basename, which is
-    always <video_label>_<frame_number>[_aug_<param>[_<idx>]]."""
-    name = basename.split('_aug_', 1)[0]
-    stem, sep, tail = name.rpartition('_')
-    return stem if sep and tail.isdigit() else name
 
 
 def _rebalance_stream(stream_dir, fraction, apply):
@@ -54,7 +46,7 @@ def _rebalance_stream(stream_dir, fraction, apply):
             if not fname.lower().endswith(IMAGE_EXTS):
                 continue
             basename = os.path.splitext(fname)[0]
-            stem = _video_label_for(basename)
+            stem = video_label_for_annotation(basename)
             wants_holdout = is_holdout_video(stem, fraction)
             if wants_holdout == currently_holdout:
                 kept += 1
