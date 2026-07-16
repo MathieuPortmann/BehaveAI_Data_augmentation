@@ -9,7 +9,7 @@ import configparser
 import sys
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
-from behaveai_config import load_secondary_config
+from behaveai_config import load_secondary_config, NONE_LABEL
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import deque
@@ -895,8 +895,10 @@ class CameraProcessor:
 							sec_results = sec_model.predict(crop, verbose=False)
 							if hasattr(sec_results[0], 'probs') and sec_results[0].probs is not None:
 								allowed_names = set(secondary_classes[i] for i in allowed)
+								allowed_names.add(NONE_LABEL)   # model may vote \"no secondary\"
 								probs = sec_results[0].probs.data
 								best_conf = -1.0
+								best_name = ''
 								for m_idx, nm in sec_model.names.items():
 									if nm not in allowed_names:
 										continue
@@ -906,8 +908,12 @@ class CameraProcessor:
 										continue
 									if c > best_conf:
 										best_conf = c
-										secondary_class = nm
-										secondary_conf = c
+										best_name = nm
+								# The explicit __none__ class winning means \"no secondary\";
+								# otherwise report the winner. Replaces the threshold-only reject.
+								if best_name and best_name != NONE_LABEL:
+									secondary_class = best_name
+									secondary_conf = best_conf
 						except Exception:
 							pass
 

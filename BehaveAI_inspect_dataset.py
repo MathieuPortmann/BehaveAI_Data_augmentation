@@ -12,7 +12,7 @@ from collections import deque
 import sys
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
-from behaveai_config import load_secondary_config
+from behaveai_config import load_secondary_config, NONE_LABEL
 
 
 # Optional YOLO import
@@ -430,12 +430,8 @@ def load_item(idx):
 		# build map of boxes keyed by (x1, y1, primary_name) -> list of box indices
 		box_index = {}
 		for bi, b in enumerate(boxes):
-			# hierarchical box structure: (x1,y1,x2,y2, primary_cls, secondary_cls, conf, secondary_conf)
 			bx1 = int(round(b[0])); by1 = int(round(b[1]))
-			primary_idx = b[4] if len(b) > 4 else None
-			primary_name = primary_classes[primary_idx] if primary_idx is not None and primary_idx < len(primary_classes) else None
-			key = (bx1, by1, primary_name)
-			box_index.setdefault(key, []).append(bi)
+			box_index.setdefault((bx1, by1), []).append(bi)
 
 		# helper to parse crop filename format: <video_label>_<frame>_<x1>_<y1>.<ext>
 		def _parse_crop_filename(fn):
@@ -457,70 +453,43 @@ def load_item(idx):
 		for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
 			if not base_crop_dir or not os.path.isdir(base_crop_dir):
 				continue
-			# primary class directories inside the cropped base dir
-			for primary_name in os.listdir(base_crop_dir):
-				prim_dir = os.path.join(base_crop_dir, primary_name)
-				if not os.path.isdir(prim_dir):
+			for secondary_name in os.listdir(base_crop_dir):
+				sec_dir = os.path.join(base_crop_dir, secondary_name)
+				if not os.path.isdir(sec_dir):
 					continue
-				# secondary class directories under the primary dir
-				for secondary_name in os.listdir(prim_dir):
-					sec_dir = os.path.join(prim_dir, secondary_name)
-					if not os.path.isdir(sec_dir):
-						continue
+				if secondary_name == NONE_LABEL:
+					sec_idx = -2
+				else:
 					sec_idx = sec_name_to_idx.get(secondary_name)
 					if sec_idx is None:
-						# not in configured secondary list, skip
 						continue
-					# scan crop files
-					for fn in os.listdir(sec_dir):
-						lower = fn.lower()
-						if not lower.endswith(('.jpg', '.jpeg', '.png')):
-							continue
-						parsed = _parse_crop_filename(fn)
-						if parsed is None:
-							continue
-						vlabel_part, fn_frame, x1_fn, y1_fn = parsed
-						# must be same video label and frame
-						if vlabel_part != video_label_guess or fn_frame != frame_number_guess:
-							continue
-						# exact key match first (primary_name must match so we attach secondary to correct primary)
-						key = (x1_fn, y1_fn, primary_name)
-						matched = False
-						if key in box_index:
-							for bi in box_index[key]:
-								b = boxes[bi]
-								# update secondary index in place (preserve other fields)
-								if len(b) >= 8:
-									boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
-								else:
-									# convert shorter tuple into hierarchical format
-									primary_cls = b[4] if len(b) > 4 else 0
-									conf = b[6] if len(b) > 6 else -1
-									boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
-								matched = True
+				for fn in os.listdir(sec_dir):
+					if not fn.lower().endswith(('.jpg', '.jpeg', '.png')):
+						continue
+					parsed = _parse_crop_filename(fn)
+					if parsed is None:
+						continue
+					vlabel_part, fn_frame, x1_fn, y1_fn = parsed
+					if vlabel_part != video_label_guess or fn_frame != frame_number_guess:
+						continue
+					matched = False
+					for dx in range(-MATCH_TOL, MATCH_TOL + 1):
 						if matched:
-							continue
-						# if not exact, try small neighbourhood search
-						for dx in range(-MATCH_TOL, MATCH_TOL + 1):
-							if matched:
-								break
-							for dy in range(-MATCH_TOL, MATCH_TOL + 1):
-								cand = (x1_fn + dx, y1_fn + dy, primary_name)
-								if cand in box_index:
-									for bi in box_index[cand]:
-										b = boxes[bi]
-										if len(b) >= 8:
-											boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
-										else:
-											primary_cls = b[4] if len(b) > 4 else 0
-											conf = b[6] if len(b) > 6 else -1
-											boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
-										matched = True
-										break
-									if matched:
-										break
-							if matched:
-								break
+							break
+						for dy in range(-MATCH_TOL, MATCH_TOL + 1):
+							cand = (x1_fn + dx, y1_fn + dy)
+							if cand in box_index:
+								for bi in box_index[cand]:
+									b = boxes[bi]
+									if len(b) >= 8:
+										boxes[bi] = (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
+									else:
+										primary_cls = b[4] if len(b) > 4 else 0
+										conf = b[6] if len(b) > 6 else -1
+										boxes[bi] = (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
+									matched = True
+								if matched:
+									break
 	# ----------------- END link secondary crops to primary boxes -----------------
 
 	# ----------------- BEGIN: record original secondary crop files for this item -----------------
@@ -542,33 +511,25 @@ def load_item(idx):
 	for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
 		if not base_crop_dir or not os.path.isdir(base_crop_dir):
 			continue
-		for primary_name in os.listdir(base_crop_dir):
-			primary_dir = os.path.join(base_crop_dir, primary_name)
-			if not os.path.isdir(primary_dir):
+		for secondary_name in os.listdir(base_crop_dir):
+			sec_dir = os.path.join(base_crop_dir, secondary_name)
+			if not os.path.isdir(sec_dir):
 				continue
-			for secondary_name in os.listdir(primary_dir):
-				sec_dir = os.path.join(primary_dir, secondary_name)
-				if not os.path.isdir(sec_dir):
+			for fn in os.listdir(sec_dir):
+				low = fn.lower()
+				if not low.endswith(('.jpg', '.jpeg', '.png')):
 					continue
-				for fn in os.listdir(sec_dir):
-					low = fn.lower()
-					if not low.endswith(('.jpg', '.jpeg', '.png')):
-						continue
-					# try to parse pattern: <video_label>_<frame>_<x1>_<y1>.<ext>
-					stem = os.path.splitext(fn)[0]
-					parts = stem.split('_')
-					if len(parts) < 4:
-						continue
-					try:
-						y1_fn = int(parts[-1]); x1_fn = int(parts[-2]); frame_fn = int(parts[-3])
-						video_label_part_fn = '_'.join(parts[:-3])
-					except Exception:
-						continue
-					# only keep files for this item (same video label + same frame)
-					if video_label_part_fn == _video_label_part and frame_fn == _frame_num:
-						full = os.path.join(sec_dir, fn)
-						orig_crops.add(full)
-
+				stem = os.path.splitext(fn)[0]
+				parts = stem.split('_')
+				if len(parts) < 4:
+					continue
+				try:
+					y1_fn = int(parts[-1]); x1_fn = int(parts[-2]); frame_fn = int(parts[-3])
+					video_label_part_fn = '_'.join(parts[:-3])
+				except Exception:
+					continue
+				if video_label_part_fn == _video_label_part and frame_fn == _frame_num:
+					orig_crops.add(os.path.join(sec_dir, fn))
 	# attach to item for later comparison in save
 	item['_orig_secondary_crops'] = orig_crops
 	# ----------------- END: record original secondary crop files for this item -----------------
@@ -1037,48 +998,36 @@ def save_annotation_and_overwrite_current():
 				else:
 					continue
 
-				# skip if secondary not assigned
-				if secondary_idx is None or secondary_idx < 0:
-					continue
-
-				# safety checks for indices
+				# Determine the crop class folder: a real secondary, or the explicit __none__
+				# negative for a secondary-eligible primary; otherwise no crop.
 				if primary_idx < 0 or primary_idx >= len(primary_classes):
 					continue
-				if secondary_idx < 0 or secondary_idx >= len(secondary_classes):
+				if 0 <= secondary_idx < len(secondary_classes):
+					secondary_name = secondary_classes[secondary_idx]
+				elif secondary_idx == -2 and allowed_secondary_idx[primary_idx]:
+					secondary_name = NONE_LABEL
+				else:
 					continue
 
-				primary_name = primary_classes[primary_idx]
-				secondary_name = secondary_classes[secondary_idx]
-
-				# build expected filename exactly as original annot script used
+				# Pooled layout, routed to the primary's own stream only.
 				fname = f"{base}_{x1_b}_{y1_b}.jpg"
-
-				# motion crop (if motion_cropped_base_dir exists)
-				if motion_cropped_base_dir:
-					m_dir = os.path.join(motion_cropped_base_dir, primary_name, secondary_name)
-					os.makedirs(m_dir, exist_ok=True)
-					m_path = os.path.join(m_dir, fname)
+				if primary_idx < len(primary_static_classes):
+					base_crop_dir = static_cropped_base_dir
+					crop_src = static_ann_frame
+				else:
+					base_crop_dir = motion_cropped_base_dir
+					crop_src = motion_ann_frame
+				if base_crop_dir:
+					c_dir = os.path.join(base_crop_dir, secondary_name)
+					os.makedirs(c_dir, exist_ok=True)
+					c_path = os.path.join(c_dir, fname)
 					try:
-						crop = motion_ann_frame[y1_b:y2_b, x1_b:x2_b]
+						crop = crop_src[y1_b:y2_b, x1_b:x2_b]
 						if hasattr(crop, "size") and crop.size:
-							cv2.imwrite(m_path, crop)
-							created_crops.add(m_path)
+							cv2.imwrite(c_path, crop)
+							created_crops.add(c_path)
 					except Exception as e:
-						# best-effort: continue on error
-						print(f"Warning writing motion crop {m_path}: {e}")
-
-				# static crop (if static_cropped_base_dir exists)
-				if static_cropped_base_dir:
-					s_dir = os.path.join(static_cropped_base_dir, primary_name, secondary_name)
-					os.makedirs(s_dir, exist_ok=True)
-					s_path = os.path.join(s_dir, fname)
-					try:
-						crop = static_ann_frame[y1_b:y2_b, x1_b:x2_b]
-						if hasattr(crop, "size") and crop.size:
-							cv2.imwrite(s_path, crop)
-							created_crops.add(s_path)
-					except Exception as e:
-						print(f"Warning writing static crop {s_path}: {e}")
+						print(f"Warning writing secondary crop {c_path}: {e}")
 
 			# ensure the item's record of original secondary crops includes newly created files
 			orig = item.get('_orig_secondary_crops', set())

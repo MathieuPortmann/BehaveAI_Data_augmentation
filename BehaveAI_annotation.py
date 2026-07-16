@@ -1075,7 +1075,7 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 			conf = box[6] if len(box) > 6 else -1
 			sec_conf = box[7] if len(box) > 7 else -1
 			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
-			has_secondary = (secondary_cls is not None and secondary_cls != -1 and secondary_cls < len(secondary_colors))
+			has_secondary = (secondary_cls is not None and secondary_cls >= 0 and secondary_cls < len(secondary_colors))
 			scol = secondary_colors[secondary_cls] if has_secondary else pcol
 
 			# draw outer box (primary) slightly thicker
@@ -1250,6 +1250,32 @@ def save_annotation():
 
 
 	if hierarchical_mode:
+
+		# Remove stale secondary crops for THIS frame before rewriting them. A box relabeled to a
+		# different (or no) secondary must not keep its old crop: crop-to-box matching on reload is
+		# primary-agnostic (by x/y only), so a leftover crop would mis-attach (e.g. Graze + sternal).
+		for _bcd in (static_cropped_base_dir, motion_cropped_base_dir):
+			if not _bcd or not os.path.isdir(_bcd):
+				continue
+			for _sec in os.listdir(_bcd):
+				_sdir = os.path.join(_bcd, _sec)
+				if not os.path.isdir(_sdir):
+					continue
+				for _fn in list(os.listdir(_sdir)):
+					if not _fn.lower().endswith(('.jpg', '.jpeg', '.png')):
+						continue
+					_parts = os.path.splitext(_fn)[0].split('_')
+					if len(_parts) < 4:
+						continue
+					try:
+						_fr = int(_parts[-3]); _vl = '_'.join(_parts[:-3])
+					except Exception:
+						continue
+					if _vl == video_label and _fr == frame_number:
+						try:
+							os.remove(os.path.join(_sdir, _fn))
+						except Exception:
+							pass
 
 		for box in boxes:
 			x1, y1, x2, y2, primary_cls, secondary_cls = box[0], box[1], box[2], box[3], box[4], box[5]
