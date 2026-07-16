@@ -808,7 +808,8 @@ def auto_annotate_local():
 
 
 # draw boxes onto a frame copy
-def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=None):
+def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=None,
+						 to_screen=None, bounds=None):
 	"""
 	Draw hierarchical boxes onto a *copy* of base_img.
 	- Outer rectangle uses primary color (slightly thicker)
@@ -817,17 +818,30 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 	- Unclassified boxes (primary_cls < 0) are drawn dashed-red as "pending".
 	- The selected box gets a bright highlight.
 
-	`thickness`/`font_scale` default to the configured line_thickness/font_size
-	(native-video-pixel units) but callers may pass display-scale-adjusted
-	values so lines/labels stay a consistent, readable size on screen.
+	`thickness`/`font_scale` default to the configured line_thickness/font_size.
+	`to_screen(vx, vy) -> (sx, sy)` maps native video coordinates into base_img's
+	coordinate space (identity by default); pass the final on-screen scaled
+	composite as base_img plus a to_screen that folds in zoom + canvas-fit
+	scale so lines/text are drawn crisp, at their real final pixel size,
+	rather than baked onto the native frame and blurred by a later resize.
+	`bounds` (max_x, max_y), if given, skips boxes entirely outside it — so
+	they don't bleed into an adjacent region of a shared canvas (e.g. the
+	zoom column to the right of the main display).
 	"""
 	th = line_thickness if thickness is None else thickness
 	fs = font_size if font_scale is None else font_scale
+	xf = to_screen if to_screen is not None else (lambda vx, vy: (vx, vy))
 	out = base_img.copy()
 	for bi, box in enumerate(boxes):
 
 		primary_cls = box[4] if len(box) > 4 else -1
-		x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+		sx1, sy1 = xf(box[0], box[1])
+		sx2, sy2 = xf(box[2], box[3])
+		x1, y1, x2, y2 = int(round(sx1)), int(round(sy1)), int(round(sx2)), int(round(sy2))
+		if bounds is not None:
+			max_x, max_y = bounds
+			if x2 < 0 or y2 < 0 or x1 > max_x or y1 > max_y:
+				continue
 		is_selected = (selected_set is not None and bi in selected_set)
 
 		# --- Pending / unclassified box (no primary chosen yet) ---
@@ -897,8 +911,10 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 
 	# grey masks (as previously)
 	for gx1, gy1, gx2, gy2 in grey_boxes:
+		gsx1, gsy1 = xf(gx1, gy1)
+		gsx2, gsy2 = xf(gx2, gy2)
 		overlay = out.copy()
-		cv2.rectangle(overlay, (int(gx1), int(gy1)), (int(gx2), int(gy2)), (128,128,128), -1)
+		cv2.rectangle(overlay, (int(round(gsx1)), int(round(gsy1))), (int(round(gsx2)), int(round(gsy2))), (128,128,128), -1)
 		cv2.addWeighted(overlay, 0.5, out, 0.5, 0, out)
 
 	return out
@@ -2342,23 +2358,16 @@ class AnnotatorTk:
 		else:
 			base = motion_image.copy() if motion_image is not None else np.zeros((video_height, video_width, 3), dtype=np.uint8)
 
-		# Effective display-to-native scale (ignoring mouse-wheel zoom, which is
-		# applied afterwards via the crop+resize below). Boxes are drawn here in
-		# native video coordinates, so line/label sizes must be inflated by the
-		# inverse of this ratio to stay a consistent, readable size on screen
-		# regardless of video resolution; the zoom crop then further enlarges
-		# them naturally, so thicker/bigger lines when zoomed in.
-		disp_w0, disp_h0 = self.display_size
-		base_scale = float(disp_w0) / float(max(1, video_width))
-		eff_thickness = max(1, int(round(line_thickness / max(base_scale, 1e-6))))
-		eff_font_size = max(0.15, font_size / max(base_scale, 1e-6))
+		# Boxes/labels are drawn later, directly onto the final on-screen image
+		# (see below, after `scaled` is composed) rather than baked onto this
+		# native frame — baking them here and letting the crop+resize below
+		# stretch them via bilinear interpolation blurs thin lines instead of
+		# crisply thickening them, so the zoom didn't visibly affect box
+		# borders even though it did affect freshly-rasterised text.
+		display = base
 
-		# draw boxes/grey boxes onto base (works in video/native coords)
-		display = draw_boxes_on_image(base, selected_set=getattr(self, 'selected_boxes', None),
-									   thickness=eff_thickness, font_scale=eff_font_size)
-
-		# Apply mouse-wheel zoom: crop a sub-region of the (box-annotated) frame
-		# around the zoom centre; it is then scaled up to the display size.
+		# Apply mouse-wheel zoom: crop a sub-region of the frame around the
+		# zoom centre; it is then scaled up to the display size.
 		zoom = getattr(self, 'zoom', 1.0)
 		if zoom and zoom > 1.0:
 			cw = max(1, int(round(video_width / zoom)))
@@ -2546,6 +2555,20 @@ class AnnotatorTk:
 		# draw crosshair — but *limit* it to the main display area so it doesn't cross into the zoom column
 		scaled_disp_w = max(1, int(round(disp_w * scale)))
 		scaled_disp_h = max(1, int(round(disp_h * scale)))
+
+		# Draw boxes/labels directly onto the final on-screen image, in real
+		# screen pixels, so they are crisp (no bilinear-resize blur) and their
+		# size explicitly grows with mouse-wheel zoom and the canvas-fit scale
+		# — exactly like the crosshair/temp-rect overlays below.
+		x0, y0, cw, ch = self._zoom_crop
+		crop_to_disp = float(disp_w) / float(max(1, cw))
+		def _box_to_screen(vx, vy, _x0=x0, _y0=y0, _s=crop_to_disp * scale):
+			return (vx - _x0) * _s, (vy - _y0) * _s
+		box_thickness = max(1, int(round(line_thickness * zoom * scale)))
+		box_font_size = max(0.15, font_size * zoom * scale)
+		scaled = draw_boxes_on_image(scaled, selected_set=getattr(self, 'selected_boxes', None),
+									  thickness=box_thickness, font_scale=box_font_size,
+									  to_screen=_box_to_screen, bounds=(scaled_disp_w, scaled_disp_h))
 
 		# These overlays are drawn directly onto the final screen-space image
 		# (after the zoom crop/resize and canvas-fit scale already applied), so
