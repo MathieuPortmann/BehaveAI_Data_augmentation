@@ -542,6 +542,25 @@ class ScriptRunnerApp:
 	                    mod_date = time.strftime('%Y-%m-%d', time.localtime(mtime))
 	                    size_str = f"  weights: {size_mb:.1f} MB  ({mod_date})"
 
+	                # ── Secondary models are YOLO *classifiers* (crops -> class):
+	                # their results.csv has accuracy_top1/top5 + loss, not the
+	                # detection mAP/precision columns handled below. ──────────
+	                is_classifier = ('metrics/accuracy_top1' in last
+	                                 or 'metrics/accuracy_top5' in last)
+	                if is_classifier:
+	                    lines.append(f"\n    [{model_label}]  (classifier)  {epochs} epochs{size_str}")
+	                    cls_metrics = [
+	                        ('Top-1 accuracy', ['metrics/accuracy_top1']),
+	                        ('Top-5 accuracy', ['metrics/accuracy_top5']),
+	                        ('Loss (train)',   ['train/loss']),
+	                        ('Loss (val)',     ['val/loss']),
+	                    ]
+	                    for label, col_names in cls_metrics:
+	                        val = get_metric(col_names)
+	                        if val is not None:
+	                            lines.append(f"    {label:<22} {val:.4f}")
+	                    continue
+
 	                lines.append(f"\n    [{model_label}]  {epochs} epochs{size_str}")
 
 	                # ── Detection metrics (box) ────────────────────────────
@@ -593,6 +612,47 @@ class ScriptRunnerApp:
 
 	            except Exception as e:
 	                lines.append(f"    [{model_label}]  could not read results: {e}")
+
+	        # ── Complex-behaviour model (sklearn/torch, non-YOLO) ──────
+	        # Not a YOLO run: no results.csv. Scores live in metrics.txt
+	        # (macro-F1) and the fitted pipeline in pipeline.joblib. We parse
+	        # the text file rather than loading the bundle (avoids pulling in
+	        # torch/joblib on the launcher thread).
+	        complex_dir     = project_path / 'model_complex'
+	        complex_metrics = complex_dir / 'metrics.txt'
+	        if complex_metrics.exists():
+	            if not model_section_printed:
+	                lines.append(f"\n  MODEL METRICS  (last epoch)")
+	                model_section_printed = True
+	            try:
+	                bundle = complex_dir / 'pipeline.joblib'
+	                size_str = ''
+	                if bundle.exists():
+	                    size_mb  = bundle.stat().st_size / 1_048_576
+	                    mod_date = time.strftime('%Y-%m-%d',
+	                                             time.localtime(bundle.stat().st_mtime))
+	                    size_str = f"  model: {size_mb:.1f} MB  ({mod_date})"
+
+	                tc_file = complex_dir / 'train_count.txt'
+	                tc = tc_file.read_text().strip() if tc_file.exists() else '?'
+	                lines.append(f"\n    [Complex behaviours]  {tc} annotated segments{size_str}")
+
+	                text = complex_metrics.read_text(encoding='utf-8', errors='replace')
+	                headline = [
+	                    (r'By-video CV macro-F1 \(train pool\):\s*([0-9.]+)', 'By-video CV macro-F1'),
+	                    (r'TRAIN-ONLY macro-F1:\s*([0-9.]+)',                 'Train-only macro-F1'),
+	                    (r'Held-out video macro-F1[^:]*:\s*([0-9.]+)',        'Held-out macro-F1'),
+	                ]
+	                any_metric = False
+	                for pat, label in headline:
+	                    m = re.search(pat, text)
+	                    if m:
+	                        lines.append(f"    {label:<26} {float(m.group(1)):.3f}")
+	                        any_metric = True
+	                if not any_metric:
+	                    lines.append(f"    (metrics.txt present but no macro-F1 score found)")
+	            except Exception as e:
+	                lines.append(f"    [Complex behaviours]  could not read metrics: {e}")
 
 	        lines.append(f"\n{sep}\n")
 	        self._write_stats_lines(lines)
