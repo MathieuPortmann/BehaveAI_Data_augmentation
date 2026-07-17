@@ -1039,12 +1039,22 @@ def draw_boxes_on_image(base_img, selected_set=None, to_screen=None, bounds=None
 			parts.append(age_classes[age_idx])
 		return parts
 
+	# box_line_scale/box_font_scale are legacy knobs: they were tuned as multipliers
+	# on the flat line_thickness/font_size, and applying them on top of adaptive
+	# sizing pins font and thickness to their floors at normal zoom (a 4K frame fits
+	# the canvas at ~0.2x, and 0.9 * 0.2 * 0.2 is far below the 0.15 font floor), so
+	# no Display setting would have any visible effect. In adaptive mode the boxes
+	# therefore render exactly like the output video; the knobs still apply when
+	# adaptive scaling is switched off.
+	line_mult = 1.0 if render_style.adaptive else box_line_scale
+	font_mult = 1.0 if render_style.adaptive else box_font_scale
+
 	def _draw(x1, y1, x2, y2, box, **kw):
 		"""Delegate to the shared renderer, feeding it the box's NATIVE size so
 		font/thickness adapt to the animal rather than to the zoom level."""
 		draw_labeled_detection(out, x1, y1, x2, y2, box[2] - box[0], box[3] - box[1],
 							 render_style, display_scale=display_scale,
-							 line_mult=box_line_scale, font_mult=box_font_scale,
+							 line_mult=line_mult, font_mult=font_mult,
 							 bounds=bounds, **kw)
 
 	for bi, box in enumerate(boxes):

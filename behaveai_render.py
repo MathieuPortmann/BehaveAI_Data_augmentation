@@ -99,19 +99,25 @@ def load_render_style(config):
     mode = str(d.get('label_bg_mode', 'translucent')).strip().lower()
     if mode not in LABEL_BG_MODES:
         mode = 'translucent'
+    # A min above its max would otherwise pin the value to min and silently ignore
+    # the box size, which reads as "the settings do nothing".
+    font_min, font_max = sorted((_to_float(d.get('adaptive_font_min', '0.35'), 0.35),
+                                 _to_float(d.get('adaptive_font_max', '0.9'), 0.9)))
+    thick_min, thick_max = sorted((max(0.0, _to_float(d.get('adaptive_thickness_min', '1.0'), 1.0)),
+                                   max(0.0, _to_float(d.get('adaptive_thickness_max', '3.0'), 3.0))))
     return RenderStyle(
         base_font=_to_float(d.get('font_size', '0.5'), 0.5),
         base_thickness=_to_int(d.get('line_thickness', '1'), 1),
         adaptive=_to_bool(d.get('adaptive_box_scaling', 'true'), True),
         font_coeff=_to_float(d.get('adaptive_font_coeff', '0.005'), 0.005),
-        font_min=_to_float(d.get('adaptive_font_min', '0.35'), 0.35),
-        font_max=_to_float(d.get('adaptive_font_max', '0.9'), 0.9),
+        font_min=font_min,
+        font_max=font_max,
         thick_coeff=_to_float(d.get('adaptive_thickness_coeff', '0.012'), 0.012),
         # Fractional: kept as floats through the whole computation and only rounded
         # to whole pixels at the cv2 call, so values like 0.75 / 2.25 still shift the
         # result (notably in the annotation tool, where zoom multiplies them).
-        thick_min=max(0.0, _to_float(d.get('adaptive_thickness_min', '1.0'), 1.0)),
-        thick_max=max(0.0, _to_float(d.get('adaptive_thickness_max', '3.0'), 3.0)),
+        thick_min=thick_min,
+        thick_max=thick_max,
         label_bg_mode=mode,
         label_bg_opacity=_clamp(_to_float(d.get('label_bg_opacity', '0.5'), 0.5), 0.0, 1.0),
         label_bg_color=_parse_one_color(d.get('label_bg_color', '0,0,0'), (0, 0, 0)),
@@ -168,13 +174,14 @@ def draw_box(img, p1, p2, color, thickness, style):
     """Rectangle with a thin dark halo underneath, so any colour stays readable on
     grass/soil/shadow. halo_thickness = 0 disables the halo.
 
-    halo_thickness may be fractional; it is rounded here, but forced at least one
-    pixel wider than the coloured line, otherwise a small value would round down to
-    the same width and the halo would be invisible."""
+    halo_thickness is in pixels per side and may be fractional. A value too small to
+    add a whole pixel draws no halo at all, rather than being rounded up: that keeps
+    the setting honest as a way to make the line as thin as possible (a halo always
+    makes the box read thicker, since it adds width on both sides)."""
     if style.halo_thickness > 0:
-        halo_th = max(thickness + 1,
-                      int(round(thickness + 2 * style.halo_thickness)))
-        cv2.rectangle(img, p1, p2, style.halo_color, halo_th)
+        halo_th = int(round(thickness + 2 * style.halo_thickness))
+        if halo_th > thickness:
+            cv2.rectangle(img, p1, p2, style.halo_color, halo_th)
     cv2.rectangle(img, p1, p2, color, thickness)
 
 

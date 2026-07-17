@@ -788,18 +788,24 @@ PARAM_HELP = {
         "influence": "Display only. Larger is readable but clutters crowded scenes.",
     },
     "box_line_scale": {
-        "short": "Extra thinning applied to box borders in the annotation tool's live view.",
+        "short": "Extra thinning of annotation-tool box borders. Ignored unless adaptive box "
+                 "scaling is off.",
         "what": "Multiplier on line_thickness for the on-screen boxes only (zoomed with the "
-                "mouse wheel); does not affect line_thickness itself or saved crop masks.",
-        "influence": "Display only, annotation tool. Lower values keep borders thinner at any "
-                     "zoom level; 1.0 matches the un-thinned line_thickness.",
+                "mouse wheel); does not affect line_thickness itself or saved crop masks. "
+                "Legacy knob: when adaptive_box_scaling is on, the annotation tool renders "
+                "boxes exactly like the output video and this value is not applied.",
+        "influence": "Display only, annotation tool, adaptive scaling off. Lower values keep "
+                     "borders thinner at any zoom level; 1.0 matches line_thickness.",
     },
     "box_font_scale": {
-        "short": "Extra shrinking applied to label text in the annotation tool's live view.",
+        "short": "Extra shrinking of annotation-tool label text. Ignored unless adaptive box "
+                 "scaling is off.",
         "what": "Multiplier on font_size for the on-screen labels only (zoomed with the mouse "
-                "wheel); does not affect font_size itself or saved crop masks.",
-        "influence": "Display only, annotation tool. Lower values keep labels smaller at any "
-                     "zoom level; 1.0 matches the un-shrunk font_size.",
+                "wheel); does not affect font_size itself or saved crop masks. Legacy knob: "
+                "when adaptive_box_scaling is on, the annotation tool renders labels exactly "
+                "like the output video and this value is not applied.",
+        "influence": "Display only, annotation tool, adaptive scaling off. Lower values keep "
+                     "labels smaller at any zoom level; 1.0 matches font_size.",
     },
     "buttons_per_row": {
         "short": "Number of class buttons shown per row in the annotation window.",
@@ -880,10 +886,11 @@ PARAM_HELP = {
         "short": "Thin dark outline drawn under box lines for contrast; 0 disables it "
                  "(decimals allowed).",
         "what": "Width in pixels of the darker border drawn just under each coloured box line, "
-                "on each side. Fractional values are allowed; the halo is always drawn at least "
-                "one pixel wider than the coloured line so it stays visible.",
-        "influence": "Display only. 1 makes any class colour readable over grass, soil or shadow; "
-                     "higher looks heavier; 0 restores plain coloured lines.",
+                "on each side. Fractional values are allowed; a value too small to add a whole "
+                "pixel draws no halo at all.",
+        "influence": "Display only. The halo adds width on both sides, so it is what makes a box "
+                     "read thicker: 1 makes any class colour readable over grass, soil or shadow, "
+                     "while 0 gives the thinnest possible box (a bare one-pixel line).",
     },
     "halo_color": {
         "short": "Colour of the outline drawn under box lines, as R,G,B.",
