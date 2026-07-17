@@ -10,6 +10,9 @@ from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
 )
+from behaveai_render import (
+	load_render_style, draw_labeled_detection, draw_frame_number,
+)
 import time
 import shutil
 import gc
@@ -335,6 +338,8 @@ try:
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
+	# Box/label styling shared with the annotation tool (see behaveai_render.py).
+	render_style = load_render_style(config)
 	frame_skip = int(config['DEFAULT'].get('frame_skip', '0'))
 	ab_analysis_duration_s = float(config['DEFAULT'].get('ab_analysis_duration_s', '0'))
 
@@ -632,24 +637,6 @@ def _classify_pooled(model, class_names, crop):
 			best_conf = c
 			best_name = nm
 	return (best_name, best_conf) if best_name else ('', 0.0)
-
-
-def _draw_stacked_label(frame, lines, lx, ly, color, font_size, line_thickness):
-	"""Draw `lines` (top to bottom) stacked immediately above (lx, ly), each on
-	its own row, with a single shared background rectangle - used to put the
-	species/age line above the existing primary/secondary label."""
-	lines = [l for l in lines if l]
-	if not lines:
-		return
-	th = line_thickness
-	sizes = [cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, font_size, th)[0] for l in lines]
-	total_h = sum(h for _w, h in sizes) + th * 4 * len(lines)
-	max_w = max(w for w, _h in sizes)
-	cv2.rectangle(frame, (lx - th, ly - total_h), (lx + max_w + th*2, ly), (0, 0, 0), -1)
-	y = ly - th * 2
-	for line, (_w, h) in zip(reversed(lines), reversed(sizes)):
-		cv2.putText(frame, line, (lx, y), cv2.FONT_HERSHEY_SIMPLEX, font_size, color, th, cv2.LINE_AA)
-		y -= h + th * 4
 
 
 if __name__ == '__main__':
@@ -1391,7 +1378,18 @@ if __name__ == '__main__':
 					sp_conf = det.get('species_conf', 0)
 					ag_class = det.get('age_class', '')
 					ag_conf = det.get('age_conf', 0)
-					species_age_label = " / ".join(p for p in (sp_class, ag_class) if p)
+					# Display-only fallback: the species/age classifiers only exist when the
+					# project defines >=2 classes (see the model-loading gate above), so a
+					# single-species/single-age project would otherwise never show them.
+					# Deliberately not written back to det/CSV - those keep the model's own
+					# (possibly empty) verdict.
+					sp_display = sp_class or (species_list[0] if len(species_list) == 1 else '')
+					ag_display = ag_class or (age_classes[0] if len(age_classes) == 1 else '')
+					top_lines = []
+					if render_style.show_species and sp_display:
+						top_lines.append(sp_display)
+					if render_style.show_age and ag_display:
+						top_lines.append(ag_display)
 
 
 					# Create display label
@@ -1422,24 +1420,23 @@ if __name__ == '__main__':
 						# secondary was rejected (below threshold) -> secondary_cls stayed ''.
 						if primary_cls in ignore_secondary or secondary_cls == '':
 							label = f"{tid} {primary_cls.upper()}"
-							cv2.rectangle(frame, (x1, y1), (x2, y2), primary_col, line_thickness)
-							_draw_stacked_label(frame, [species_age_label, label], x1, y1,
-												 primary_col, font_size, line_thickness)
+							draw_labeled_detection(frame, x1, y1, x2, y2, x2-x1, y2-y1,
+												 render_style, primary_color=primary_col,
+												 top_lines=top_lines, label=label,
+												 bounds=(frame.shape[1], frame.shape[0]))
 						else:
-							# Draw outer static box (slightly larger)
-							outer_thickness = line_thickness + 2
-							cv2.rectangle(frame, (x1-outer_thickness, y1-outer_thickness),
-										 (x2+outer_thickness, y2+outer_thickness),
-										primary_col, outer_thickness)
 							label = f"{tid} {primary_cls.upper()} {secondary_cls}"
-							cv2.rectangle(frame, (x1, y1), (x2, y2), secondary_col, line_thickness)
-							_draw_stacked_label(frame, [species_age_label, label], x1, y1,
-												 secondary_col, font_size, line_thickness)
+							draw_labeled_detection(frame, x1, y1, x2, y2, x2-x1, y2-y1,
+												 render_style, primary_color=primary_col,
+												 secondary_color=secondary_col, hierarchical=True,
+												 top_lines=top_lines, label=label,
+												 bounds=(frame.shape[1], frame.shape[0]))
 					else:
 						label = f"{tid} {primary_cls}"
-						cv2.rectangle(frame, (x1, y1), (x2, y2), primary_col, line_thickness)
-						_draw_stacked_label(frame, [species_age_label, label], x1, y1,
-											 primary_col, font_size, line_thickness)
+						draw_labeled_detection(frame, x1, y1, x2, y2, x2-x1, y2-y1,
+											 render_style, primary_color=primary_col,
+											 top_lines=top_lines, label=label,
+											 bounds=(frame.shape[1], frame.shape[0]))
 
 
 
@@ -1474,14 +1471,7 @@ if __name__ == '__main__':
 
 
 				# ~ # print frame number
-				text_color = (255, 255, 255)  # white text
-				label = str(current_frame)
-				label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness)
-				label_w, label_h = label_size
-				cv2.rectangle(frame, (0, 0),
-							 (label_w + line_thickness*4, label_h + line_thickness*4), (0, 0, 0), -1)
-				cv2.putText(frame, label, (line_thickness*2, label_h + line_thickness*2),
-						   cv2.FONT_HERSHEY_SIMPLEX, font_size, text_color, line_thickness)
+				draw_frame_number(frame, str(current_frame), render_style)
 
 				writer.write(frame)
 

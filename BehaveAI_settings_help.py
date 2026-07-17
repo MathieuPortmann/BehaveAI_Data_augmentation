@@ -808,6 +808,105 @@ PARAM_HELP = {
                      "narrower; fewer columns give wider buttons but a taller panel.",
     },
 
+    # ---------------- Box & label style (shared: output videos + annotation) ----------------
+    "adaptive_box_scaling": {
+        "short": "Scale label text and box lines to each animal's box size.",
+        "what": "When on, font and line thickness are derived from the bounding box's native "
+                "size (clamped by the min/max settings) instead of the flat font_size / "
+                "line_thickness values. Applies to output videos and the annotation tool alike.",
+        "influence": "Display only. On, small animals get small thin labels and large ones stay "
+                     "readable. Off restores the previous flat font_size/line_thickness look.",
+    },
+    "adaptive_font_coeff": {
+        "short": "Font size per pixel of box size, when adaptive scaling is on.",
+        "what": "font = coeff x min(box_width, box_height), then clamped to the adaptive font "
+                "min/max.",
+        "influence": "Display only. Higher gives bigger text on the same animal; ignored when "
+                     "adaptive_box_scaling is off.",
+    },
+    "adaptive_font_min": {
+        "short": "Smallest font size adaptive scaling may produce.",
+        "what": "Lower clamp on the box-derived font size.",
+        "influence": "Display only. Raise it if labels on distant/small animals get unreadable.",
+    },
+    "adaptive_font_max": {
+        "short": "Largest font size adaptive scaling may produce.",
+        "what": "Upper clamp on the box-derived font size.",
+        "influence": "Display only. Lower it if labels on close-up animals get oversized.",
+    },
+    "adaptive_thickness_coeff": {
+        "short": "Box line thickness per pixel of box size, when adaptive scaling is on.",
+        "what": "thickness = coeff x min(box_width, box_height), then clamped to the adaptive "
+                "thickness min/max.",
+        "influence": "Display only. Higher gives thicker borders; ignored when "
+                     "adaptive_box_scaling is off.",
+    },
+    "adaptive_thickness_min": {
+        "short": "Thinnest box line adaptive scaling may produce (decimals allowed).",
+        "what": "Lower clamp, in pixels, on the box-derived line thickness. Fractional values "
+                "such as 0.75 are kept through the maths and only rounded when the line is "
+                "actually drawn.",
+        "influence": "Display only. Drawn lines can never be thinner than one whole pixel, so "
+                     "values below 1 mainly bite in the annotation tool, where zoom multiplies "
+                     "them before rounding.",
+    },
+    "adaptive_thickness_max": {
+        "short": "Thickest box line adaptive scaling may produce (decimals allowed).",
+        "what": "Upper clamp, in pixels, on the box-derived line thickness. Fractional values "
+                "such as 2.25 are honoured before rounding.",
+        "influence": "Display only. Lower it if borders on large animals look heavy; this is the "
+                     "setting that caps how thick a close-up animal's box can get.",
+    },
+    "label_bg_mode": {
+        "short": "Background band behind box labels: none, translucent or solid.",
+        "what": "'none' draws text straight onto the image, 'translucent' blends a band using "
+                "label_bg_opacity, 'solid' fills it opaquely (the previous behaviour).",
+        "influence": "Display only. 'translucent' keeps labels readable while hiding less of "
+                     "neighbouring boxes and animals; 'none' hides nothing but can be hard to "
+                     "read on busy backgrounds.",
+    },
+    "label_bg_opacity": {
+        "short": "Opacity of the label background band when its mode is 'translucent'.",
+        "what": "0.0 is fully see-through, 1.0 is fully opaque.",
+        "influence": "Display only. Lower obscures less of what's behind the label but reduces "
+                     "text contrast. Ignored unless label_bg_mode is 'translucent'.",
+    },
+    "label_bg_color": {
+        "short": "Colour of the label background band, as R,G,B.",
+        "what": "Single 'R,G,B' triple used for the band behind label text.",
+        "influence": "Display only. Dark values suit the bright class colours used for text.",
+    },
+    "halo_thickness": {
+        "short": "Thin dark outline drawn under box lines for contrast; 0 disables it "
+                 "(decimals allowed).",
+        "what": "Width in pixels of the darker border drawn just under each coloured box line, "
+                "on each side. Fractional values are allowed; the halo is always drawn at least "
+                "one pixel wider than the coloured line so it stays visible.",
+        "influence": "Display only. 1 makes any class colour readable over grass, soil or shadow; "
+                     "higher looks heavier; 0 restores plain coloured lines.",
+    },
+    "halo_color": {
+        "short": "Colour of the outline drawn under box lines, as R,G,B.",
+        "what": "Single 'R,G,B' triple used for the halo under each box line.",
+        "influence": "Display only. Dark values give the strongest contrast on typical field "
+                     "footage.",
+    },
+    "show_species": {
+        "short": "Show the species name on each box.",
+        "what": "Toggles the species line above the box label, in output videos and the "
+                "annotation tool. When the project defines a single species, that name is shown "
+                "even though no species classifier is trained.",
+        "influence": "Display only. Turn off to reduce clutter when every animal is the same "
+                     "species.",
+    },
+    "show_age": {
+        "short": "Show the age class on each box.",
+        "what": "Toggles the age line above the box label, in output videos and the annotation "
+                "tool. When the project defines a single age class, that name is shown even "
+                "though no age classifier is trained.",
+        "influence": "Display only. Turn off to reduce clutter.",
+    },
+
     # ---------------- Activity budget ----------------
     "ab_min_presence_ratio": {
         "short": "Min fraction of frames a subject must be present to count as a group member.",

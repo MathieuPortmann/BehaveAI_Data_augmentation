@@ -22,6 +22,7 @@ from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
 )
+from behaveai_render import load_render_style, draw_labeled_detection
 from behaveai_holdout import is_holdout_video
 
 
@@ -229,6 +230,8 @@ try:
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
 	box_line_scale = float(config['DEFAULT'].get('box_line_scale', '0.5'))
 	box_font_scale = float(config['DEFAULT'].get('box_font_scale', '0.35'))
+	# Box/label styling shared with the output-video renderer (see behaveai_render.py).
+	render_style = load_render_style(config)
 	buttons_per_row = int(config['DEFAULT'].get('buttons_per_row', '8'))
 	# ~ cross_blocking = config['DEFAULT']['cross_blocking'].lower()
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
@@ -993,8 +996,8 @@ def auto_annotate_local():
 
 
 # draw boxes onto a frame copy
-def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=None,
-						 to_screen=None, bounds=None):
+def draw_boxes_on_image(base_img, selected_set=None, to_screen=None, bounds=None,
+						 display_scale=1.0):
 	"""
 	Draw hierarchical boxes onto a *copy* of base_img.
 	- Outer rectangle uses primary color (slightly thicker)
@@ -1003,18 +1006,21 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 	- Unclassified boxes (primary_cls < 0) are drawn dashed-red as "pending".
 	- The selected box gets a bright highlight.
 
-	`thickness`/`font_scale` default to the configured line_thickness/font_size.
+	All box/label styling comes from behaveai_render, so this matches the output
+	videos produced by BehaveAI_classify_track.py exactly.
+
 	`to_screen(vx, vy) -> (sx, sy)` maps native video coordinates into base_img's
 	coordinate space (identity by default); pass the final on-screen scaled
 	composite as base_img plus a to_screen that folds in zoom + canvas-fit
 	scale so lines/text are drawn crisp, at their real final pixel size,
 	rather than baked onto the native frame and blurred by a later resize.
+	`display_scale` must be that same zoom * canvas-fit magnification: font and
+	line thickness are derived from each box's NATIVE size and then scaled by it,
+	so a given animal keeps a stable look while zooming.
 	`bounds` (max_x, max_y), if given, skips boxes entirely outside it — so
 	they don't bleed into an adjacent region of a shared canvas (e.g. the
 	zoom column to the right of the main display).
 	"""
-	th = line_thickness if thickness is None else thickness
-	fs = font_size if font_scale is None else font_scale
 	xf = to_screen if to_screen is not None else (lambda vx, vy: (vx, vy))
 	out = base_img.copy()
 
@@ -1027,26 +1033,19 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 		species_idx = box[-4] if len(box) >= 10 else -1
 		age_idx = box[-2] if len(box) >= 10 else -1
 		parts = []
-		if species_idx is not None and 0 <= species_idx < len(species_list):
+		if render_style.show_species and species_idx is not None and 0 <= species_idx < len(species_list):
 			parts.append(species_list[species_idx])
-		if age_idx is not None and 0 <= age_idx < len(age_classes):
+		if render_style.show_age and age_idx is not None and 0 <= age_idx < len(age_classes):
 			parts.append(age_classes[age_idx])
 		return parts
 
-	def _draw_stacked_label(lines, lx, ly, color):
-		"""Draw `lines` (top to bottom) stacked immediately above (lx, ly),
-		each on its own row, with a single shared background rectangle."""
-		lines = [l for l in lines if l]
-		if not lines:
-			return
-		sizes = [cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, fs, th)[0] for l in lines]
-		total_h = sum(h for _w, h in sizes) + th * 4 * len(lines)
-		max_w = max(w for w, _h in sizes)
-		cv2.rectangle(out, (lx - th, ly - total_h), (lx + max_w + th*2, ly), (0, 0, 0), -1)
-		y = ly - th * 2
-		for line, (_w, h) in zip(reversed(lines), reversed(sizes)):
-			cv2.putText(out, line, (lx, y), cv2.FONT_HERSHEY_SIMPLEX, fs, color, th, cv2.LINE_AA)
-			y -= h + th * 4
+	def _draw(x1, y1, x2, y2, box, **kw):
+		"""Delegate to the shared renderer, feeding it the box's NATIVE size so
+		font/thickness adapt to the animal rather than to the zoom level."""
+		draw_labeled_detection(out, x1, y1, x2, y2, box[2] - box[0], box[3] - box[1],
+							 render_style, display_scale=display_scale,
+							 line_mult=box_line_scale, font_mult=box_font_scale,
+							 bounds=bounds, **kw)
 
 	for bi, box in enumerate(boxes):
 
@@ -1063,11 +1062,7 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 
 		# --- Pending / unclassified box (no primary chosen yet) ---
 		if primary_cls is None or primary_cls < 0 or primary_cls >= len(primary_classes):
-			cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), max(1, th))
-			cv2.putText(out, "? choose primary", (x1, max(y1 - 6, 10)),
-						cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 255), th, cv2.LINE_AA)
-			if is_selected:
-				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
+			_draw(x1, y1, x2, y2, box, pending=True, selected=is_selected)
 			continue
 
 		if hierarchical_mode:
@@ -1077,14 +1072,6 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
 			has_secondary = (secondary_cls is not None and secondary_cls >= 0 and secondary_cls < len(secondary_colors))
 			scol = secondary_colors[secondary_cls] if has_secondary else pcol
-
-			# draw outer box (primary) slightly thicker
-			outer_th = max(1, th + 2)
-			cv2.rectangle(out, (x1-outer_th, y1-outer_th), (x2+outer_th, y2+outer_th), pcol, outer_th)
-
-			# draw inner box (secondary) only when a secondary is set
-			if has_secondary:
-				cv2.rectangle(out, (x1, y1), (x2, y2), scol, th)
 
 			# compose label: PRIMARY (upper) [+ conf], then secondary [+ conf]
 			label = f"{primary_classes[primary_cls].upper()}"
@@ -1103,24 +1090,24 @@ def draw_boxes_on_image(base_img, selected_set=None, thickness=None, font_scale=
 						pass
 				label = label + " " + label2
 
-			# draw label background and text - species/age line above primary/secondary
-			_draw_stacked_label([*species_age_lines, label], x1, y1, pcol)
-			if is_selected:
-				cv2.rectangle(out, (x1-outer_th-2, y1-outer_th-2), (x2+outer_th+2, y2+outer_th+2), (0, 255, 255), 1)
+			# Outer (primary) + inner (secondary) box only when a secondary is set;
+			# otherwise a single primary box - same as the output video.
+			_draw(x1, y1, x2, y2, box, primary_color=pcol,
+				  secondary_color=(scol if has_secondary else None),
+				  hierarchical=True, top_lines=species_age_lines, label=label,
+				  selected=is_selected)
 
 		else:
 			conf = box[5] if len(box) > 5 else -1
 			pcol = primary_colors[primary_cls] if primary_cls < len(primary_colors) else (255,255,255)
-			cv2.rectangle(out, (x1, y1), (x2, y2), pcol, th)
 			label = f"{primary_classes[primary_cls]}"
 			if conf != -1 and conf is not None:
 				try:
 					label = label + f" {conf:.2f}"
 				except Exception:
 					pass
-			_draw_stacked_label([*species_age_lines, label], x1, y1, pcol)
-			if is_selected:
-				cv2.rectangle(out, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 255), 1)
+			_draw(x1, y1, x2, y2, box, primary_color=pcol,
+				  top_lines=species_age_lines, label=label, selected=is_selected)
 
 	# grey masks (as previously)
 	for gx1, gy1, gx2, gy2 in grey_boxes:
@@ -2964,15 +2951,15 @@ class AnnotatorTk:
 		crop_to_disp = float(disp_w) / float(max(1, cw))
 		def _box_to_screen(vx, vy, _x0=x0, _y0=y0, _s=crop_to_disp * scale):
 			return (vx - _x0) * _s, (vy - _y0) * _s
+		# Pass the *same* magnification `_box_to_screen` uses, so each box's
+		# adaptive font/thickness (derived from its native size in behaveai_render)
+		# is scaled consistently with where the box is actually drawn.
 		# box_line_scale/box_font_scale (user-configurable, see Display Settings)
-		# apply extra reduction on top of line_thickness/font_size before
-		# scaling with zoom, so borders/labels can be tuned thinner/smaller
-		# than the base config values used elsewhere (e.g. saved crop masks).
-		box_thickness = max(1, int(round(line_thickness * zoom * scale * box_line_scale)))
-		box_font_size = max(0.15, font_size * zoom * scale * box_font_scale)
+		# apply an extra reduction on top, so borders/labels can be tuned
+		# thinner/smaller than the base config values used elsewhere.
 		scaled = draw_boxes_on_image(scaled, selected_set=getattr(self, 'selected_boxes', None),
-									  thickness=box_thickness, font_scale=box_font_size,
-									  to_screen=_box_to_screen, bounds=(scaled_disp_w, scaled_disp_h))
+									  to_screen=_box_to_screen, bounds=(scaled_disp_w, scaled_disp_h),
+									  display_scale=crop_to_disp * scale)
 
 		# These overlays are drawn directly onto the final screen-space image
 		# (after the zoom crop/resize and canvas-fit scale already applied), so

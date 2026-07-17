@@ -1622,8 +1622,8 @@ class SettingsEditorApp(tk.Tk):
 				 'Number of most-uncertain windows surfaced as candidates.', 'complex_candidate_topk')
 
 		# TAB 6: Display
-		tab5 = ttk.Frame(notebook)
-		notebook.add(tab5, text='Display Settings')
+		# Scrollable: the box & label style section makes this tab taller than the window.
+		tab5 = self._scroll_tab(notebook, 'Display Settings')
 
 		# viewing options
 		ttk.Label(tab5, text='Viewing options', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 4))
@@ -1651,6 +1651,85 @@ class SettingsEditorApp(tk.Tk):
 		help_label(tab5, 'Class buttons per row', 'buttons_per_row').pack(anchor='w', padx=8, pady=(6,0))
 		ttk.Spinbox(tab5, from_=1, to=20, textvariable=self.buttons_per_row_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
 		help_line(tab5, 'buttons_per_row').pack(anchor='w', padx=24, pady=(0, 4))
+
+		# Box & label style - shared by the output videos and the annotation tool
+		ttk.Label(tab5, text='Box & label style', style='Section.TLabel').pack(anchor='w', padx=8, pady=(14, 4))
+
+		self.adaptive_box_scaling_var = tk.BooleanVar(value=True)
+		cb_abs = ttk.Checkbutton(tab5, text='Scale font/lines to box size  ' + 'ⓘ',
+			variable=self.adaptive_box_scaling_var, command=self._set_dirty)
+		cb_abs.pack(anchor='w', padx=8, pady=(6, 0))
+		Tooltip(cb_abs, tooltip_text('adaptive_box_scaling'))
+		ttk.Label(tab5, text=PARAM_HELP['adaptive_box_scaling']['short'], style='Help.TLabel').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_font_coeff_var = tk.DoubleVar(value=0.005)
+		help_label(tab5, 'Adaptive font coefficient', 'adaptive_font_coeff').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.001, to=0.05, increment=0.001, format='%.3f', textvariable=self.adaptive_font_coeff_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_font_coeff').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_font_min_var = tk.DoubleVar(value=0.35)
+		help_label(tab5, 'Adaptive font min', 'adaptive_font_min').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.adaptive_font_min_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_font_min').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_font_max_var = tk.DoubleVar(value=0.9)
+		help_label(tab5, 'Adaptive font max', 'adaptive_font_max').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.1, to=5.0, increment=0.1, textvariable=self.adaptive_font_max_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_font_max').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_thickness_coeff_var = tk.DoubleVar(value=0.012)
+		help_label(tab5, 'Adaptive thickness coefficient', 'adaptive_thickness_coeff').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.001, to=0.2, increment=0.001, format='%.3f', textvariable=self.adaptive_thickness_coeff_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_thickness_coeff').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_thickness_min_var = tk.DoubleVar(value=1.0)
+		help_label(tab5, 'Adaptive thickness min', 'adaptive_thickness_min').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.0, to=20.0, increment=0.05, format='%.2f', textvariable=self.adaptive_thickness_min_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_thickness_min').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.adaptive_thickness_max_var = tk.DoubleVar(value=3.0)
+		help_label(tab5, 'Adaptive thickness max', 'adaptive_thickness_max').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.0, to=20.0, increment=0.05, format='%.2f', textvariable=self.adaptive_thickness_max_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'adaptive_thickness_max').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.label_bg_mode_var = tk.StringVar(value='translucent')
+		help_label(tab5, 'Label background', 'label_bg_mode').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Combobox(tab5, values=['none', 'translucent', 'solid'], textvariable=self.label_bg_mode_var, state='readonly', width=14).pack(anchor='w', padx=8)
+		help_line(tab5, 'label_bg_mode').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.label_bg_opacity_var = tk.DoubleVar(value=0.5)
+		help_label(tab5, 'Label background opacity', 'label_bg_opacity').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.0, to=1.0, increment=0.05, textvariable=self.label_bg_opacity_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'label_bg_opacity').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.label_bg_color_var = tk.StringVar(value='0,0,0')
+		help_label(tab5, 'Label background colour (R,G,B)', 'label_bg_color').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Entry(tab5, textvariable=self.label_bg_color_var, width=12).pack(anchor='w', padx=8)
+		help_line(tab5, 'label_bg_color').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.halo_thickness_var = tk.DoubleVar(value=1.0)
+		help_label(tab5, 'Box halo thickness', 'halo_thickness').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Spinbox(tab5, from_=0.0, to=5.0, increment=0.05, format='%.2f', textvariable=self.halo_thickness_var, width=6, command=self._set_dirty).pack(anchor='w', padx=8)
+		help_line(tab5, 'halo_thickness').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.halo_color_var = tk.StringVar(value='0,0,0')
+		help_label(tab5, 'Box halo colour (R,G,B)', 'halo_color').pack(anchor='w', padx=8, pady=(6,0))
+		ttk.Entry(tab5, textvariable=self.halo_color_var, width=12).pack(anchor='w', padx=8)
+		help_line(tab5, 'halo_color').pack(anchor='w', padx=24, pady=(0, 4))
+
+		self.show_species_var = tk.BooleanVar(value=True)
+		cb_sp = ttk.Checkbutton(tab5, text='Show species on boxes  ' + 'ⓘ',
+			variable=self.show_species_var, command=self._set_dirty)
+		cb_sp.pack(anchor='w', padx=8, pady=(6, 0))
+		Tooltip(cb_sp, tooltip_text('show_species'))
+		ttk.Label(tab5, text=PARAM_HELP['show_species']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
+
+		self.show_age_var = tk.BooleanVar(value=True)
+		cb_ag = ttk.Checkbutton(tab5, text='Show age on boxes  ' + 'ⓘ',
+			variable=self.show_age_var, command=self._set_dirty)
+		cb_ag.pack(anchor='w', padx=8)
+		Tooltip(cb_ag, tooltip_text('show_age'))
+		ttk.Label(tab5, text=PARAM_HELP['show_age']['short'], style='Help.TLabel').pack(anchor='w', padx=24, pady=(0, 4))
 
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
@@ -1761,6 +1840,22 @@ class SettingsEditorApp(tk.Tk):
 		self.box_line_scale_var.set(float(d.get('box_line_scale', fallback='0.5')))
 		self.box_font_scale_var.set(float(d.get('box_font_scale', fallback='0.35')))
 		self.buttons_per_row_var.set(int(d.get('buttons_per_row', fallback='8')))
+
+		# box & label style (see behaveai_render.py)
+		self.adaptive_box_scaling_var.set(self._str_to_bool(d.get('adaptive_box_scaling', fallback='true')))
+		self.adaptive_font_coeff_var.set(float(d.get('adaptive_font_coeff', fallback='0.005')))
+		self.adaptive_font_min_var.set(float(d.get('adaptive_font_min', fallback='0.35')))
+		self.adaptive_font_max_var.set(float(d.get('adaptive_font_max', fallback='0.9')))
+		self.adaptive_thickness_coeff_var.set(float(d.get('adaptive_thickness_coeff', fallback='0.012')))
+		self.adaptive_thickness_min_var.set(float(d.get('adaptive_thickness_min', fallback='1.0')))
+		self.adaptive_thickness_max_var.set(float(d.get('adaptive_thickness_max', fallback='3.0')))
+		self.label_bg_mode_var.set(d.get('label_bg_mode', fallback='translucent'))
+		self.label_bg_opacity_var.set(float(d.get('label_bg_opacity', fallback='0.5')))
+		self.label_bg_color_var.set(d.get('label_bg_color', fallback='0,0,0'))
+		self.halo_thickness_var.set(float(d.get('halo_thickness', fallback='1.0')))
+		self.halo_color_var.set(d.get('halo_color', fallback='0,0,0'))
+		self.show_species_var.set(self._str_to_bool(d.get('show_species', fallback='true')))
+		self.show_age_var.set(self._str_to_bool(d.get('show_age', fallback='true')))
 
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
@@ -2252,6 +2347,23 @@ class SettingsEditorApp(tk.Tk):
 		new_default['box_line_scale'] = str(self.box_line_scale_var.get())
 		new_default['box_font_scale'] = str(self.box_font_scale_var.get())
 		new_default['buttons_per_row'] = str(self.buttons_per_row_var.get())
+
+		# box & label style (see behaveai_render.py)
+		new_default['adaptive_box_scaling'] = str(self.adaptive_box_scaling_var.get()).lower()
+		new_default['adaptive_font_coeff'] = str(self.adaptive_font_coeff_var.get())
+		new_default['adaptive_font_min'] = str(self.adaptive_font_min_var.get())
+		new_default['adaptive_font_max'] = str(self.adaptive_font_max_var.get())
+		new_default['adaptive_thickness_coeff'] = str(self.adaptive_thickness_coeff_var.get())
+		new_default['adaptive_thickness_min'] = str(self.adaptive_thickness_min_var.get())
+		new_default['adaptive_thickness_max'] = str(self.adaptive_thickness_max_var.get())
+		new_default['label_bg_mode'] = self.label_bg_mode_var.get()
+		new_default['label_bg_opacity'] = str(self.label_bg_opacity_var.get())
+		new_default['label_bg_color'] = self.label_bg_color_var.get()
+		new_default['halo_thickness'] = str(self.halo_thickness_var.get())
+		new_default['halo_color'] = self.halo_color_var.get()
+		new_default['show_species'] = str(self.show_species_var.get()).lower()
+		new_default['show_age'] = str(self.show_age_var.get()).lower()
+
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
 
 		# Data augmentation parameters
