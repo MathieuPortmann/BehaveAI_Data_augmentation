@@ -396,6 +396,19 @@ try:
 	sahi_perform_standard_pred = config['DEFAULT'].get('sahi_perform_standard_pred', 'false').lower() == 'true'
 	sahi_min_dim_factor = float(config['DEFAULT'].get('sahi_min_dim_factor', '1.5'))
 
+	# SAHI mode is a coherent train+infer switch: when a stream is tiled, its
+	# detector is retrained on the sliced dataset AND inference loads that tiled
+	# model. The tiled model lives in a separate *_tiled project so the existing
+	# whole-frame model is never overwritten -- flip the flag off to fall back to
+	# it instantly. Redirect the project/model paths here (defined above) so both
+	# the training calls and the inference model-load below use the tiled model.
+	if sahi_enabled_static and primary_static_classes:
+		primary_static_project_path = primary_static_project_path + '_tiled'
+		primary_static_model_path = os.path.join(primary_static_project_path, 'train', 'weights', 'best.pt')
+	if sahi_enabled_motion and primary_motion_classes:
+		primary_motion_project_path = primary_motion_project_path + '_tiled'
+		primary_motion_model_path = os.path.join(primary_motion_project_path, 'train', 'weights', 'best.pt')
+
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
 
@@ -730,12 +743,29 @@ def _classify_pooled(model, class_names, crop):
 if __name__ == '__main__':
 	#-------CHECK PRIMARY MODEL EXISTS----------
 	if primary_static_classes:
-		maybe_retrain('primary static', primary_static_yaml_path, primary_static_project_path,
+		_static_train_yaml = primary_static_yaml_path
+		if sahi_enabled_static:
+			# Tile the annotated dataset so training sees horses at the same
+			# (tile) scale SAHI feeds at inference. Freshness-cached: only
+			# re-tiles when the source annotation count changed.
+			from BehaveAI_tiling import tile_dataset
+			_static_train_yaml = tile_dataset(
+				primary_static_yaml_path,
+				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
+				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
+		maybe_retrain('primary static', _static_train_yaml, primary_static_project_path,
 			primary_static_model_path, primary_classifier, primary_epochs, 640)
 
 
 	if primary_motion_classes:
-		maybe_retrain('primary motion', primary_motion_yaml_path, primary_motion_project_path,
+		_motion_train_yaml = primary_motion_yaml_path
+		if sahi_enabled_motion:
+			from BehaveAI_tiling import tile_dataset
+			_motion_train_yaml = tile_dataset(
+				primary_motion_yaml_path,
+				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
+				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
+		maybe_retrain('primary motion', _motion_train_yaml, primary_motion_project_path,
 			primary_motion_model_path, primary_classifier, primary_epochs, 640)
 
 	if hierarchical_mode:
