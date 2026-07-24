@@ -176,6 +176,56 @@ def sahi_detect(sahi_model, image, class_names, source,
 # --------------------------------------------------------------------
 
 
+# --- BoT-SORT / ByteTrack integration helpers ------------------------
+# The Ultralytics trackers expect a results-like object exposing .xywh/.xyxy/
+# .conf/.cls plus __len__/__getitem__ (they do results[bool_mask] internally).
+# This minimal wrapper provides exactly that from our detection dicts. Validated
+# by an isolated probe (see plan) before wiring it in here.
+
+
+class _DetResultsForTracker:
+	def __init__(self, xywh, xyxy, conf, cls):
+		self.xywh, self.xyxy, self.conf, self.cls = xywh, xyxy, conf, cls
+
+	def __len__(self):
+		return len(self.conf)
+
+	def __getitem__(self, mask):
+		return _DetResultsForTracker(self.xywh[mask], self.xyxy[mask],
+									 self.conf[mask], self.cls[mask])
+
+
+def bot_track_update(bot_tracker, processed_detections, frame):
+	"""Feed processed_detections to an Ultralytics BoT-SORT/ByteTrack tracker and
+	return {detection_index: track_id}.
+
+	The per-frame index into processed_detections is stashed in the tracker's
+	`cls` field (which BoT-SORT transports untouched from input detection to the
+	output row that updated a track that frame) and read back from output column
+	6, so each track row maps to the exact detection that produced it -- letting
+	the caller re-attach class/secondary metadata. Column 7 (`idx`) is NOT used:
+	the tracker resets it relative to its internal high/low-score subsets.
+	Output row layout: [x1, y1, x2, y2, track_id, score, cls, idx].
+	"""
+	n = len(processed_detections)
+	if n == 0:
+		empty = _DetResultsForTracker(np.zeros((0, 4), np.float32), np.zeros((0, 4), np.float32),
+									  np.zeros((0,), np.float32), np.zeros((0,), np.float32))
+		bot_tracker.update(empty, img=frame)
+		return {}
+	xyxy = np.array([d['coords'] for d in processed_detections], dtype=np.float32)
+	xywh = np.empty_like(xyxy)
+	xywh[:, 0] = (xyxy[:, 0] + xyxy[:, 2]) / 2.0
+	xywh[:, 1] = (xyxy[:, 1] + xyxy[:, 3]) / 2.0
+	xywh[:, 2] = xyxy[:, 2] - xyxy[:, 0]
+	xywh[:, 3] = xyxy[:, 3] - xyxy[:, 1]
+	conf = np.array([float(d.get('primary_conf', 0.0)) for d in processed_detections], dtype=np.float32)
+	cls = np.arange(n, dtype=np.float32)
+	tracks = bot_tracker.update(_DetResultsForTracker(xywh, xyxy, conf, cls), img=frame)
+	return {int(round(row[6])): int(row[4]) for row in tracks}
+# --------------------------------------------------------------------
+
+
 
 def move_to_expected(project_path, run_name="train", runs_root="runs"):
     """
@@ -408,6 +458,20 @@ try:
 	if sahi_enabled_motion and primary_motion_classes:
 		primary_motion_project_path = primary_motion_project_path + '_tiled'
 		primary_motion_model_path = os.path.join(primary_motion_project_path, 'train', 'weights', 'best.pt')
+
+	# --- Tracker: BoT-SORT/ByteTrack (default) or the legacy Kalman tracker ---
+	# 'botsort' brings camera-motion compensation (GMC) inside the association
+	# loop and ByteTrack's two-tier matching; appearance/ReID is forced off (see
+	# plan: uninformative at this resolution). 'kalman' keeps the old homemade
+	# tracker for comparison. Long-gap identity recovery is deferred to the
+	# offline stitching pass, so track_buffer stays short here.
+	tracker_type = config['DEFAULT'].get('tracker_type', 'botsort').lower()
+	tracker_track_high_thresh = float(config['DEFAULT'].get('tracker_track_high_thresh', '0.5'))
+	tracker_track_low_thresh = float(config['DEFAULT'].get('tracker_track_low_thresh', '0.1'))
+	tracker_new_track_thresh = float(config['DEFAULT'].get('tracker_new_track_thresh', '0.6'))
+	tracker_track_buffer = int(config['DEFAULT'].get('tracker_track_buffer', '30'))
+	tracker_match_thresh = float(config['DEFAULT'].get('tracker_match_thresh', '0.8'))
+	tracker_gmc_method = config['DEFAULT'].get('tracker_gmc_method', 'sparseOptFlow')
 
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
@@ -1161,8 +1225,35 @@ if __name__ == '__main__':
 				print(f"Re-ID unavailable ({e}); continuing without Re-ID.")
 				reid_registry = None
 
-		tracker = KalmanTracker(match_distance_thresh, delete_after_missed,
-								reid_registry=reid_registry)
+		# Tracker: BoT-SORT/ByteTrack (default) or the legacy Kalman tracker.
+		bot_tracker = None
+		if tracker_type in ('botsort', 'bytetrack'):
+			reid_registry = None   # appearance/ReID is not used by the new tracker
+			from ultralytics.trackers.bot_sort import BOTSORT
+			from ultralytics.trackers.byte_tracker import BYTETracker
+			from ultralytics.utils import IterableSimpleNamespace, YAML
+			from ultralytics.utils.checks import check_yaml
+			_tcfg = IterableSimpleNamespace(**YAML.load(check_yaml(
+				'botsort.yaml' if tracker_type == 'botsort' else 'bytetrack.yaml')))
+			_tcfg.with_reid = False
+			_tcfg.track_high_thresh = tracker_track_high_thresh
+			_tcfg.track_low_thresh = tracker_track_low_thresh
+			_tcfg.new_track_thresh = tracker_new_track_thresh
+			_tcfg.track_buffer = tracker_track_buffer
+			_tcfg.match_thresh = tracker_match_thresh
+			if tracker_type == 'botsort':
+				_tcfg.gmc_method = tracker_gmc_method
+			_fps_int = int(fps) if fps and fps > 0 else 30
+			bot_tracker = (BOTSORT(args=_tcfg, frame_rate=_fps_int) if tracker_type == 'botsort'
+						   else BYTETracker(args=_tcfg, frame_rate=_fps_int))
+			tracker = None
+			print(f"Tracker: {tracker_type} (Ultralytics), ReID off.")
+		else:
+			tracker = KalmanTracker(match_distance_thresh, delete_after_missed,
+									reid_registry=reid_registry)
+
+		# Previous centroid per track id, for the tracker-agnostic motion vector.
+		prev_centroid = {}
 
 		prev_frames, frame_idx = None, 0
 		csv_file = open(os.path.join(output_folder, base + "_tracking.csv"), 'w', newline='')
@@ -1500,14 +1591,19 @@ if __name__ == '__main__':
 						else:
 							det_crops.append(None)
 
-				assignment = tracker.update(cents, detection_crops=det_crops, frame_number=frame_idx)
+				if bot_tracker is not None:
+					assignment = bot_track_update(bot_tracker, processed_detections, frame)
+				else:
+					assignment = tracker.update(cents, detection_crops=det_crops, frame_number=frame_idx)
 
 				# ~ frame = motion_image ## enable this line ot save the motion video instead of static
 
 				# Process tracked objects
 				for idx, det in enumerate(processed_detections):
 					tid = assignment.get(idx, None)
-					if tid is None or tid not in tracker.tracks:
+					if tid is None:
+						continue
+					if tracker is not None and tid not in tracker.tracks:
 						continue
 
 					x1, y1, x2, y2 = det['coords']
@@ -1590,20 +1686,18 @@ if __name__ == '__main__':
 
 
 
-					# Draw motion vector (if tracking available)
-					if tid in tracker.tracks:
-					    state_post = tracker.tracks[tid]['kf'].statePost
-					    x, y = state_post[0, 0], state_post[1, 0]
-					    vx, vy = state_post[2, 0], state_post[3, 0]
-					    next_x = x + vx
-					    next_y = y + vy
-
-					    # Guard against NaN/Inf values from Kalman overflow
-					    if all(np.isfinite(v) for v in [x, y, next_x, next_y]):
-					        light_color = tuple(int(0.8 * ch + 0.2 * 255) for ch in primary_col)
-					        cv2.line(frame, (int(x), int(y)), (int(next_x), int(next_y)), primary_col, line_thickness)
-					        cv2.circle(frame, (int(next_x), int(next_y)), 3, light_color, -line_thickness)
-					        cv2.circle(frame, (int(cx), int(cy)), 3, primary_col, -line_thickness)
+					# Draw motion vector: finite difference of this id's centroid
+					# between frames (tracker-agnostic; no Kalman internals).
+					prev = prev_centroid.get(tid)
+					if prev is not None:
+						vx, vy = cx - prev[0], cy - prev[1]
+						next_x, next_y = cx + vx, cy + vy
+						if all(np.isfinite(v) for v in (cx, cy, next_x, next_y)):
+							light_color = tuple(int(0.8 * ch + 0.2 * 255) for ch in primary_col)
+							cv2.line(frame, (int(cx), int(cy)), (int(next_x), int(next_y)), primary_col, line_thickness)
+							cv2.circle(frame, (int(next_x), int(next_y)), 3, light_color, -line_thickness)
+							cv2.circle(frame, (int(cx), int(cy)), 3, primary_col, -line_thickness)
+					prev_centroid[tid] = (cx, cy)
 
 					# Write to CSV. The bounding box (x1, y1, x2, y2) comes straight
 					# from det['coords'] (unpacked above) and is appended after the

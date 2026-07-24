@@ -50,6 +50,10 @@ tqdm==4.67.3
 typing_extensions==4.15.0
 ultralytics-thop==2.0.18
 ultralytics==8.4.16
+# Required by ultralytics' BoT-SORT/ByteTrack trackers (linear assignment in
+# ultralytics/trackers/utils/matching.py). Not pulled automatically into the
+# venv, so pin it explicitly. Installs cleanly against numpy 2.4.2.
+lap==0.5.13
 # Model-export dependencies (ONNX + NCNN formats).
 # NOTE: we deliberately do NOT use ultralytics[export]: that extra pulls the full
 # TensorFlow / TensorFlow.js / Keras stack, which caps numpy<2.2 and conflicts with
