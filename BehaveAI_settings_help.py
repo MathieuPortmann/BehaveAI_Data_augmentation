@@ -444,6 +444,50 @@ PARAM_HELP = {
     },
 
     # ---------------- Tracking ----------------
+    "tracker_type": {
+        "short": "Association method: botsort, bytetrack, or the legacy kalman.",
+        "what": "How detections are linked into tracks across frames. botsort adds "
+                "camera-motion compensation (GMC) and ByteTrack's two-tier matching; "
+                "bytetrack is the same without GMC; kalman is the original homemade tracker.",
+        "influence": "botsort/bytetrack are far more robust to drone pan and occlusion. "
+                     "The parameter block below changes with the choice.",
+    },
+    "tracker_track_high_thresh": {
+        "short": "Confidence above which a detection starts the 1st association tier.",
+        "what": "High-confidence detections are matched to tracks first (ByteTrack tier 1).",
+        "influence": "Lower to admit more detections to the strong first match; too low lets "
+                     "weak boxes seed tracks.",
+    },
+    "tracker_track_low_thresh": {
+        "short": "Floor for the 2nd association tier (rescues weak detections).",
+        "what": "Detections between low and high thresh get a second matching pass against "
+                "unmatched tracks -- ByteTrack's key idea for keeping small/occluded subjects.",
+        "influence": "Lower keeps more faint detections alive across gaps; too low adds noise.",
+    },
+    "tracker_new_track_thresh": {
+        "short": "Confidence required to spawn a brand-new track.",
+        "what": "A detection that matches nothing only creates a new id above this score.",
+        "influence": "Higher = fewer spurious tracks from false positives, at the cost of a "
+                     "slower start for genuine faint subjects.",
+    },
+    "tracker_track_buffer": {
+        "short": "Frames a lost track is kept before deletion.",
+        "what": "How long an unmatched track survives (as 'lost') awaiting re-association.",
+        "influence": "Kept short on purpose: long occlusion recovery is left to the offline "
+                     "stitching pass, not this causal buffer.",
+    },
+    "tracker_match_thresh": {
+        "short": "IoU threshold for the first association step.",
+        "what": "Minimum overlap to link a high-confidence detection to a predicted track box.",
+        "influence": "Higher demands tighter overlap (fewer wrong links, more fragmentation).",
+    },
+    "tracker_gmc_method": {
+        "short": "Camera-motion compensation for BoT-SORT (sparseOptFlow/orb/ecc/none).",
+        "what": "Global motion estimation that cancels drone pan/zoom inside the association "
+                "loop, so track prediction is done in a stabilised frame.",
+        "influence": "sparseOptFlow is a good default; 'none' disables compensation (worse on "
+                     "moving-drone footage). Ignored by bytetrack/kalman.",
+    },
     "match_distance_thresh": {
         "short": "Max pixel distance to link a detection to an existing track.",
         "what": "Association gate between a new detection and a tracked object.",

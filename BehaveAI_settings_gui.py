@@ -1313,33 +1313,90 @@ class SettingsEditorApp(tk.Tk):
 				command=self._set_dirty, **kw).grid(row=k, column=1, sticky='w', padx=8); k += 1
 			help_line(tab4, key).grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		self.match_distance_var = tk.IntVar(value=200)
-		_track_spin('Match distance thresh', 'match_distance_thresh', self.match_distance_var, 1, 10000)
-		self.delete_after_var = tk.IntVar(value=10)
-		_track_spin('Delete after missed', 'delete_after_missed', self.delete_after_var, 1, 10000)
+		# Tracker selection. The parameter block below shows/hides with the choice:
+		# BoT-SORT/ByteTrack params for those trackers, Kalman params for 'kalman'.
+		help_label(tab4, 'Tracker type', 'tracker_type').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.tracker_type_var = tk.StringVar(value='botsort')
+		ttk.Combobox(tab4, values=['botsort', 'bytetrack', 'kalman'],
+					 textvariable=self.tracker_type_var, state='readonly', width=14).grid(
+			row=k, column=1, sticky='w', padx=8); k += 1
+		help_line(tab4, 'tracker_type').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+
+		# Detection-merge params (merge static+motion detections BEFORE tracking).
+		# Relevant for every tracker, so always shown.
 		self.centroid_merge_var = tk.IntVar(value=50)
 		_track_spin('Centroid merge thresh', 'centroid_merge_thresh', self.centroid_merge_var, 1, 10000)
 		self.iou_var = tk.DoubleVar(value=0.5)
 		_track_spin('IOU thresh (overlap required to merge)', 'iou_thresh', self.iou_var, 0.0, 1.0, 0.01, width=6)
 
-		# Kalman subsection
-		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
-		ttk.Label(tab4, text='Kalman filter', style='Section.TLabel').grid(row=k, column=0, sticky='w', padx=8); k += 1
+		# --- BoT-SORT / ByteTrack parameter frame (shown for those trackers) ---
+		self.botsort_frame = ttk.Frame(tab4)
+		self.botsort_frame.grid(row=k, column=0, columnspan=2, sticky='ew'); k += 1
+		bf = self.botsort_frame
+		bk = 0
+		def _bf_spin(label, key, var, lo, hi, inc=None, width=8):
+			nonlocal bk
+			help_label(bf, label, key).grid(row=bk, column=0, sticky='w', padx=8, pady=(6, 0))
+			kw = {} if inc is None else {'increment': inc}
+			ttk.Spinbox(bf, from_=lo, to=hi, textvariable=var, width=width,
+						command=self._set_dirty, **kw).grid(row=bk, column=1, sticky='w', padx=8); bk += 1
+			help_line(bf, key).grid(row=bk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); bk += 1
+		ttk.Label(bf, text='BoT-SORT / ByteTrack', style='Section.TLabel').grid(row=bk, column=0, sticky='w', padx=8, pady=(4, 0)); bk += 1
+		self.tracker_high_var = tk.DoubleVar(value=0.5)
+		_bf_spin('Track high thresh', 'tracker_track_high_thresh', self.tracker_high_var, 0.0, 1.0, 0.05, width=6)
+		self.tracker_low_var = tk.DoubleVar(value=0.1)
+		_bf_spin('Track low thresh (2nd tier)', 'tracker_track_low_thresh', self.tracker_low_var, 0.0, 1.0, 0.05, width=6)
+		self.tracker_new_var = tk.DoubleVar(value=0.6)
+		_bf_spin('New track thresh', 'tracker_new_track_thresh', self.tracker_new_var, 0.0, 1.0, 0.05, width=6)
+		self.tracker_buffer_var = tk.IntVar(value=30)
+		_bf_spin('Track buffer (frames)', 'tracker_track_buffer', self.tracker_buffer_var, 1, 10000)
+		self.tracker_match_var = tk.DoubleVar(value=0.8)
+		_bf_spin('Match thresh (IoU)', 'tracker_match_thresh', self.tracker_match_var, 0.0, 1.0, 0.05, width=6)
+		help_label(bf, 'GMC method (BoT-SORT)', 'tracker_gmc_method').grid(row=bk, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.tracker_gmc_var = tk.StringVar(value='sparseOptFlow')
+		ttk.Combobox(bf, values=['sparseOptFlow', 'orb', 'ecc', 'none'],
+					 textvariable=self.tracker_gmc_var, state='readonly', width=14).grid(row=bk, column=1, sticky='w', padx=8); bk += 1
+		self.tracker_gmc_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(bf, 'tracker_gmc_method').grid(row=bk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); bk += 1
 
-		help_label(tab4, 'Process noise position', 'kalman_process_noise_pos').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
+		# --- Kalman parameter frame (shown for tracker_type='kalman') ---
+		self.kalman_frame = ttk.Frame(tab4)
+		self.kalman_frame.grid(row=k, column=0, columnspan=2, sticky='ew'); k += 1
+		kf = self.kalman_frame
+		kfk = 0
+		def _kf_spin(label, key, var, lo, hi, inc=None, width=8):
+			nonlocal kfk
+			help_label(kf, label, key).grid(row=kfk, column=0, sticky='w', padx=8, pady=(6, 0))
+			kw = {} if inc is None else {'increment': inc}
+			ttk.Spinbox(kf, from_=lo, to=hi, textvariable=var, width=width,
+						command=self._set_dirty, **kw).grid(row=kfk, column=1, sticky='w', padx=8); kfk += 1
+			help_line(kf, key).grid(row=kfk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); kfk += 1
+		ttk.Label(kf, text='Kalman tracker (legacy)', style='Section.TLabel').grid(row=kfk, column=0, sticky='w', padx=8, pady=(4, 0)); kfk += 1
+		self.match_distance_var = tk.IntVar(value=200)
+		_kf_spin('Match distance thresh', 'match_distance_thresh', self.match_distance_var, 1, 10000)
+		self.delete_after_var = tk.IntVar(value=10)
+		_kf_spin('Delete after missed', 'delete_after_missed', self.delete_after_var, 1, 10000)
+		help_label(kf, 'Process noise position', 'kalman_process_noise_pos').grid(row=kfk, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_pos_var = tk.DoubleVar(value=0.01)
-		ttk.Entry(tab4, textvariable=self.kalman_pos_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
-		help_line(tab4, 'kalman_process_noise_pos').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
-
-		help_label(tab4, 'Process noise velocity', 'kalman_process_noise_vel').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Entry(kf, textvariable=self.kalman_pos_var, width=10).grid(row=kfk, column=1, sticky='w', padx=8); kfk += 1
+		help_line(kf, 'kalman_process_noise_pos').grid(row=kfk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); kfk += 1
+		help_label(kf, 'Process noise velocity', 'kalman_process_noise_vel').grid(row=kfk, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_vel_var = tk.DoubleVar(value=0.01)
-		ttk.Entry(tab4, textvariable=self.kalman_vel_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
-		help_line(tab4, 'kalman_process_noise_vel').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
-
-		help_label(tab4, 'Measurement noise', 'kalman_measurement_noise').grid(row=k, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Entry(kf, textvariable=self.kalman_vel_var, width=10).grid(row=kfk, column=1, sticky='w', padx=8); kfk += 1
+		help_line(kf, 'kalman_process_noise_vel').grid(row=kfk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); kfk += 1
+		help_label(kf, 'Measurement noise', 'kalman_measurement_noise').grid(row=kfk, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.kalman_meas_var = tk.DoubleVar(value=0.2)
-		ttk.Entry(tab4, textvariable=self.kalman_meas_var, width=10).grid(row=k, column=1, sticky='w', padx=8); k += 1
-		help_line(tab4, 'kalman_measurement_noise').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+		ttk.Entry(kf, textvariable=self.kalman_meas_var, width=10).grid(row=kfk, column=1, sticky='w', padx=8); kfk += 1
+		help_line(kf, 'kalman_measurement_noise').grid(row=kfk, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); kfk += 1
+
+		# Show only the parameter frame that matches the selected tracker.
+		def _update_tracker_rows(*_):
+			if self.tracker_type_var.get() in ('botsort', 'bytetrack'):
+				self.botsort_frame.grid(); self.kalman_frame.grid_remove()
+			else:
+				self.kalman_frame.grid(); self.botsort_frame.grid_remove()
+		self.tracker_type_var.trace_add('write', lambda *a: (_update_tracker_rows(), self._set_dirty()))
+		_update_tracker_rows()
 
 		# Drone motion correction subsection (post-processing on the tracking CSV)
 		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
@@ -1896,6 +1953,15 @@ class SettingsEditorApp(tk.Tk):
 		self.dominant_source_var.set(d.get('dominant_source', fallback='confidence'))
 
 		# tracking
+		# Setting tracker_type fires its trace, which shows/hides the matching
+		# parameter frame.
+		self.tracker_type_var.set(d.get('tracker_type', fallback='botsort'))
+		self.tracker_high_var.set(float(d.get('tracker_track_high_thresh', fallback='0.5')))
+		self.tracker_low_var.set(float(d.get('tracker_track_low_thresh', fallback='0.1')))
+		self.tracker_new_var.set(float(d.get('tracker_new_track_thresh', fallback='0.6')))
+		self.tracker_buffer_var.set(int(d.get('tracker_track_buffer', fallback='30')))
+		self.tracker_match_var.set(float(d.get('tracker_match_thresh', fallback='0.8')))
+		self.tracker_gmc_var.set(d.get('tracker_gmc_method', fallback='sparseOptFlow'))
 		self.match_distance_var.set(int(d.get('match_distance_thresh', fallback='200')))
 		self.delete_after_var.set(int(d.get('delete_after_missed', fallback='5')))
 		self.centroid_merge_var.set(int(d.get('centroid_merge_thresh', fallback='50')))
@@ -2420,6 +2486,13 @@ class SettingsEditorApp(tk.Tk):
 		new_default['secondary_conf_thresh'] = str(self.secondary_conf_var.get())
 
 		# tracking
+		new_default['tracker_type'] = self.tracker_type_var.get()
+		new_default['tracker_track_high_thresh'] = str(self.tracker_high_var.get())
+		new_default['tracker_track_low_thresh'] = str(self.tracker_low_var.get())
+		new_default['tracker_new_track_thresh'] = str(self.tracker_new_var.get())
+		new_default['tracker_track_buffer'] = str(self.tracker_buffer_var.get())
+		new_default['tracker_match_thresh'] = str(self.tracker_match_var.get())
+		new_default['tracker_gmc_method'] = self.tracker_gmc_var.get()
 		new_default['match_distance_thresh'] = str(self.match_distance_var.get())
 		new_default['delete_after_missed'] = str(self.delete_after_var.get())
 		new_default['centroid_merge_thresh'] = str(self.centroid_merge_var.get())
