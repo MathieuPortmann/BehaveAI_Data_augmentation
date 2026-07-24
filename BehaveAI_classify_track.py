@@ -1527,3 +1527,15 @@ if __name__ == '__main__':
 		import traceback
 		print(f"Drone motion correction failed: {e}")
 		traceback.print_exc()
+
+	# Auto-launch metric geometry when enabled (disabled -> no behaviour change).
+	# Runs after drone correction so it can consume the corrected CSV if present.
+	try:
+		if config['DEFAULT'].get('metric_enabled', 'false').lower() == 'true':
+			from BehaveAI_metric_geometry import run_metric_geometry
+			print("\nLaunching metric geometry (flight-log -> metres)...")
+			run_metric_geometry(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Metric geometry failed: {e}")
+		traceback.print_exc()

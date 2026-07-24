@@ -2477,6 +2477,27 @@ class SettingsEditorApp(tk.Tk):
 		new_default['complex_synchrony_high'] = str(self.complex_synchrony_high_var.get())
 		new_default['complex_candidate_topk'] = str(self.complex_candidate_topk_var.get())
 
+		# ---- preserve metric-geometry keys (not yet exposed as widgets) ----
+		# on_save rebuilds DEFAULT from scratch, so carry forward any metric_*
+		# keys already on disk (incl. per-drone metric_fpx_* checkerboard
+		# overrides) so a settings save never silently drops them.
+		try:
+			prev_default = dict(self.cfg['DEFAULT']) if 'DEFAULT' in self.cfg else {}
+		except Exception:
+			prev_default = {}
+		_metric_defaults = {
+			'metric_enabled': 'false',
+			'metric_focal_len_mm': '24.0',
+			'metric_sensor_width_mm': '36.0',
+			'metric_roll_max_deg': '3.0',
+			'metric_horizon_margin_px': '50',
+		}
+		for mk, mv in _metric_defaults.items():
+			new_default[mk] = prev_default.get(mk, mv)
+		for mk, mv in prev_default.items():
+			if mk.startswith('metric_fpx_'):
+				new_default[mk] = mv
+
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
 			self.cfg['kalman'] = {}

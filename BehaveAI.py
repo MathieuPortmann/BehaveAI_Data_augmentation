@@ -784,6 +784,20 @@ drone_correction_smoothing_window = 7
 # If static features are persistently too few, smooth-only (no optical-flow correction).
 drone_correction_fallback_smoothing = true
 
+# === Metric geometry (pixels -> metres, from flight-log telemetry) ===
+# Master switch; off = no behaviour change. Needs a <video>.flightlog.csv sidecar.
+metric_enabled = false
+# Camera focal length (35mm-equivalent, mm) and reference sensor width (mm) used
+# to derive the pixel focal length when no per-drone checkerboard override is set.
+metric_focal_len_mm = 24.0
+metric_sensor_width_mm = 36.0
+# Max |gimbal roll| (deg) tolerated before a frame's metric result is flagged 'uncertain'.
+metric_roll_max_deg = 3.0
+# Min pixels below the horizon line required, else flagged 'uncertain' (near-horizon = huge error).
+metric_horizon_margin_px = 50
+# Optional per-drone pixel-focal overrides from a checkerboard calibration, e.g.:
+# metric_fpx_Mini4Pro = 2560.0
+
 # === Intra-video Re-Identification ===
 # Master switch for re-identifying horses that reappear within the same video.
 reid_enabled = true

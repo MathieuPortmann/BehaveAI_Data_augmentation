@@ -120,6 +120,7 @@ def load_tracking_csv(csv_path):
 	used_corrected = 'x_corrected' in fieldnames and 'y_corrected' in fieldnames
 	has_vel = 'vx_corrected' in fieldnames and 'vy_corrected' in fieldnames
 	has_bbox = all(c in fieldnames for c in ('x1', 'y1', 'x2', 'y2'))
+	has_metric = 'X_m' in fieldnames and 'Y_m' in fieldnames
 	if not used_corrected:
 		print(f"  NOTE: {os.path.basename(csv_path)} has no corrected columns — using raw (x, y).")
 	if not has_bbox:
@@ -128,6 +129,7 @@ def load_tracking_csv(csv_path):
 
 	present = defaultdict(list)
 	pos, vel, box, diag, prim, sec = {}, {}, {}, {}, {}, {}
+	pos_m = {}                                        # metric ground coords (X_m, Y_m) when present
 	id_frames = defaultdict(list)
 
 	for r in rows:
@@ -160,6 +162,11 @@ def load_tracking_csv(csv_path):
 					diag[(frame, tid)] = float(np.hypot(x2 - x1, y2 - y1))
 			except (ValueError, TypeError):
 				pass
+		if has_metric and r.get('X_m', '') != '' and r.get('metric_quality', '') != 'none':
+			try:
+				pos_m[(frame, tid)] = (float(r['X_m']), float(r['Y_m']))
+			except (ValueError, TypeError):
+				pass
 
 	# Compute velocities by finite differences when corrected velocities are absent.
 	if not has_vel:
@@ -181,8 +188,10 @@ def load_tracking_csv(csv_path):
 		'present': present,
 		'pos': pos, 'vel': vel, 'box': box, 'diag': diag,
 		'prim': prim, 'sec': sec,
+		'pos_m': pos_m,
 		'id_frames': {t: sorted(fs) for t, fs in id_frames.items()},
 		'has_bbox': has_bbox, 'used_corrected': used_corrected,
+		'has_metric': has_metric and bool(pos_m),
 	}
 
 
@@ -314,6 +323,7 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 	body_len_ref (NOT the pair mean), so mare-foal contact is handled correctly.
 	"""
 	ref = body_len_ref if body_len_ref and body_len_ref > 0 else 1.0
+	pos_m = track_data.get('pos_m', {})
 	rows = []
 	for f in track_data['frames']:
 		ids = track_data['present'][f]
@@ -329,6 +339,11 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 				dist = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
 				if dist > max_distance:
 					continue
+				# Real-world ground distance (metres) when both endpoints have a
+				# metric position; None otherwise (pixel features are unaffected).
+				pma, pmb = pos_m.get((f, a)), pos_m.get((f, b))
+				distance_m = (math.hypot(pma[0] - pmb[0], pma[1] - pmb[1])
+							  if pma is not None and pmb is not None else None)
 				va = track_data['vel'].get((f, a), (0.0, 0.0))
 				vb = track_data['vel'].get((f, b), (0.0, 0.0))
 				speed_a = math.hypot(va[0], va[1]) / ref
@@ -343,6 +358,7 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 					'source_id': a, 'target_id': b,
 					'distance': dist,
 					'distance_bodylen': dist_bl,
+					'distance_m': distance_m,
 					'speed_A': speed_a, 'speed_B': speed_b,
 					'rel_speed': speed_a - speed_b,
 					'speed_similarity': _cosine(va, vb),
@@ -604,6 +620,7 @@ def build_interaction_graph(pairwise, nodes, granularity="per_interaction",
 			'frame': r['frame'], 'source_id': r['source_id'], 'target_id': r['target_id'],
 			'weight': 1.0,
 			'distance_bodylen': round(r['distance_bodylen'], 4),
+			'distance_m': ('' if r.get('distance_m') is None else round(r['distance_m'], 3)),
 			'in_contact': int(bool(r['in_contact'])),
 			'speed_similarity': round(r['speed_similarity'], 4),
 			'approach_rate': round(r['approach_rate'], 4),
@@ -759,6 +776,7 @@ _EDGE_COLS = {
 					'class_source_primary', 'class_source_secondary',
 					'class_target_primary', 'class_target_secondary'],
 	'per_frame': ['frame', 'source_id', 'target_id', 'weight', 'distance_bodylen',
+				  'distance_m',
 				  'in_contact', 'speed_similarity', 'approach_rate',
 				  'class_source_primary', 'class_source_secondary',
 				  'class_target_primary', 'class_target_secondary'],
@@ -806,10 +824,12 @@ def run_complex_features(config_path):
 	output_dir = output_dir_raw if os.path.isabs(output_dir_raw) \
 		else os.path.join(project_dir, output_dir_raw)
 
-	corrected = sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv')))
+	# Preference: metric CSV (superset with X_m/Y_m) > drone-corrected > raw.
 	jobs = {}
-	for p in corrected:
-		jobs[os.path.basename(p).replace('_tracking_corrected.csv', '')] = p
+	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_metric.csv'))):
+		jobs[os.path.basename(p).replace('_tracking_metric.csv', '')] = p
+	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):
+		jobs.setdefault(os.path.basename(p).replace('_tracking_corrected.csv', ''), p)
 	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):
 		jobs.setdefault(os.path.basename(p).replace('_tracking.csv', ''), p)
 
