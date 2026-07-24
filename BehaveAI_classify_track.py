@@ -111,6 +111,71 @@ def load_model_with_ncnn_preference(weights_path, task):
 # --------------------------------------------------------------------
 
 
+# --- SAHI sliced-inference helpers -----------------------------------
+# All lazy-imported so this module still loads when sahi is not installed
+# (sahi is only needed once a sahi_enabled_* flag is turned on).
+
+
+def build_sahi_model(yolo_model, conf, image_size=640):
+	"""Wrap an ALREADY-LOADED ultralytics YOLO object in a SAHI detection model.
+
+	Passing the in-memory object (model=...) rather than a path means SAHI never
+	re-loads from disk, so it is indifferent to a .pt vs an NCNN-exported backend.
+	Returns None on any failure so the caller transparently falls back to plain
+	whole-frame .predict(). Newer sahi uses model_type="ultralytics"; older
+	releases only know "yolov8" — try both.
+	"""
+	try:
+		from sahi import AutoDetectionModel
+	except Exception as e:
+		print(f"SAHI unavailable ({e}); using whole-frame detection.")
+		return None
+	try:
+		import torch
+		device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+	except Exception:
+		device = 'cpu'
+	for model_type in ('ultralytics', 'yolov8'):
+		try:
+			return AutoDetectionModel.from_pretrained(
+				model_type=model_type, model=yolo_model,
+				confidence_threshold=conf, device=device, image_size=image_size)
+		except Exception as e:
+			last_err = e
+	print(f"SAHI wrap failed ({last_err}); using whole-frame detection.")
+	return None
+
+
+def sahi_detect(sahi_model, image, class_names, source,
+				slice_h, slice_w, overlap_h, overlap_w,
+				pp_type, pp_metric, pp_thresh, standard_pred):
+	"""Run SAHI sliced prediction on one image and return detections in the same
+	dict shape the whole-frame path produces. SAHI already remaps tile-local
+	boxes to full-image coordinates and runs cross-tile NMS, so coords are
+	full-frame xyxy exactly like model.predict() gives."""
+	from sahi.predict import get_sliced_prediction
+	result = get_sliced_prediction(
+		image, sahi_model,
+		slice_height=slice_h, slice_width=slice_w,
+		overlap_height_ratio=overlap_h, overlap_width_ratio=overlap_w,
+		postprocess_type=pp_type, postprocess_match_metric=pp_metric,
+		postprocess_match_threshold=pp_thresh,
+		perform_standard_pred=standard_pred, verbose=0)
+	dets = []
+	for op in result.object_prediction_list:
+		x1, y1, x2, y2 = op.bbox.to_xyxy()
+		dets.append({
+			'coords': (int(x1), int(y1), int(x2), int(y2)),
+			'primary_class': class_names[int(op.category.id)],
+			'primary_conf': float(op.score.value),
+			'source': source,
+			'primary_class_combined': '',
+			'primary_conf_combined': 0.0,
+		})
+	return dets
+# --------------------------------------------------------------------
+
+
 
 def move_to_expected(project_path, run_name="train", runs_root="runs"):
     """
@@ -308,6 +373,29 @@ try:
 	use_ncnn = config['DEFAULT']['use_ncnn'].lower()
 	primary_conf_thresh = float(config['DEFAULT'].get('primary_conf_thresh', '0.5'))
 	secondary_conf_thresh = float(config['DEFAULT'].get('secondary_conf_thresh', '0.5'))
+
+	# --- SAHI sliced inference (small-object detection) ---
+	# Optional, per-stream, OFF by default: a project whose INI predates these
+	# keys (or leaves them false) detects exactly as before. When enabled, the
+	# full 4K frame is diced into native-resolution tiles so a ~60px horse is
+	# fed to the model at ~60px instead of being shrunk to ~10px by the 640
+	# whole-frame resize. Slicing every tile is 20-40x slower, hence per-stream
+	# switches plus an auto-skip when the frame is not meaningfully larger than a
+	# tile. Detection confidence stays primary_conf_thresh here (the decoupled
+	# low threshold arrives with the BoT-SORT tracker, which filters after
+	# tracking); SAHI only changes HOW the frame is fed to the detector.
+	sahi_enabled_static = config['DEFAULT'].get('sahi_enabled_static', 'false').lower() == 'true'
+	sahi_enabled_motion = config['DEFAULT'].get('sahi_enabled_motion', 'false').lower() == 'true'
+	sahi_slice_height = int(config['DEFAULT'].get('sahi_slice_height', '640'))
+	sahi_slice_width = int(config['DEFAULT'].get('sahi_slice_width', '640'))
+	sahi_overlap_height_ratio = float(config['DEFAULT'].get('sahi_overlap_height_ratio', '0.2'))
+	sahi_overlap_width_ratio = float(config['DEFAULT'].get('sahi_overlap_width_ratio', '0.2'))
+	sahi_postprocess_type = config['DEFAULT'].get('sahi_postprocess_type', 'NMS')
+	sahi_postprocess_match_metric = config['DEFAULT'].get('sahi_postprocess_match_metric', 'IOS')
+	sahi_postprocess_match_threshold = float(config['DEFAULT'].get('sahi_postprocess_match_threshold', '0.5'))
+	sahi_perform_standard_pred = config['DEFAULT'].get('sahi_perform_standard_pred', 'false').lower() == 'true'
+	sahi_min_dim_factor = float(config['DEFAULT'].get('sahi_min_dim_factor', '1.5'))
+
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
 
@@ -1003,6 +1091,21 @@ if __name__ == '__main__':
 			else:
 				model_motion = YOLO(primary_motion_model_path)
 
+		# Optional SAHI sliced-inference wrappers, built once per video. Only when
+		# the stream flag is on AND the (post-scale) frame is meaningfully larger
+		# than a tile — otherwise tiling is pure overhead. Any failure leaves the
+		# wrapper None and the detection block falls back to whole-frame .predict.
+		sahi_model_static = None
+		sahi_model_motion = None
+		_sahi_worth_it = max(w, h) > max(sahi_slice_width, sahi_slice_height) * sahi_min_dim_factor
+		if (sahi_enabled_static or sahi_enabled_motion) and not _sahi_worth_it:
+			print(f"SAHI: frame {w}x{h} not larger than tile x {sahi_min_dim_factor:g}"
+				  f" — tiling skipped, using whole-frame detection.")
+		if sahi_enabled_static and _sahi_worth_it and primary_static_classes:
+			sahi_model_static = build_sahi_model(model_static, primary_conf_thresh)
+		if sahi_enabled_motion and _sahi_worth_it and primary_motion_classes:
+			sahi_model_motion = build_sahi_model(model_motion, primary_conf_thresh)
+
 
 		# Build the optional Re-ID registry. max_disappeared is a pruning guard
 		# (in frames) derived from the per-video fps; it is NOT a hard match limit.
@@ -1109,39 +1212,55 @@ if __name__ == '__main__':
 				# Collect all primary detections
 				all_detections = []
 
-				# Primary static detection
+				# Primary static detection (SAHI-tiled when enabled, else whole-frame)
 				if primary_static_classes:
-					results_static = model_static.predict(frame, conf=primary_conf_thresh, verbose=False)
-					for box in results_static[0].boxes:
-						coords = tuple(map(int, box.xyxy[0].tolist()))
-						class_idx = int(box.cls[0])
-						class_name = primary_static_classes[class_idx]
-						conf = float(box.conf[0])
-						all_detections.append({
-							'coords': coords,
-							'primary_class': class_name,
-							'primary_conf': conf,
-							'source': 'static',
-							'primary_class_combined': '',
-							'primary_conf_combined': 0.0
-						})
+					if sahi_model_static is not None:
+						all_detections.extend(sahi_detect(
+							sahi_model_static, frame, primary_static_classes, 'static',
+							sahi_slice_height, sahi_slice_width,
+							sahi_overlap_height_ratio, sahi_overlap_width_ratio,
+							sahi_postprocess_type, sahi_postprocess_match_metric,
+							sahi_postprocess_match_threshold, sahi_perform_standard_pred))
+					else:
+						results_static = model_static.predict(frame, conf=primary_conf_thresh, verbose=False)
+						for box in results_static[0].boxes:
+							coords = tuple(map(int, box.xyxy[0].tolist()))
+							class_idx = int(box.cls[0])
+							class_name = primary_static_classes[class_idx]
+							conf = float(box.conf[0])
+							all_detections.append({
+								'coords': coords,
+								'primary_class': class_name,
+								'primary_conf': conf,
+								'source': 'static',
+								'primary_class_combined': '',
+								'primary_conf_combined': 0.0
+							})
 
-				# Primary motion detection
+				# Primary motion detection (SAHI-tiled when enabled, else whole-frame)
 				if primary_motion_classes:
-					results_motion = model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
-					for box in results_motion[0].boxes:
-						coords = tuple(map(int, box.xyxy[0].tolist()))
-						class_idx = int(box.cls[0])
-						class_name = primary_motion_classes[class_idx]
-						conf = float(box.conf[0])
-						all_detections.append({
-							'coords': coords,
-							'primary_class': class_name,
-							'primary_conf': conf,
-							'source': 'motion',
-							'primary_class_combined': '',
-							'primary_conf_combined': 0.0
-						})
+					if sahi_model_motion is not None:
+						all_detections.extend(sahi_detect(
+							sahi_model_motion, motion_image, primary_motion_classes, 'motion',
+							sahi_slice_height, sahi_slice_width,
+							sahi_overlap_height_ratio, sahi_overlap_width_ratio,
+							sahi_postprocess_type, sahi_postprocess_match_metric,
+							sahi_postprocess_match_threshold, sahi_perform_standard_pred))
+					else:
+						results_motion = model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
+						for box in results_motion[0].boxes:
+							coords = tuple(map(int, box.xyxy[0].tolist()))
+							class_idx = int(box.cls[0])
+							class_name = primary_motion_classes[class_idx]
+							conf = float(box.conf[0])
+							all_detections.append({
+								'coords': coords,
+								'primary_class': class_name,
+								'primary_conf': conf,
+								'source': 'motion',
+								'primary_class_combined': '',
+								'primary_conf_combined': 0.0
+							})
 
 
 				# Merge detections based on proximity
