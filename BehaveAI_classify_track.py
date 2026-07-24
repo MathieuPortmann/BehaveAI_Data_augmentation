@@ -1771,6 +1771,19 @@ if __name__ == '__main__':
 		print(f"Drone motion correction failed: {e}")
 		traceback.print_exc()
 
+	# Auto-launch offline tracklet stitching when enabled. Runs AFTER drone
+	# correction so it stitches on the stabilised (x_corrected) coordinates,
+	# which are comparable across the whole clip; disabled -> no behaviour change.
+	try:
+		if config['DEFAULT'].get('stitch_enabled', 'false').lower() == 'true':
+			from BehaveAI_stitch_tracklets import run_stitch_project
+			print("\nLaunching offline tracklet stitching...")
+			run_stitch_project(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Tracklet stitching failed: {e}")
+		traceback.print_exc()
+
 	# Auto-launch metric geometry when enabled (disabled -> no behaviour change).
 	# Runs after drone correction so it can consume the corrected CSV if present.
 	try:

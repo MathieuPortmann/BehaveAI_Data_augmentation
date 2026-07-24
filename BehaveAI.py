@@ -798,6 +798,26 @@ metric_horizon_margin_px = 50
 # Optional per-drone pixel-focal overrides from a checkerboard calibration, e.g.:
 # metric_fpx_Mini4Pro = 2560.0
 
+# === Offline tracklet stitching (post-tracker, non-causal) ===
+# Re-links the causal tracker's short tracklets into longer identities over the
+# whole clip, on kinematics only. Off = no behaviour change. Runs after drone
+# correction (stitches on the stabilised x_corrected coordinates).
+stitch_enabled = false
+# Physical speed gate in pixels/frame on the stabilised frame (an implied speed
+# above this can't be the same animal). On fixed-altitude clips this is a plain
+# px/frame cap; with a flight log it should track altitude (see resolve_speed_gate).
+stitch_max_speed_px_per_frame = 60
+# A link is kept only if its normalised gap cost (0..1) is below this -- i.e.
+# cheaper than leaving the tracklets unlinked.
+stitch_max_link_cost = 0.5
+# Minimum samples for a tracklet to carry a velocity estimate (shorter still link).
+stitch_min_tracklet_len = 2
+# Refuse links whose endpoints have correction_quality 'none' (unreliable position).
+stitch_quality_gate = true
+# Field-recorded group size, if known. Purely a diagnostic in the stitch report;
+# NEVER used as a constraint (0 / blank = unknown).
+expected_group_size = 0
+
 # === Intra-video Re-Identification ===
 # Master switch for re-identifying horses that reappear within the same video.
 reid_enabled = true
