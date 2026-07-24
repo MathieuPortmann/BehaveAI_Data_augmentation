@@ -575,86 +575,10 @@ PARAM_HELP = {
         "influence": "On = degrade gracefully to smoothing-only; off = leave those frames uncorrected.",
     },
 
-    # ---------------- Re-Identification ----------------
-    "reid_enabled": {
-        "short": "Re-assign the same ID to a subject that reappears in the same video.",
-        "what": "Master switch for intra-video re-identification.",
-        "influence": "Off reproduces the original tracker exactly. On reduces ID switches after "
-                     "occlusions/exits, at some extra compute.",
-    },
-    "reid_method": {
-        "short": "Appearance backend used to recognise a subject that reappears.",
-        "what": "How visual identity is compared: histogram (colour, no torch), embedding "
-                "(MobileNetV3), or megadescriptor (timm).",
-        "influence": "histogram is fast and dependency-free but weaker; embedding/megadescriptor are "
-                     "stronger but need torch and fall back to histogram if it is unavailable.",
-    },
-    "reid_similarity_threshold": {
-        "short": "Cosine similarity gate for the embedding / megadescriptor methods.",
-        "what": "Minimum appearance similarity to accept a match (embedding methods).",
-        "influence": "Higher = stricter, fewer wrong merges but more missed re-IDs; acts as a weak "
-                     "tie-breaker alongside the spatial gate.",
-    },
-    "reid_histogram_min_similarity": {
-        "short": "Minimum colour-histogram similarity to accept a match (histogram method only).",
-        "what": "Appearance gate used only when method = histogram/grid.",
-        "influence": "Below this, identity relies on position/time alone. Ignored when method = "
-                     "embedding.",
-    },
-    "reid_max_disappeared": {
-        "short": "How long (seconds) a vanished ID is kept before being pruned.",
-        "what": "Registry pruning guard — NOT a hard match limit.",
-        "influence": "Longer keeps identities available after long absences (more memory); it does "
-                     "not by itself force or block a match.",
-    },
-    "reid_max_position": {
-        "short": "Max pixel distance for the spatio-temporal recovery gate.",
-        "what": "The dominant matching signal: how far a subject may have moved to still be the same.",
-        "influence": "Too small misses fast/teleporting reappearances; too large risks swapping "
-                     "nearby subjects.",
-    },
     "ab_min_classified": {
         "short": "Min classified frames for an ID to count as a group member (0 = skip).",
         "what": "Activity-budget filter on how much behaviour an ID must have to be counted.",
         "influence": "Higher removes fleeting/spurious IDs from group statistics; 0 disables the filter.",
-    },
-    "reid_descriptor": {
-        "short": "Spatial layout of the appearance descriptor: global or grid.",
-        "what": "'global' = one masked HSV histogram of the box (legacy); 'grid' = one histogram per "
-                "foreground-aware cell, concatenated (a coarse body-parts descriptor).",
-        "influence": "'grid' captures local colour patterns (e.g. markings) for better discrimination "
-                     "but is more sensitive to pose/mask quality.",
-    },
-    "reid_grid": {
-        "short": "Grid layout 'RxC' for the grid descriptor (e.g. 3x3).",
-        "what": "Number of rows x columns the foreground box is split into for the grid descriptor.",
-        "influence": "Finer grids give more spatial detail but shorter per-cell histograms and more "
-                     "noise. Ignored when descriptor = global.",
-    },
-    "reid_foreground": {
-        "short": "Foreground masking method for the descriptor: hsv, sam2 or yoloseg.",
-        "what": "How the subject is separated from the background before building the descriptor.",
-        "influence": "hsv is fast and dependency-free; sam2/yoloseg are more accurate but need the "
-                     "segmentation model (fall back to hsv on failure).",
-    },
-    "reid_orient": {
-        "short": "Align the grid to the body's major axis (PCA on the mask).",
-        "what": "Rotates the grid so cells track head/tail orientation rather than image axes.",
-        "influence": "Improves cell-to-cell consistency across poses; adds a little cost and depends on "
-                     "a usable foreground mask. Ignored when descriptor = global.",
-    },
-    "reid_backbone": {
-        "short": "MegaDescriptor backbone tag for the embedding/megadescriptor method.",
-        "what": "Which BVRA MegaDescriptor variant to load (T-224, L-224, L-384, T-CNN-288).",
-        "influence": "Larger backbones (L-384) are more discriminative but slower and heavier; T-224 is "
-                     "the light default. Only used by the embedding/megadescriptor method.",
-    },
-    "reid_checkpoint": {
-        "short": "Path to a fine-tuned MegaDescriptor checkpoint (blank = auto-detect).",
-        "what": "Optional .pt produced by BehaveAI_reid_finetune.py. Empty auto-detects "
-                "model_reid/megadescriptor_finetuned.pt if present.",
-        "influence": "A project-specific checkpoint improves re-ID on your animals; blank uses the "
-                     "pretrained backbone.",
     },
     "ab_analysis_duration_s": {
         "short": "Seconds of each video used for the activity budget (0 = whole video).",

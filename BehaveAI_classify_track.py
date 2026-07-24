@@ -476,29 +476,9 @@ try:
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
 
-	# Intra-video Re-Identification parameters (TASK 2). reid_enabled=false ->
-	# original tracker behaviour exactly. The execution fallback is 'false' so a
-	# project whose INI predates this key tracks identically to before; the
-	# new-project template / settings GUI default it to 'true' (feature on).
-	reid_enabled = config['DEFAULT'].get('reid_enabled', 'false').lower() == 'true'
-	reid_method = config['DEFAULT'].get('reid_method', 'histogram')
-	# Appearance descriptor layout / foreground source. Defaults reproduce the
-	# legacy single-histogram behaviour exactly for INIs predating these keys.
-	reid_descriptor = config['DEFAULT'].get('reid_descriptor', 'global')
-	reid_grid = config['DEFAULT'].get('reid_grid', '3x3')
-	reid_foreground = config['DEFAULT'].get('reid_foreground', 'hsv')
-	reid_orient = config['DEFAULT'].get('reid_orient', 'false').lower() == 'true'
-	reid_backbone = config['DEFAULT'].get('reid_backbone', 'T-224')
-	# Optional fine-tuned MegaDescriptor checkpoint (BehaveAI_reid_finetune.py).
-	# Empty -> auto-detect the conventional project path if it exists.
-	reid_checkpoint = config['DEFAULT'].get('reid_checkpoint', '').strip()
-	if not reid_checkpoint:
-		_auto_ckpt = os.path.join(project_dir, 'model_reid', 'megadescriptor_finetuned.pt')
-		reid_checkpoint = _auto_ckpt if os.path.isfile(_auto_ckpt) else ''
-	reid_similarity_threshold = float(config['DEFAULT'].get('reid_similarity_threshold', '0.75'))
-	reid_histogram_min_similarity = float(config['DEFAULT'].get('reid_histogram_min_similarity', '0.60'))
-	reid_max_disappeared_seconds = float(config['DEFAULT'].get('reid_max_disappeared_seconds', '180.0'))
-	reid_max_position_distance = float(config['DEFAULT'].get('reid_max_position_distance', '500.0'))
+	# Intra-video appearance Re-ID was removed (uninformative at 15-50m altitude;
+	# long-gap recovery is now the offline stitching pass's job). The legacy Kalman
+	# tracker still accepts a reid_registry but it is always None now.
 	centroid_merge_thresh = float(config['DEFAULT'].get('centroid_merge_thresh', '50'))
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
@@ -1201,29 +1181,8 @@ if __name__ == '__main__':
 			sahi_model_motion = build_sahi_model(model_motion, primary_conf_thresh)
 
 
-		# Build the optional Re-ID registry. max_disappeared is a pruning guard
-		# (in frames) derived from the per-video fps; it is NOT a hard match limit.
+		# Appearance Re-ID was removed; the tracker runs without it.
 		reid_registry = None
-		if reid_enabled:
-			try:
-				from BehaveAI_reid import ReIDRegistry
-				_max_disappeared_frames = int(reid_max_disappeared_seconds * (fps if fps and fps > 0 else 25.0))
-				reid_registry = ReIDRegistry(
-					method=reid_method,
-					similarity_threshold=reid_similarity_threshold,
-					histogram_min_similarity=reid_histogram_min_similarity,
-					max_position_distance=reid_max_position_distance,
-					max_disappeared_frames=_max_disappeared_frames,
-					descriptor=reid_descriptor,
-					grid=reid_grid,
-					foreground=reid_foreground,
-					orient=reid_orient,
-					backbone=reid_backbone,
-					checkpoint=(reid_checkpoint or None))
-				print(f"Intra-video Re-ID enabled (method={reid_registry.method}).")
-			except Exception as e:
-				print(f"Re-ID unavailable ({e}); continuing without Re-ID.")
-				reid_registry = None
 
 		# Tracker: BoT-SORT/ByteTrack (default) or the legacy Kalman tracker.
 		bot_tracker = None

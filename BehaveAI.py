@@ -818,32 +818,6 @@ stitch_quality_gate = true
 # NEVER used as a constraint (0 / blank = unknown).
 expected_group_size = 0
 
-# === Intra-video Re-Identification ===
-# Master switch for re-identifying horses that reappear within the same video.
-reid_enabled = true
-# Appearance descriptor: histogram (no torch) | embedding (needs torch).
-reid_method = histogram
-# Embedding appearance similarity gate (cosine; weak tie-breaker).
-reid_similarity_threshold = 0.75
-# Histogram-specific minimum similarity (0..1) to accept an appearance match;
-# below this, appearance is ignored and only the spatio-temporal gate decides.
-reid_histogram_min_similarity = 0.60
-# Registry pruning guard in seconds (NOT a hard match limit).
-reid_max_disappeared_seconds = 180.0
-# Spatial plausibility gate in px (primary matching signal).
-reid_max_position_distance = 500.0
-# Appearance descriptor layout: global (legacy single histogram) | grid (body-parts).
-reid_descriptor = global
-# Grid layout RxC for the grid descriptor.
-reid_grid = 3x3
-# Foreground masking for the descriptor: hsv | sam2 | yoloseg.
-reid_foreground = hsv
-# Align the grid to the body's major axis (PCA on the foreground mask).
-reid_orient = false
-# MegaDescriptor backbone (embedding/megadescriptor method): T-224 | L-224 | L-384 | T-CNN-288.
-reid_backbone = T-224
-# Optional fine-tuned MegaDescriptor checkpoint; empty = auto-detect project path.
-reid_checkpoint =
 # Min classified frames for group_member in the activity budget (0 = skip).
 ab_min_classified_frames = 5
 

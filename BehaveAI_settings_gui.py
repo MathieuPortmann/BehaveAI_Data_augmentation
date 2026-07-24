@@ -616,13 +616,8 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_window_var  = tk.IntVar(value=7)
 		self.drone_fallback_smoothing_var = tk.BooleanVar(value=True)
 
-		# Intra-video Re-Identification parameters
-		self.reid_enabled_var          = tk.BooleanVar(value=True)
-		self.reid_method_var           = tk.StringVar(value='histogram')
-		self.reid_similarity_var       = tk.DoubleVar(value=0.75)
-		self.reid_histogram_min_var    = tk.DoubleVar(value=0.60)
-		self.reid_max_disappeared_var  = tk.DoubleVar(value=180.0)
-		self.reid_max_position_var     = tk.DoubleVar(value=500.0)
+		# Activity-budget membership gate (its Re-ID tab was removed; the control
+		# now lives on the Tracking tab).
 		self.ab_min_classified_var     = tk.IntVar(value=5)
 
 		# Reference body length parameters
@@ -1398,6 +1393,10 @@ class SettingsEditorApp(tk.Tk):
 		self.tracker_type_var.trace_add('write', lambda *a: (_update_tracker_rows(), self._set_dirty()))
 		_update_tracker_rows()
 
+		# Activity-budget membership gate (relocated here from the removed Re-ID tab).
+		_track_spin('Min classified frames (group member)', 'ab_min_classified',
+					self.ab_min_classified_var, 0, 100000)
+
 		# Drone motion correction subsection (post-processing on the tracking CSV)
 		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
 		ttk.Label(tab4, text='Drone motion correction', style='Section.TLabel').grid(row=k, column=0, sticky='w', padx=8); k += 1
@@ -1446,119 +1445,8 @@ class SettingsEditorApp(tk.Tk):
 		Tooltip(cb_fb, tooltip_text('drone_fallback_smoothing'))
 		help_line(tab4, 'drone_fallback_smoothing').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
-		# TAB: Re-Identification (intra-video) — placed after Tracking, before Display
-		tab_reid = self._scroll_tab(notebook, 'Re-Identification')
-
-		_help_font = ('TkDefaultFont', 8, 'italic')
-		rr = 0
-
-		cb_reid = ttk.Checkbutton(tab_reid, text='Enable intra-video Re-ID  ' + 'ⓘ',
-			variable=self.reid_enabled_var, command=self._set_dirty)
-		cb_reid.grid(row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); rr += 1
-		Tooltip(cb_reid, tooltip_text('reid_enabled'))
-		ttk.Label(tab_reid, text='Give a horse the same id after it reappears within the same video.',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		help_label(tab_reid, 'Appearance method', 'reid_method').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_reid, values=['histogram', 'embedding'],
-			textvariable=self.reid_method_var, state='readonly', width=12).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='histogram = colour, no torch; embedding needs torch (falls back to histogram).',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-		self.reid_method_var.trace_add('write', lambda *a: self._set_dirty())
-
-		help_label(tab_reid, 'Similarity threshold', 'reid_similarity_threshold').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
-			textvariable=self.reid_similarity_var, width=6, command=self._set_dirty).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Embedding appearance similarity gate (cosine); only a weak tie-breaker.',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		help_label(tab_reid, 'Histogram min similarity', 'reid_histogram_min_similarity').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_reid, from_=0.0, to=1.0, increment=0.01,
-			textvariable=self.reid_histogram_min_var, width=6, command=self._set_dirty).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Histogram method only: minimum colour-histogram similarity (0..1) to accept an '
-			'appearance match. Below this, identity relies on position/time only. Ignored when method = embedding.',
-			font=_help_font, foreground='grey', wraplength=420, justify='left').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		help_label(tab_reid, 'Max disappeared (seconds)', 'reid_max_disappeared').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
-			textvariable=self.reid_max_disappeared_var, width=10, command=self._set_dirty).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Registry pruning guard only — NOT a hard match limit.',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		help_label(tab_reid, 'Max position distance (px)', 'reid_max_position').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_reid, from_=1.0, to=100000.0, increment=10.0,
-			textvariable=self.reid_max_position_var, width=10, command=self._set_dirty).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Spatial plausibility gate — the primary matching signal.',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		help_label(tab_reid, 'Min classified frames (group member)', 'ab_min_classified').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_reid, from_=0, to=100000,
-			textvariable=self.ab_min_classified_var, width=8, command=self._set_dirty).grid(
-			row=rr, column=1, sticky='w', padx=8); rr += 1
-		ttk.Label(tab_reid, text='Activity budget: min frames with a known behaviour to be a group_member (0 = skip).',
-			font=_help_font, foreground='grey').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		# ---- Advanced ReID (appearance descriptor) ----
-		ttk.Label(tab_reid, text='Advanced ReID', style='Section.TLabel').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(12, 2)); rr += 1
-		ttk.Label(tab_reid, text='Shape of the appearance descriptor. Defaults reproduce the legacy '
-			'single-histogram behaviour; change only if you know the ReID body-part pipeline.',
-			font=_help_font, foreground='grey', wraplength=420, justify='left').grid(
-			row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); rr += 1
-
-		self.reid_descriptor_var = tk.StringVar(value='global')
-		help_label(tab_reid, 'Descriptor layout', 'reid_descriptor').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_reid, values=['global', 'grid'], textvariable=self.reid_descriptor_var,
-			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
-		self.reid_descriptor_var.trace_add('write', lambda *a: self._set_dirty())
-		help_line(tab_reid, 'reid_descriptor').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
-		self.reid_grid_var = tk.StringVar(value='3x3')
-		help_label(tab_reid, 'Grid (RxC)', 'reid_grid').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Entry(tab_reid, textvariable=self.reid_grid_var, width=8).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
-		self.reid_grid_var.trace_add('write', lambda *a: self._set_dirty())
-		help_line(tab_reid, 'reid_grid').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
-		self.reid_foreground_var = tk.StringVar(value='hsv')
-		help_label(tab_reid, 'Foreground masking', 'reid_foreground').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_reid, values=['hsv', 'sam2', 'yoloseg'], textvariable=self.reid_foreground_var,
-			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
-		self.reid_foreground_var.trace_add('write', lambda *a: self._set_dirty())
-		help_line(tab_reid, 'reid_foreground').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
-		self.reid_orient_var = tk.BooleanVar(value=False)
-		cb_orient = ttk.Checkbutton(tab_reid, text='Orient grid to body axis  ' + 'ⓘ',
-			variable=self.reid_orient_var, command=self._set_dirty)
-		cb_orient.grid(row=rr, column=0, columnspan=2, sticky='w', padx=8, pady=(6, 0)); rr += 1
-		Tooltip(cb_orient, tooltip_text('reid_orient'))
-		help_line(tab_reid, 'reid_orient').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
-		self.reid_backbone_var = tk.StringVar(value='T-224')
-		help_label(tab_reid, 'MegaDescriptor backbone', 'reid_backbone').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_reid, values=['T-224', 'L-224', 'L-384', 'T-CNN-288'], textvariable=self.reid_backbone_var,
-			state='readonly', width=12).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
-		self.reid_backbone_var.trace_add('write', lambda *a: self._set_dirty())
-		help_line(tab_reid, 'reid_backbone').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
-		self.reid_checkpoint_var = tk.StringVar(value='')
-		help_label(tab_reid, 'Fine-tuned checkpoint', 'reid_checkpoint').grid(row=rr, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Entry(tab_reid, textvariable=self.reid_checkpoint_var, width=40).grid(row=rr, column=1, sticky='w', padx=8); rr += 1
-		self.reid_checkpoint_var.trace_add('write', lambda *a: self._set_dirty())
-		help_line(tab_reid, 'reid_checkpoint').grid(row=rr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); rr += 1
-
 		# TAB: Interaction features / graph (TASK 4 primary output)
+		_help_font = ('TkDefaultFont', 8, 'italic')   # (was defined in the removed Re-ID tab)
 		tab_int = self._scroll_tab(notebook, 'Interaction')
 		ir = 0
 		ttk.Label(tab_int, text='Interaction features & graph',
@@ -1977,21 +1865,8 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_window_var.set(int(float(d.get('drone_correction_smoothing_window', fallback='7'))))
 		self.drone_fallback_smoothing_var.set(self._str_to_bool(d.get('drone_correction_fallback_smoothing', fallback='true')))
 
-		# intra-video re-identification
-		self.reid_enabled_var.set(self._str_to_bool(d.get('reid_enabled', fallback='true')))
-		self.reid_method_var.set(d.get('reid_method', fallback='histogram'))
-		self.reid_similarity_var.set(float(d.get('reid_similarity_threshold', fallback='0.75')))
-		self.reid_histogram_min_var.set(float(d.get('reid_histogram_min_similarity', fallback='0.60')))
-		self.reid_max_disappeared_var.set(float(d.get('reid_max_disappeared_seconds', fallback='180.0')))
-		self.reid_max_position_var.set(float(d.get('reid_max_position_distance', fallback='500.0')))
+		# activity-budget membership gate (Re-ID removed)
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
-		# advanced re-id appearance descriptor
-		self.reid_descriptor_var.set(d.get('reid_descriptor', fallback='global'))
-		self.reid_grid_var.set(d.get('reid_grid', fallback='3x3'))
-		self.reid_foreground_var.set(d.get('reid_foreground', fallback='hsv'))
-		self.reid_orient_var.set(self._str_to_bool(d.get('reid_orient', fallback='false')))
-		self.reid_backbone_var.set(d.get('reid_backbone', fallback='T-224'))
-		self.reid_checkpoint_var.set(d.get('reid_checkpoint', fallback=''))
 
 		# reference body length
 		self.foal_size_ratio_var.set(float(d.get('foal_size_ratio_thresh', fallback='0.7')))
@@ -2508,20 +2383,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['drone_correction_smoothing_window'] = str(self.drone_smoothing_window_var.get())
 		new_default['drone_correction_fallback_smoothing'] = str(self.drone_fallback_smoothing_var.get()).lower()
 
-		# intra-video re-identification
-		new_default['reid_enabled'] = str(self.reid_enabled_var.get()).lower()
-		new_default['reid_method'] = self.reid_method_var.get()
-		new_default['reid_similarity_threshold'] = str(self.reid_similarity_var.get())
-		new_default['reid_histogram_min_similarity'] = str(self.reid_histogram_min_var.get())
-		new_default['reid_max_disappeared_seconds'] = str(self.reid_max_disappeared_var.get())
-		new_default['reid_max_position_distance'] = str(self.reid_max_position_var.get())
+		# activity-budget membership gate (Re-ID removed)
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
-		new_default['reid_descriptor'] = self.reid_descriptor_var.get()
-		new_default['reid_grid'] = self.reid_grid_var.get()
-		new_default['reid_foreground'] = self.reid_foreground_var.get()
-		new_default['reid_orient'] = str(self.reid_orient_var.get()).lower()
-		new_default['reid_backbone'] = self.reid_backbone_var.get()
-		new_default['reid_checkpoint'] = self.reid_checkpoint_var.get().strip()
 
 		# reference body length
 		new_default['foal_size_ratio_thresh'] = str(self.foal_size_ratio_var.get())
