@@ -33,6 +33,9 @@ annot_static_crop/
 # Generated CSV outputs (additive pipeline artifacts)
 *_tracking.csv
 *_tracking_corrected.csv
+*_tracking_metric.csv
+*_tracking_stitched.csv
+*_stitch_report.txt
 *_interaction_edges.csv
 *_interaction_nodes.csv
 *_complex_behaviours.csv
@@ -44,3 +47,8 @@ activity_budget_suspects.csv
 # Generated project data and training runs
 projects/
 runs/
+
+# Reversible-removal staging area (never commit): retired files and code blocks
+# are moved here instead of being deleted outright, with trash/README.md as the
+# catalogue of what came from where and why.
+trash/
