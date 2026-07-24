@@ -62,3 +62,8 @@ onnxruntime
 ncnn
 urllib3==2.6.3
 timm>=0.9.16
+# SAHI (Slicing Aided Hyper Inference) — optional small-object detection for the
+# primary detectors (sahi_enabled_* in the INI, off by default). Imported lazily,
+# so the pipeline runs without it until a project turns tiling on. Pin the exact
+# resolved version once installed in BehaveAI.venv (check numpy/opencv compat).
+sahi
