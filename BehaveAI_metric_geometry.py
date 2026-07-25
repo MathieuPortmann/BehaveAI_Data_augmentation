@@ -296,13 +296,12 @@ def run_metric_geometry(config_path):
 	for fname, path in _build_index(clips_dir, ('.flightlog.csv',)).items():
 		log_index.setdefault(fname, path)
 
-	# Prefer the drone-corrected CSVs; fall back to raw tracking CSVs.
-	corrected = sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv')))
+	# Pick, per video, the most-processed CSV so X_m/Y_m are attached to the final
+	# (stitched) identities: stitched > drone-corrected > raw.
 	jobs = {}
-	for p in corrected:
-		jobs[os.path.basename(p).replace('_tracking_corrected.csv', '')] = p
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):
-		jobs.setdefault(os.path.basename(p).replace('_tracking.csv', ''), p)
+	for suf in ('_tracking_stitched.csv', '_tracking_corrected.csv', '_tracking.csv'):
+		for p in sorted(glob.glob(os.path.join(output_dir, '*' + suf))):
+			jobs.setdefault(os.path.basename(p)[:-len(suf)], p)
 
 	if not jobs:
 		print(f"Metric geometry: no tracking CSVs found in {output_dir}")
@@ -349,8 +348,10 @@ def _main():
 	args = parser.parse_args()
 
 	if args.csv is not None:
-		out = args.out or args.csv.replace('_tracking_corrected.csv', '_tracking_metric.csv').replace(
-			'_tracking.csv', '_tracking_metric.csv')
+		out = args.out or (args.csv
+			.replace('_tracking_stitched.csv', '_tracking_metric.csv')
+			.replace('_tracking_corrected.csv', '_tracking_metric.csv')
+			.replace('_tracking.csv', '_tracking_metric.csv'))
 		metric_video_tracking(args.target, args.csv, args.flightlog, out,
 							  focal_len_mm=args.focal_len_mm, sensor_width_mm=args.sensor_width_mm)
 		return

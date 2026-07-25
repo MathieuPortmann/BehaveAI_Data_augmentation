@@ -398,16 +398,29 @@ def run_activity_budget(config_path, fps_default=30.0):
 
     video_file_index = _build_video_index(input_dir)
 
-    # Collect all tracking CSVs from output_dir.
-    # Filter out CSVs whose stem ends with '_Training' — those come from
-    # training-only footage and must not be included in the activity budget.
-    _raw_csv_files = sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv')))
-    csv_files = [
-        p for p in _raw_csv_files
-        if not os.path.splitext(os.path.basename(p))[0]
-                  .replace('_tracking', '').endswith('_Training')
-    ]
-    skipped = len(_raw_csv_files) - len(csv_files)
+    # Pick, per video, the MOST-PROCESSED tracking CSV available. Each pipeline
+    # stage appends to the previous file, so the most-advanced one is a superset
+    # (final stitched identities, drone-corrected positions, metric columns). This
+    # runs last in the pipeline, so the budget is computed on the final ids.
+    _SUFFIXES = ('_tracking_metric.csv', '_tracking_stitched.csv',
+                 '_tracking_corrected.csv', '_tracking.csv')
+
+    def _video_stem(basename):
+        for suf in _SUFFIXES:
+            if basename.endswith(suf):
+                return basename[:-len(suf)]
+        return os.path.splitext(basename)[0]
+
+    best = {}   # video stem -> path of its most-processed CSV (first suffix wins)
+    for suf in _SUFFIXES:
+        for p in sorted(glob.glob(os.path.join(output_dir, '*' + suf))):
+            best.setdefault(_video_stem(os.path.basename(p)), p)
+
+    # Exclude training-only footage. NOTE: test the stem AFTER stripping the full
+    # suffix -- a naive '_tracking' strip left 'foo_Training_metric', which does
+    # not end with '_Training', so Training clips silently leaked into the budget.
+    csv_files = [p for stem, p in sorted(best.items()) if not stem.endswith('_Training')]
+    skipped = len(best) - len(csv_files)
     if skipped:
         print(f"Activity budget: skipped {skipped} Training CSV(s).")
     if not csv_files:
@@ -425,7 +438,7 @@ def run_activity_budget(config_path, fps_default=30.0):
     for csv_path in csv_files:
         # Derive video filename from CSV name:  foo_tracking.csv -> foo.MP4 (best guess)
         csv_basename   = os.path.basename(csv_path)
-        video_stem     = csv_basename.replace('_tracking.csv', '')
+        video_stem     = _video_stem(csv_basename)
         # Try to find matching video using the recursive index first,
         # then fall back to a direct path in input_dir or clips_dir.
         video_filename = video_stem  # fallback (no extension)

@@ -1709,16 +1709,6 @@ if __name__ == '__main__':
 	for vid in _all_input_videos:
 			process_video(vid)
 
-	# Auto-launch activity budget after all videos are processed
-	try:
-		from BehaveAI_activity_budget import run_activity_budget
-		print("\nLaunching activity budget analysis...")
-		run_activity_budget(config_path)
-	except Exception as e:
-		import traceback
-		print(f"Activity budget analysis failed: {e}")
-		traceback.print_exc()
-
 	# Auto-launch drone motion correction when enabled (disabled -> no behaviour change)
 	try:
 		if config['DEFAULT'].get('drone_correction_enabled', 'false').lower() == 'true':
@@ -1753,4 +1743,15 @@ if __name__ == '__main__':
 	except Exception as e:
 		import traceback
 		print(f"Metric geometry failed: {e}")
+		traceback.print_exc()
+
+	# Auto-launch the activity budget LAST, so it runs on the most-processed CSV
+	# per video (stitched identities + any metric columns), not the raw one.
+	try:
+		from BehaveAI_activity_budget import run_activity_budget
+		print("\nLaunching activity budget analysis...")
+		run_activity_budget(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Activity budget analysis failed: {e}")
 		traceback.print_exc()
