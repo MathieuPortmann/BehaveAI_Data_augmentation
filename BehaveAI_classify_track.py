@@ -1712,7 +1712,7 @@ if __name__ == '__main__':
 	# Auto-launch drone motion correction when enabled (disabled -> no behaviour change)
 	try:
 		if config['DEFAULT'].get('drone_correction_enabled', 'false').lower() == 'true':
-			from BehaveAI_drone_correction import run_drone_correction
+			from behaveai_drone import run_drone_correction
 			print("\nLaunching drone motion correction...")
 			run_drone_correction(config_path)
 	except Exception as e:
@@ -1737,7 +1737,7 @@ if __name__ == '__main__':
 	# Runs after drone correction so it can consume the corrected CSV if present.
 	try:
 		if config['DEFAULT'].get('metric_enabled', 'false').lower() == 'true':
-			from BehaveAI_metric_geometry import run_metric_geometry
+			from behaveai_drone import run_metric_geometry
 			print("\nLaunching metric geometry (flight-log -> metres)...")
 			run_metric_geometry(config_path)
 	except Exception as e:

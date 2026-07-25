@@ -39,9 +39,12 @@ import configparser
 
 import numpy as np
 
-from BehaveAI_flightlog import load_flightlog, sample_flightlog, flightlog_summary
-from BehaveAI_horizon_geometry import (
-	pixel_focal_length, horizon_row, ground_point_from_pixel)
+try:  # as a package member
+	from .flightlog import load_flightlog, sample_flightlog, flightlog_summary
+	from .horizon_geometry import pixel_focal_length, horizon_row, ground_point_from_pixel
+except ImportError:  # run directly from inside the package dir
+	from flightlog import load_flightlog, sample_flightlog, flightlog_summary
+	from horizon_geometry import pixel_focal_length, horizon_row, ground_point_from_pixel
 
 
 # ---------------------------------------------------------------------------

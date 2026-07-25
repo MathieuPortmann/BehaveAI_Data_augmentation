@@ -423,7 +423,10 @@ def _main():
 	print(_describe_horizon(result['y_horizon'], args.frame_height))
 
 	if args.srt:
-		from BehaveAI_srt_telemetry import parse_srt, focal_len_mm
+		try:
+			from .srt_telemetry import parse_srt, focal_len_mm
+		except ImportError:
+			from srt_telemetry import parse_srt, focal_len_mm
 		telemetry = parse_srt(args.srt)
 		rel_alts = [float(r['rel_alt']) for r in telemetry if 'rel_alt' in r]
 		focals = [focal_len_mm(r['focal_len']) for r in telemetry if 'focal_len' in r]
