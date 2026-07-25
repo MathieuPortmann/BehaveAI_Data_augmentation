@@ -820,6 +820,12 @@ expected_group_size = 0
 
 # Min classified frames for group_member in the activity budget (0 = skip).
 ab_min_classified_frames = 5
+# Min seconds a subject must be tracked to count as a group member (presence =
+# tracked frames / fps).
+ab_min_presence_seconds = 30
+# Isotropic pixel band at the frame edge used only to REPORT which side a
+# short-presence subject entered from (explains a flag, never decides it).
+ab_edge_margin_px = 100
 
 # === Reference body length ===
 # body_len_i / body_len_ref below this flags a likely foal.

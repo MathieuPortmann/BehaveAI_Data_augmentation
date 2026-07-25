@@ -883,16 +883,19 @@ PARAM_HELP = {
     },
 
     # ---------------- Activity budget ----------------
-    "ab_min_presence_ratio": {
-        "short": "Min fraction of frames a subject must be present to count as a group member.",
-        "what": "Stranger/visitor threshold for the activity budget.",
-        "influence": "Higher excludes brief visitors from group stats; lower includes transient IDs.",
+    "ab_min_presence_seconds": {
+        "short": "Min seconds a subject must be tracked to count as a group member.",
+        "what": "Stranger/visitor threshold for the activity budget, in absolute seconds "
+                "(presence = tracked frames / fps), not a fraction of the clip.",
+        "influence": "Higher excludes brief visitors from group stats; lower includes transient IDs. "
+                     "A member that joins mid-clip still accrues plenty of seconds.",
     },
-    "ab_border_zone_ratio": {
-        "short": "Width of the image border zone, as a fraction of image size.",
-        "what": "Edge band used to detect entering/leaving subjects.",
-        "influence": "Larger treats more of the frame edge as transit zone, affecting presence and "
-                     "stranger detection.",
+    "ab_edge_margin_px": {
+        "short": "Isotropic pixel band at the frame edge used to report side-of-entry.",
+        "what": "How close (in pixels, same on all four sides) a subject's first-appearance box must "
+                "be to a frame edge to be reported as having entered from that side.",
+        "influence": "Only explains a short-presence flag (which side it entered from); it never makes "
+                     "a subject a stranger on its own.",
     },
     "ab_group_type_separator": {
         "short": "Character separating fields in clip filenames.",

@@ -36,8 +36,13 @@ def load_activity_budget_config(config_path):
     d = config['DEFAULT']
 
     return {
-        'min_presence_ratio':    float(d.get('ab_min_presence_ratio',    '0.10')),
-        'border_zone_ratio':     float(d.get('ab_border_zone_ratio',     '0.15')),
+        # Group-membership thresholds, in physical units (not ratios):
+        #   min_presence_seconds -- seconds a subject must be tracked to be a member;
+        #   edge_margin_px       -- isotropic pixel band at the frame edge, used only
+        #                           to REPORT the side a short-presence subject entered
+        #                           from (explains a flag, never decides it).
+        'min_presence_seconds':  float(d.get('ab_min_presence_seconds', '30')),
+        'edge_margin_px':        float(d.get('ab_edge_margin_px',       '100')),
         'group_type_separator':  d.get('ab_group_type_separator',  '_'),
         'group_type_field_index': int(d.get('ab_group_type_field_index', '4')),
         'analysis_duration_s':   float(d.get('ab_analysis_duration_s',  '0')),
@@ -138,6 +143,7 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
     tracks = defaultdict(list)
     fps = 0.0
     frame_numbers = []
+    seen = set()   # (frame, tid) already taken -- keep the first row only
 
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -150,8 +156,24 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
                     continue
 
                 tid    = int(row['id'])
+
+                # Deduplicate on (frame, id): keep the first row for each pair so a
+                # subject is never double-counted in presence/behaviour.
+                if (frame, tid) in seen:
+                    continue
+                seen.add((frame, tid))
+
                 x      = float(row['x'])
                 y      = float(row['y'])
+
+                # Bounding box (columns x1..y2). Present in current CSVs; fall back
+                # to a zero-size box at the centroid for older files.
+                try:
+                    bx1 = float(row['x1']); by1 = float(row['y1'])
+                    bx2 = float(row['x2']); by2 = float(row['y2'])
+                except (KeyError, ValueError, TypeError):
+                    bx1 = bx2 = x
+                    by1 = by2 = y
 
                 # Choose the best available class label
                 # primary_motion_class takes precedence over primary_static_class
@@ -174,6 +196,7 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
                     'frame':    frame,
                     'x':        x,
                     'y':        y,
+                    'box':      (bx1, by1, bx2, by2),
                     'behavior': behavior,
                     'conf':     conf,
                 })
@@ -194,61 +217,69 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
 # Flag strangers
 # ---------------------------------------------------------------------------
 
-def flag_strangers(tracks, max_frame, video_width, video_height,
-                   min_presence_ratio, border_zone_ratio,
+def flag_strangers(tracks, max_frame, video_width, video_height, fps,
+                   min_presence_seconds, edge_margin_px,
                    manual_exclude_ids, min_classified_frames=0):
     """
     Decide for each track_id whether it is a group_member or a stranger.
 
     A group_member must satisfy all of:
-      1. presence_ratio >= min_presence_ratio,
-      2. first appearance NOT in the border zone (when combined with short presence),
-      3. at least min_classified_frames frames with behavior != 'unknown'
+      1. tracked presence >= min_presence_seconds (a stranger enters AND leaves;
+         a member that joins mid-clip still accrues plenty of seconds),
+      2. at least min_classified_frames frames with behavior != 'unknown'
          (0 = skip this criterion).
 
-    This is intra-video only — there is no inter-video / cross-session logic.
+    The side a subject FIRST appeared from (any frame edge within edge_margin_px,
+    isotropic, using its bounding box) is REPORTED to explain a short-presence
+    flag, but never excludes on its own -- a member joining from the top edge and
+    staying is a group_member.
 
-    Returns a dict: track_id -> {'individual_type': str,
-                                  'auto_flagged': bool,
-                                  'flag_reason': str}
+    presence_seconds = n_frames / fps: exact when the pipeline processes every
+    frame (frame_skip = 0); with frame_skip > 0 it under-reports proportionally.
+
+    This is intra-video only -- there is no inter-video / cross-session logic.
+
+    Returns a dict: track_id -> {'individual_type', 'auto_flagged', 'flag_reason',
+                                 'presence_seconds', 'first_frame', 'last_frame',
+                                 'entry_side'}.
     """
-    total_frames = max(max_frame, 1)
     results = {}
 
     for tid, rows in tracks.items():
-        n_frames     = len(rows)
-        presence_ratio = n_frames / total_frames
+        n_frames        = len(rows)
+        presence_seconds = n_frames / fps if fps and fps > 0 else 0.0
 
         first_frame  = min(r['frame'] for r in rows)
         last_frame   = max(r['frame'] for r in rows)
 
-        # Position at first appearance
-        first_row    = next(r for r in rows if r['frame'] == first_frame)
-        fx, fy       = first_row['x'], first_row['y']
-
-        # Border zone check (requires video dimensions)
-        in_border = False
+        # Bounding box at first appearance -> which frame edge(s) it entered from.
+        first_row = next(r for r in rows if r['frame'] == first_frame)
+        bx1, by1, bx2, by2 = first_row.get('box', (first_row['x'], first_row['y'],
+                                                    first_row['x'], first_row['y']))
+        sides = []
         if video_width and video_height and video_width > 0 and video_height > 0:
-            bx = border_zone_ratio * video_width
-            by = border_zone_ratio * video_height
-            in_border = (fx < bx or fx > video_width - bx or
-                         fy < by or fy > video_height - by)
+            if bx1 <= edge_margin_px:                sides.append('left')
+            if bx2 >= video_width - edge_margin_px:  sides.append('right')
+            if by1 <= edge_margin_px:                sides.append('top')
+            if by2 >= video_height - edge_margin_px: sides.append('bottom')
+        entry_side = ','.join(sides)
+        entered_from_side = bool(sides)
 
-        # Count classified frames (behavior != 'unknown') for criterion 3.
+        # Count classified frames (behavior != 'unknown') for criterion 2.
         n_classified = sum(1 for r in rows
                            if r.get('behavior') and r['behavior'] != 'unknown')
         is_unclassified = (min_classified_frames > 0
                            and n_classified < min_classified_frames)
 
         # Determine flag reason
-        is_manual   = tid in manual_exclude_ids
-        is_short    = presence_ratio < min_presence_ratio
-        is_border   = in_border and is_short  # border alone is not enough
+        is_manual     = tid in manual_exclude_ids
+        is_short      = presence_seconds < min_presence_seconds
+        is_side_entry = entered_from_side and is_short  # side alone is not enough
 
         if is_manual:
             reason = 'manual_exclude'
-        elif is_short and is_border:
-            reason = 'short_presence+border_entry'
+        elif is_side_entry:
+            reason = f'short_presence+side_entry({entry_side})'
         elif is_short:
             reason = 'short_presence'
         elif is_unclassified:
@@ -257,16 +288,16 @@ def flag_strangers(tracks, max_frame, video_width, video_height,
             reason = ''
 
         is_stranger  = is_manual or is_short or is_unclassified
-        auto_flagged = (is_short or is_border or is_unclassified) and not is_manual
+        auto_flagged = (is_short or is_unclassified) and not is_manual
 
         results[tid] = {
             'individual_type': 'stranger' if is_stranger else 'group_member',
             'auto_flagged':    auto_flagged,
             'flag_reason':     reason,
-            'presence_ratio':  round(presence_ratio, 4),
+            'presence_seconds': round(presence_seconds, 2),
             'first_frame':     first_frame,
             'last_frame':      last_frame,
-            'border_entry':    in_border,
+            'entry_side':      entry_side,
         }
 
     return results
@@ -310,8 +341,7 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
             'individual_type':  info['individual_type'],
             'auto_flagged':     info['auto_flagged'],
             'n_frames_present': n_frames_present,
-            'duration_s':       round(duration_s, 2),
-            'presence_ratio':   info['presence_ratio'],
+            'duration_s':       round(duration_s, 2),   # = tracked presence in seconds
         }
 
         total_classified = sum(behavior_frames.values())
@@ -527,8 +557,8 @@ def run_activity_budget(config_path, fps_default=30.0):
 
         # Flag strangers
         flag_info = flag_strangers(
-            tracks, max_frame, video_width, video_height,
-            cfg['min_presence_ratio'], cfg['border_zone_ratio'],
+            tracks, max_frame, video_width, video_height, fps,
+            cfg['min_presence_seconds'], cfg['edge_margin_px'],
             manual_exclude, min_classified_frames=cfg['min_classified_frames']
         )
 
@@ -555,12 +585,12 @@ def run_activity_budget(config_path, fps_default=30.0):
                 'group_type':            group_type,
                 'track_id':              tid,
                 'flag_reason':           info['flag_reason'],
-                'presence_ratio':        info['presence_ratio'],
+                'presence_seconds':      info['presence_seconds'],
                 'first_seen_frame':      info['first_frame'],
                 'last_seen_frame':       info['last_frame'],
                 'first_seen_timecode':   first_tc,
                 'last_seen_timecode':    last_tc,
-                'border_entry':          info['border_entry'],
+                'entry_side':            info['entry_side'],
                 'auto_flagged':          info['auto_flagged'],
                 'manual_exclude':        is_manual,
             })
@@ -576,7 +606,7 @@ def run_activity_budget(config_path, fps_default=30.0):
         # Build ordered fieldnames
         base_fields = ['video_filename', 'group_id', 'group_type',
                        'track_id', 'individual_type', 'auto_flagged',
-                       'n_frames_present', 'duration_s', 'presence_ratio']
+                       'n_frames_present', 'duration_s']
         behavior_fields = []
         for b in all_behaviors:
             behavior_fields += [f'behavior_{b}_s',
@@ -602,10 +632,10 @@ def run_activity_budget(config_path, fps_default=30.0):
         out4 = os.path.join(output_dir, 'activity_budget_suspects.csv')
         fieldnames4 = [
             'video_filename', 'group_id', 'group_type', 'track_id',
-            'flag_reason', 'presence_ratio',
+            'flag_reason', 'presence_seconds',
             'first_seen_frame', 'last_seen_frame',
             'first_seen_timecode', 'last_seen_timecode',
-            'border_entry', 'auto_flagged', 'manual_exclude',
+            'entry_side', 'auto_flagged', 'manual_exclude',
         ]
         with open(out4, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames4, extrasaction='ignore')

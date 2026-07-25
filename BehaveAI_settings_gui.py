@@ -601,8 +601,8 @@ class SettingsEditorApp(tk.Tk):
 		self.aug_temperature_prob_var = tk.DoubleVar(value=0)
 
 		# Activity budget parameters
-		self.ab_min_presence_ratio_var    = tk.DoubleVar(value=0.10)
-		self.ab_border_zone_ratio_var     = tk.DoubleVar(value=0.15)
+		self.ab_min_presence_seconds_var  = tk.DoubleVar(value=30.0)
+		self.ab_edge_margin_px_var        = tk.IntVar(value=100)
 		self.ab_group_type_separator_var  = tk.StringVar(value='_')
 		self.ab_group_type_field_index_var = tk.IntVar(value=4)
 
@@ -1288,8 +1288,8 @@ class SettingsEditorApp(tk.Tk):
 		help_line(tab3, 'dominant_source').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
 		# Activity budget parameters
-		self.ab_min_presence_ratio_var = tk.DoubleVar(value=0.10)
-		self.ab_border_zone_ratio_var  = tk.DoubleVar(value=0.15)
+		self.ab_min_presence_seconds_var = tk.DoubleVar(value=30.0)
+		self.ab_edge_margin_px_var       = tk.IntVar(value=100)
 		self.ab_group_type_separator_var = tk.StringVar(value='_')
 		self.ab_group_type_field_index_var = tk.IntVar(value=4)
 
@@ -1683,19 +1683,19 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab_ab, text='Activity budget', style='Section.TLabel').grid(
 			row=0, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 6))
 
-		help_label(tab_ab, 'Min presence ratio (stranger threshold)', 'ab_min_presence_ratio').grid(
+		help_label(tab_ab, 'Min presence (seconds) — stranger threshold', 'ab_min_presence_seconds').grid(
 			row=1, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_ab, from_=0.01, to=1.0, increment=0.01,
-			textvariable=self.ab_min_presence_ratio_var,
+		ttk.Spinbox(tab_ab, from_=0, to=100000, increment=1,
+			textvariable=self.ab_min_presence_seconds_var,
 			width=8, command=self._set_dirty).grid(row=1, column=1, sticky='w', padx=8)
-		help_line(tab_ab, 'ab_min_presence_ratio').grid(row=2, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
+		help_line(tab_ab, 'ab_min_presence_seconds').grid(row=2, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
-		help_label(tab_ab, 'Border zone ratio (stranger threshold)', 'ab_border_zone_ratio').grid(
+		help_label(tab_ab, 'Edge margin (px) — side-entry band', 'ab_edge_margin_px').grid(
 			row=3, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_ab, from_=0.01, to=0.5, increment=0.01,
-			textvariable=self.ab_border_zone_ratio_var,
+		ttk.Spinbox(tab_ab, from_=0, to=2000, increment=10,
+			textvariable=self.ab_edge_margin_px_var,
 			width=8, command=self._set_dirty).grid(row=3, column=1, sticky='w', padx=8)
-		help_line(tab_ab, 'ab_border_zone_ratio').grid(row=4, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
+		help_line(tab_ab, 'ab_edge_margin_px').grid(row=4, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4))
 
 		help_label(tab_ab, 'Filename field separator', 'ab_group_type_separator').grid(
 			row=5, column=0, sticky='w', padx=8, pady=(6, 0))
@@ -1934,8 +1934,8 @@ class SettingsEditorApp(tk.Tk):
 		self.aug_temperature_prob_var.set(float(d.get('aug_temperature_probability', fallback='0')))
 
 		# activity budget
-		self.ab_min_presence_ratio_var.set(float(d.get('ab_min_presence_ratio', fallback='0.10')))
-		self.ab_border_zone_ratio_var.set(float(d.get('ab_border_zone_ratio', fallback='0.15')))
+		self.ab_min_presence_seconds_var.set(float(d.get('ab_min_presence_seconds', fallback='30')))
+		self.ab_edge_margin_px_var.set(int(float(d.get('ab_edge_margin_px', fallback='100'))))
 		self.ab_group_type_separator_var.set(d.get('ab_group_type_separator', fallback='_'))
 		self.ab_group_type_field_index_var.set(int(d.get('ab_group_type_field_index', fallback='4')))
 		self.ab_analysis_duration_var.set(float(d.get('ab_analysis_duration_s', fallback='0')))
@@ -2334,8 +2334,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['aug_temperature_probability'] = str(self.aug_temperature_prob_var.get())
 
 		# activity budget
-		new_default['ab_min_presence_ratio']    = str(self.ab_min_presence_ratio_var.get())
-		new_default['ab_border_zone_ratio']     = str(self.ab_border_zone_ratio_var.get())
+		new_default['ab_min_presence_seconds']  = str(self.ab_min_presence_seconds_var.get())
+		new_default['ab_edge_margin_px']        = str(self.ab_edge_margin_px_var.get())
 		new_default['ab_group_type_separator']  = self.ab_group_type_separator_var.get()
 		new_default['ab_group_type_field_index'] = str(self.ab_group_type_field_index_var.get())
 		new_default['ab_analysis_duration_s']   = str(self.ab_analysis_duration_var.get())
