@@ -65,6 +65,11 @@ onnxslim
 onnxruntime
 ncnn
 urllib3==2.6.3
+# Tracking evaluation only (BehaveAI_evaluate_tracking.py) -- the HOTA reference
+# implementation. Not needed by the pipeline itself. Installed from GitHub; pin a
+# specific commit for reproducibility. Uses removed numpy aliases (np.float), for
+# which the eval module installs a compatibility shim.
+# trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git@<commit>
 # SAHI (Slicing Aided Hyper Inference) — optional small-object detection for the
 # primary detectors (sahi_enabled_* in the INI, off by default). Imported lazily,
 # so the pipeline runs without it until a project turns tiling on. Pin the exact
