@@ -25,8 +25,11 @@ Usage:
 
 import os
 import csv
+import glob
 import tempfile
 import argparse
+
+import behaveai_eval_common as ec
 
 # TrackEval 1.0.dev1 still uses the numpy aliases np.float/np.int/... that numpy
 # 1.24+ removed. Restore them before TrackEval runs (harmless no-op on old numpy).
@@ -161,15 +164,68 @@ def evaluate(seqs, work_dir=None, verbose=True):
 	return summary
 
 
+# Prediction discovery -------------------------------------------------------
+
+# Most-processed tracking CSV wins (same precedence as the activity budget /
+# metric geometry: metric > stitched > corrected > raw).
+_PRED_SUFFIXES = ('_tracking_metric.csv', '_tracking_stitched.csv',
+				  '_tracking_corrected.csv', '_tracking.csv')
+
+
+def _find_pred(output_dir, stem):
+	"""Best available prediction CSV for a sequence stem, or None."""
+	for suf in _PRED_SUFFIXES:
+		p = os.path.join(output_dir, stem + suf)
+		if os.path.exists(p):
+			return p
+	return None
+
+
+def _discover_triples(project, gt_dir):
+	"""Match every <stem>.txt GT file in gt_dir to the best output/<stem>_tracking*.csv
+	of the project. Returns (triples, missing_stems)."""
+	config_path = ec.resolve_config_path(project)
+	project_dir = os.path.dirname(config_path)
+	config = ec.load_config(config_path)
+	output_dir = ec.resolve_dir(project_dir, config, 'output_dir', 'output')
+	triples, missing = [], []
+	for gt in sorted(glob.glob(os.path.join(gt_dir, '*.txt'))):
+		stem = os.path.splitext(os.path.basename(gt))[0]
+		pred = _find_pred(output_dir, stem)
+		if pred:
+			triples.append((stem, gt, pred))
+		else:
+			missing.append(stem)
+	return triples, missing
+
+
 def _main():
 	ap = argparse.ArgumentParser(description="Evaluate BehaveAI tracking against MOT-format GT.")
 	ap.add_argument('--seq', action='append', default=[], help="sequence name (repeatable)")
 	ap.add_argument('--gt', action='append', default=[], help="GT MOT .txt (repeatable, same order)")
 	ap.add_argument('--pred', action='append', default=[], help="BehaveAI CSV or MOT .txt (same order)")
+	ap.add_argument('--project', default=None,
+					help="project dir or INI: auto-match GT files to output/*_tracking*.csv")
+	ap.add_argument('--gt-dir', default=None,
+					help="directory of <stem>.txt MOT GT files (used with --project)")
 	ap.add_argument('--work-dir', default=None, help="keep the built layout here instead of a temp dir")
 	a = ap.parse_args()
+
+	if a.project or a.gt_dir:
+		if not (a.project and a.gt_dir):
+			ap.error("--project and --gt-dir must be given together")
+		triples, missing = _discover_triples(a.project, a.gt_dir)
+		if missing:
+			print("No prediction CSV found for: " + ", ".join(missing))
+		if not triples:
+			ap.error("no GT/prediction pairs found under the project output")
+		print(f"Matched {len(triples)} sequence(s): " + ", ".join(t[0] for t in triples))
+		evaluate(triples, work_dir=a.work_dir)
+		return
+
 	if not (len(a.seq) == len(a.gt) == len(a.pred)) or not a.seq:
-		ap.error("give equal numbers of --seq/--gt/--pred (at least one each)")
+		ap.error("give equal numbers of --seq/--gt/--pred (at least one each), "
+				 "or use --project with --gt-dir")
 	evaluate(list(zip(a.seq, a.gt, a.pred)), work_dir=a.work_dir)
 
 
