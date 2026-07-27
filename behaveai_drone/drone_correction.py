@@ -381,6 +381,8 @@ def correct_video_tracking(
 	frame_cumulative = {}
 	frame_quality = {}
 	frame_scale = {}
+	frame_resid = {}                          # per-step residual flow std (px)
+	frame_ninl = {}                           # per-step RANSAC inlier count
 
 	C = np.eye(3, dtype=np.float64)          # cumulative transform
 	prev_gray = None
@@ -407,6 +409,8 @@ def correct_video_tracking(
 			frame_cumulative[csv_frame] = C.copy()
 			frame_quality[csv_frame] = 'ok'
 			frame_scale[csv_frame] = 1.0
+			frame_resid[csv_frame] = 0.0
+			frame_ninl[csv_frame] = 0
 		else:
 			bg_mask = (_build_background_mask(height, width, prev_boxes, box_dilation)
 					   if has_bbox else None)
@@ -416,6 +420,8 @@ def correct_video_tracking(
 			n_steps += 1
 			if info['few_features']:
 				n_poor += 1
+			frame_resid[csv_frame] = info['residual_std']
+			frame_ninl[csv_frame] = info['n_inliers']
 
 			if M3 is None:
 				# No usable transform for this step: carry the cumulative forward.
@@ -454,6 +460,12 @@ def correct_video_tracking(
 
 	# Report cumulative-scale drift so TASK 3/4 can segment body_len_ref.
 	_report_scale_segments(frame_scale, processed_frames)
+
+	# Diagnostic sidecar for evaluation: per-frame continuous residual flow std,
+	# inlier count and cumulative scale (the categorical correction_quality alone
+	# hides the underlying magnitudes). Additive — does not affect the corrected CSV.
+	_write_correction_diag(output_csv_path, processed_frames,
+						   frame_resid, frame_ninl, frame_scale, frame_quality)
 
 	# ---- Build corrected positions per row, then per-id smoothing + velocity ----
 	# Stage 1: corrected (pre-smoothing) position + quality for every row.
@@ -504,6 +516,31 @@ def correct_video_tracking(
 	n_none = sum(1 for r in rows if r.get('correction_quality') == 'none')
 	print(f"  Wrote {os.path.basename(output_csv_path)}: "
 		  f"{len(rows)} rows (ok={n_ok}, uncertain={n_unc}, none={n_none}).")
+
+
+def _write_correction_diag(output_csv_path, processed_frames,
+						   frame_resid, frame_ninl, frame_scale, frame_quality):
+	"""Write <stem>_correction_diag.csv next to the corrected CSV: per processed
+	frame, the continuous residual flow std (px), RANSAC inlier count, cumulative
+	uniform scale and the quality flag. Read by BehaveAI_evaluate_geometry.py.
+	Non-finite residuals (no inliers) are written blank."""
+	if output_csv_path.endswith('_tracking_corrected.csv'):
+		diag_path = output_csv_path[:-len('_tracking_corrected.csv')] + '_correction_diag.csv'
+	else:
+		diag_path = output_csv_path + '.diag.csv'
+	try:
+		with open(diag_path, 'w', newline='', encoding='utf-8') as f:
+			w = csv.writer(f)
+			w.writerow(['frame', 'residual_std', 'n_inliers', 'cumulative_scale', 'quality'])
+			for fr in processed_frames:
+				resid = frame_resid.get(fr)
+				resid_str = f"{resid:.4f}" if (resid is not None and np.isfinite(resid)) else ''
+				scale = frame_scale.get(fr)
+				scale_str = f"{scale:.5f}" if scale is not None else ''
+				w.writerow([fr, resid_str, frame_ninl.get(fr, ''), scale_str,
+							frame_quality.get(fr, '')])
+	except OSError as e:
+		print(f"  (could not write correction diagnostics: {e})")
 
 
 def _report_scale_segments(frame_scale, processed_frames):
