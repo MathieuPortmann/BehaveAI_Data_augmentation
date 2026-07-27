@@ -60,7 +60,8 @@ try:
 	from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 	from sklearn.pipeline import Pipeline
 	from sklearn.model_selection import LeaveOneGroupOut, GroupKFold, cross_val_predict
-	from sklearn.metrics import f1_score, classification_report, confusion_matrix
+	from sklearn.metrics import f1_score, classification_report, confusion_matrix, accuracy_score
+	from sklearn.dummy import DummyClassifier
 	from sklearn.utils.class_weight import compute_sample_weight
 	import joblib
 	_SKLEARN_AVAILABLE = True
@@ -379,6 +380,16 @@ def _train_baseline(project_path, params, project_dir, config_path):
 									   fit_params={'clf__sample_weight': sample_weight})
 		macro = f1_score(y, y_pred, average='macro', labels=classes, zero_division=0)
 		metrics_lines.append(f"By-video CV macro-F1 (train pool): {macro:.3f}\n")
+		# Chance baselines under the SAME by-video splits, so the macro-F1 above is
+		# read against what a label-only guesser would score (a fair paper needs this).
+		for strat in ('most_frequent', 'stratified'):
+			dpipe = Pipeline([('vec', DictVectorizer(sparse=False)),
+							  ('clf', DummyClassifier(strategy=strat, random_state=0))])
+			y_base = cross_val_predict(dpipe, X, y, groups=groups, cv=splitter)
+			mb = f1_score(y, y_base, average='macro', labels=classes, zero_division=0)
+			ab = accuracy_score(y, y_base)
+			metrics_lines.append(f"Chance baseline ({strat}) by-video CV: "
+								 f"macro-F1={mb:.3f}, accuracy={ab:.3f}\n")
 		metrics_lines.append(classification_report(y, y_pred, labels=classes, zero_division=0))
 		cm = confusion_matrix(y, y_pred, labels=classes)
 		metrics_lines.append("\nConfusion matrix (rows=true, cols=pred):\n")
