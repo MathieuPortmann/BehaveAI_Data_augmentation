@@ -18,10 +18,14 @@ The JSON config holds:
     cwd      project directory (relative dataset paths resolve against it)
     weights  pretrained weights / start checkpoint passed to YOLO(...)
     data     dataset yaml (detection) or folder (classification)
-    epochs   number of epochs
+    epochs   number of epochs (cap; early stopping may end sooner)
     imgsz    training image size
     project  output project directory
     workers  dataloader workers (optional, default 4)
+    patience early-stopping patience (optional; None -> Ultralytics default)
+    train_overrides  dict of extra model.train() kwargs (optional), e.g.
+             {"hsv_h": 0, "hsv_s": 0, "hsv_v": 0} to disable colour
+             augmentation for the motion false-colour stream
 """
 import os
 import sys
@@ -72,7 +76,7 @@ def main():
 			_mod.build_dataloader = _no_pin_build_dataloader
 
 	model = YOLO(cfg["weights"])
-	model.train(
+	train_kwargs = dict(
 		data=cfg["data"],
 		epochs=cfg["epochs"],
 		imgsz=cfg["imgsz"],
@@ -81,6 +85,13 @@ def main():
 		exist_ok=True,
 		workers=cfg.get("workers", 4),
 	)
+	# Early stopping (epochs above is the cap). None -> Ultralytics default.
+	if cfg.get("patience") is not None:
+		train_kwargs["patience"] = cfg["patience"]
+	# Per-stream augmentation overrides (e.g. hsv=0 for the motion false-colour
+	# stream, whose colour encodes the motion signal). Empty -> Ultralytics defaults.
+	train_kwargs.update(cfg.get("train_overrides") or {})
+	model.train(**train_kwargs)
 	return 0
 
 

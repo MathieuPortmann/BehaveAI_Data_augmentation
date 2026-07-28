@@ -2434,6 +2434,18 @@ class SettingsEditorApp(tk.Tk):
 			if mk.startswith('metric_fpx_'):
 				new_default[mk] = mv
 
+		# ---- preserve training-control keys (no GUI widget yet) ----
+		# train_patience = early-stopping patience (epochs is the cap);
+		# motion_disable_color_aug = train the motion false-colour stream with HSV
+		# augmentation off (see BehaveAI_train_worker.py). Preserved so a GUI save
+		# never drops them.
+		_train_ctrl_defaults = {
+			'train_patience': '30',
+			'motion_disable_color_aug': 'true',
+		}
+		for _tck, _tcv in _train_ctrl_defaults.items():
+			new_default[_tck] = prev_default.get(_tck, _tcv)
+
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
 			self.cfg['kalman'] = {}
