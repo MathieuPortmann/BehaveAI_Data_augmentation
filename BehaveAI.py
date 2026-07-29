@@ -834,6 +834,11 @@ foal_size_ratio_thresh = 0.7
 body_len_ref_scope = video
 
 # === Complex behaviours / interaction features ===
+# Auto-run the complex-behaviour stage at the end of batch classify: (re)train on
+# new annotations when needed (like the YOLO models, keyed off train_count.txt),
+# then classify. Its predictions feed the activity budget. NO-OP when a project has
+# no complex annotations and no trained model.
+complex_classify_enabled = true
 # Comma-separated, user-editable list of dyadic AND group behaviours.
 complex_behaviours =
 # Parallel comma-separated single-char hotkeys for the behaviours above.
@@ -885,6 +890,9 @@ complex_synchrony_high = 0.7
 complex_candidate_topk = 50
 
 # === Interaction graph (primary output) ===
+# Auto-run the (deterministic) interaction graph at the end of batch classify, so
+# its edges/nodes feed the activity budget. Off = graph not built automatically.
+interaction_graph_enabled = true
 # Edge granularity: per_interaction | per_segment | per_frame.
 interaction_edge_granularity = per_interaction
 # Edge weight metric: duration | proximity | combined.

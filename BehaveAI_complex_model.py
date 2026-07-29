@@ -523,11 +523,18 @@ def classify_video(project_path, video_name):
 		pipe = bundle['pipeline']
 
 	stem = video_name
-	for suf in ('_tracking_corrected.csv', '_tracking.csv', ''):
-		if suf and os.path.basename(video_name).endswith(suf):
-			stem = os.path.basename(video_name).replace(suf, '')
+	for suf in ('_tracking_metric.csv', '_tracking_stitched.csv',
+				'_tracking_corrected.csv', '_tracking.csv'):
+		if os.path.basename(video_name).endswith(suf):
+			stem = os.path.basename(video_name)[:-len(suf)]
+			break
+	# Predict on the most-processed CSV (best identities + metric columns), so the
+	# predictions share the id space of the interaction graph and the activity budget.
+	# Training (build_dataset) intentionally stays on corrected/raw to match the id
+	# space the complex annotations were made in.
 	csv_path = None
-	for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
+	for cand in (stem + '_tracking_metric.csv', stem + '_tracking_stitched.csv',
+				 stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
 		p = os.path.join(output_dir, cand)
 		if os.path.exists(p):
 			csv_path = p
@@ -1090,6 +1097,148 @@ def _load_deep_predictor(model_dir, bundle):
 
 
 # ---------------------------------------------------------------------------
+# Batch / project entry point
+# ---------------------------------------------------------------------------
+
+def run_complex_classify(project_path):
+	"""Batch-classify complex behaviours for every tracking CSV in the output folder.
+
+	Auto-pipeline entry point (mirrors run_complex_features / run_activity_budget).
+	It is a deliberate NO-OP — with a clear message, never an error — when no trained
+	model exists yet (model_complex/pipeline.joblib absent), which is the normal case
+	for projects without complex-behaviour annotations.
+
+	Prefers <video>_tracking_corrected.csv, falls back to <video>_tracking.csv, and
+	classifies each distinct video stem once.
+	"""
+	config_path = _config_path_for(project_path)
+	project_dir, output_dir = _resolve_output_dir(config_path)
+
+	model_path = os.path.join(project_dir, MODEL_DIR_NAME, 'pipeline.joblib')
+	if not os.path.exists(model_path):
+		print("  No trained complex-behaviour model (model_complex/pipeline.joblib) — "
+			  "skipping complex classification.")
+		return
+
+	stems = []
+	seen = set()
+	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking*.csv'))):
+		base = os.path.basename(p)
+		stem = None
+		for suf in ('_tracking_metric.csv', '_tracking_stitched.csv',
+					'_tracking_corrected.csv', '_tracking.csv'):
+			if base.endswith(suf):
+				stem = base[:-len(suf)]
+				break
+		if stem is None or stem in seen:
+			continue
+		seen.add(stem)
+		stems.append(stem)
+
+	if not stems:
+		print(f"  No tracking CSVs found in {output_dir} — nothing to classify.")
+		return
+
+	print(f"Complex classification: processing {len(stems)} video(s)...")
+	for stem in stems:
+		classify_video(config_path, stem)
+
+
+def count_complex_annotations(project_path, include_holdout='train'):
+	"""Count the valid complex-behaviour annotation segments, mirroring EXACTLY the
+	row filters and holdout/tracking-CSV skips of build_dataset (without extracting
+	features). So count_complex_annotations(include_holdout='train') equals
+	len(build_dataset(include_holdout='train')[0]) — i.e. the number train_model
+	records in model_complex/train_count.txt. That lets us detect new annotations by
+	a plain integer compare, the same way maybe_retrain does for the YOLO models.
+	"""
+	config_path = _config_path_for(project_path)
+	params = load_model_config(config_path)
+	_, output_dir = _resolve_output_dir(config_path)
+
+	ann_files = sorted(glob.glob(os.path.join(output_dir, '*_complex_behaviours.csv')))
+	n = 0
+	for ann_path in ann_files:
+		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
+		if include_holdout != 'all':
+			is_ho = is_holdout_video(stem, params['holdout_fraction'])
+			if (include_holdout == 'train') == is_ho:
+				continue
+		# build_dataset skips annotation files whose tracking CSV is missing.
+		has_csv = any(os.path.exists(os.path.join(output_dir, stem + suf))
+					  for suf in ('_tracking_corrected.csv', '_tracking.csv'))
+		if not has_csv:
+			continue
+		with open(ann_path, newline='', encoding='utf-8') as f:
+			for r in csv.DictReader(f):
+				try:
+					s = int(r['start_frame']); e = int(r['end_frame'])
+					ids = [t for t in str(r['track_ids']).split(';') if t]
+					beh = (r.get('behaviour', '') or '').strip()
+				except (ValueError, KeyError, TypeError):
+					continue
+				if not beh or not ids or s >= e:
+					continue
+				n += 1
+	return n
+
+
+def maybe_train_complex(project_path):
+	"""(Re)train the complex-behaviour model iff new annotations warrant it — the
+	direct analogue of maybe_retrain() for the YOLO models (automatic, no pop-up).
+
+	Decision, keyed off model_complex/train_count.txt exactly like the simple models:
+	  - model present, current train-pool annotation count == recorded count -> no-op;
+	  - model present, counts differ (and >= 2 usable segments)             -> retrain;
+	  - model absent, >= 2 usable annotations                               -> first train;
+	  - too few annotations to train, or none                              -> no-op.
+	Returns True if a training run was performed.
+	"""
+	config_path = _config_path_for(project_path)
+	project_dir, _ = _resolve_output_dir(config_path)
+	model_path = os.path.join(project_dir, MODEL_DIR_NAME, 'pipeline.joblib')
+	count_path = os.path.join(project_dir, MODEL_DIR_NAME, 'train_count.txt')
+
+	current = count_complex_annotations(config_path, include_holdout='train')
+
+	if os.path.exists(model_path):
+		last = -1
+		if os.path.exists(count_path):
+			try:
+				with open(count_path) as f:
+					last = int(f.read().strip())
+			except Exception:
+				last = -1
+		if current == last:
+			return False  # annotations unchanged -> nothing to do
+		if current < 2:
+			print(f"  Complex annotations changed ({last} -> {current}) but too few to "
+				  "train (need >= 2); keeping the existing model.")
+			return False
+		print(f"  New complex annotations detected: image/segment count changed from "
+			  f"{last} to {current}. Re-training complex-behaviour model...")
+		return train_model(config_path) is not None
+
+	# No model yet: first-time train only if there is enough to learn from.
+	if current < 2:
+		return False
+	print(f"  No complex model yet and {current} annotation segment(s) present — "
+		  "training complex-behaviour model...")
+	return train_model(config_path) is not None
+
+
+def run_complex_stage(project_path):
+	"""Full complex-behaviour stage for the auto-pipeline: (re)train on new
+	annotations when needed (like the YOLO models), then classify every video.
+
+	End-to-end NO-OP when a project has no complex annotations and no trained model,
+	so behaviour is unchanged for projects that don't use complex behaviours.
+	"""
+	maybe_train_complex(project_path)
+	run_complex_classify(project_path)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1097,7 +1246,7 @@ def _main():
 	parser = argparse.ArgumentParser(
 		description="Train / evaluate / run the complex-behaviour model.")
 	parser.add_argument('target', help="Project directory or BehaveAI_settings.ini.")
-	parser.add_argument('--action', choices=['train', 'classify', 'confusion'],
+	parser.add_argument('--action', choices=['train', 'classify', 'confusion', 'stage'],
 						default='train')
 	parser.add_argument('--video', default=None,
 						help="Video stem for --action classify (default: all videos).")
@@ -1113,15 +1262,14 @@ def _main():
 		train_model(ini)
 	elif args.action == 'confusion':
 		analyse_confusion(ini)
+	elif args.action == 'stage':
+		# Same as the auto-pipeline: (re)train on new annotations, then classify all.
+		run_complex_stage(ini)
 	elif args.action == 'classify':
-		_, output_dir = _resolve_output_dir(ini)
 		if args.video:
 			classify_video(ini, args.video)
 		else:
-			for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking*.csv'))):
-				if p.endswith('_tracking_corrected.csv') or p.endswith('_tracking.csv'):
-					stem = os.path.basename(p).replace('_tracking_corrected.csv', '').replace('_tracking.csv', '')
-					classify_video(ini, stem)
+			run_complex_classify(ini)
 
 
 if __name__ == '__main__':

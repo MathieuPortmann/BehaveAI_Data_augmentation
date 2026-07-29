@@ -2446,6 +2446,18 @@ class SettingsEditorApp(tk.Tk):
 		for _tck, _tcv in _train_ctrl_defaults.items():
 			new_default[_tck] = prev_default.get(_tck, _tcv)
 
+		# ---- preserve end-of-pipeline auto-run switches (no GUI widget yet) ----
+		# interaction_graph_enabled / complex_classify_enabled gate the interaction
+		# graph and complex-behaviour classification that run before the activity
+		# budget. on_save rebuilds DEFAULT from scratch, so carry a user's on-disk
+		# choice forward instead of silently reverting it to the default.
+		_pipeline_switch_defaults = {
+			'interaction_graph_enabled': 'true',
+			'complex_classify_enabled': 'true',
+		}
+		for _pk, _pv in _pipeline_switch_defaults.items():
+			new_default[_pk] = prev_default.get(_pk, _pv)
+
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
 			self.cfg['kalman'] = {}

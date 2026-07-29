@@ -824,10 +824,16 @@ def run_complex_features(config_path):
 	output_dir = output_dir_raw if os.path.isabs(output_dir_raw) \
 		else os.path.join(project_dir, output_dir_raw)
 
-	# Preference: metric CSV (superset with X_m/Y_m) > drone-corrected > raw.
+	# Preference: metric CSV (superset with X_m/Y_m) > stitched (best identities) >
+	# drone-corrected > raw. metric geometry itself consumes the stitched CSV, so
+	# metric already carries the stitched identities; the stitched fallback matters
+	# when stitching is on but metric is off -- without it the graph (and, through it,
+	# the activity budget) would silently run on the pre-stitch identities.
 	jobs = {}
 	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_metric.csv'))):
 		jobs[os.path.basename(p).replace('_tracking_metric.csv', '')] = p
+	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_stitched.csv'))):
+		jobs.setdefault(os.path.basename(p).replace('_tracking_stitched.csv', ''), p)
 	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):
 		jobs.setdefault(os.path.basename(p).replace('_tracking_corrected.csv', ''), p)
 	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):

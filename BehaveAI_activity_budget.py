@@ -124,6 +124,138 @@ def load_groups_metadata(project_dir):
 
 
 # ---------------------------------------------------------------------------
+# Read complex-behaviour predictions (optional; from BehaveAI_complex_model)
+# ---------------------------------------------------------------------------
+
+def load_complex_predictions(output_dir, video_stem, fps):
+    """Read <stem>_complex_predictions.csv and attribute each episode's duration to
+    every involved individual.
+
+    Columns: start_frame, end_frame, track_ids (';'-separated), behaviour, probability.
+    A complex behaviour involves several individuals, so its duration is credited to
+    each track_id listed.
+
+    Returns (by_track, labels):
+      by_track : dict track_id(str) -> {behaviour -> [total_seconds, n_episodes]}
+      labels   : set of complex-behaviour labels seen in this file.
+    Missing file -> ({}, set()); purely additive, so projects without a complex model
+    behave exactly as before.
+    """
+    path = os.path.join(output_dir, video_stem + '_complex_predictions.csv')
+    labels = set()
+    if not os.path.exists(path):
+        return {}, labels
+
+    by_track = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    with open(path, newline='', encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            try:
+                s = int(r['start_frame'])
+                e = int(r['end_frame'])
+                beh = (r.get('behaviour', '') or '').strip()
+                ids = [t.strip() for t in str(r.get('track_ids', '')).split(';') if t.strip()]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not beh or not ids:
+                continue
+            dur_s = (e - s + 1) / fps if fps and fps > 0 else 0.0
+            if dur_s < 0:
+                dur_s = 0.0
+            labels.add(beh)
+            for tid in ids:
+                by_track[tid][beh][0] += dur_s
+                by_track[tid][beh][1] += 1
+
+    return {tid: dict(behs) for tid, behs in by_track.items()}, labels
+
+
+# ---------------------------------------------------------------------------
+# Read interaction graph edges (optional; from BehaveAI_complex_features)
+# ---------------------------------------------------------------------------
+
+def load_interaction_metrics(output_dir, video_stem, fps):
+    """Read <stem>_interaction_edges.csv and derive per-individual social metrics.
+
+    Adapts to edge granularity (the header differs, see _EDGE_COLS in
+    BehaveAI_complex_features): episode files (per_interaction / per_segment) carry
+    n_frames_observed / contact_fraction / mean_distance_bodylen / interaction_type /
+    weight; per_frame files carry one row per observed frame (in_contact,
+    distance_bodylen).
+
+    Both ordered directions (A,B) and (B,A) are emitted by the graph with identical
+    counts, so each edge row is attributed only to its source_id (partner =
+    target_id) — every individual is credited as the source of its own interactions,
+    with no double counting.
+
+    Returns dict track_id(str) -> social-metric dict. Missing file -> {}.
+    """
+    path = os.path.join(output_dir, video_stem + '_interaction_edges.csv')
+    if not os.path.exists(path):
+        return {}
+
+    def _f(row, key):
+        try:
+            return float(row.get(key, 0) or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    acc = defaultdict(lambda: {
+        'partners': set(),
+        'weighted_degree': 0.0,
+        'frames': 0.0,           # total observed frames across this individual's edges
+        'contact_frames': 0.0,   # observed frames weighted by contact fraction
+        'dist_weight_sum': 0.0,  # sum of (mean_distance * frames) for a weighted mean
+        'type_frames': defaultdict(float),  # interaction_type -> observed frames
+    })
+
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        episode_mode = 'n_frames_observed' in fields
+        for r in reader:
+            s = str(r.get('source_id', '')).strip()
+            t = str(r.get('target_id', '')).strip()
+            if not s or not t:
+                continue
+            weight = _f(r, 'weight')
+            if episode_mode:
+                n_obs = _f(r, 'n_frames_observed')
+                cfrac = _f(r, 'contact_fraction')
+                mdist = _f(r, 'mean_distance_bodylen')
+                itype = (r.get('interaction_type', '') or '').strip()
+            else:  # per_frame: one observed frame per row
+                n_obs = 1.0
+                cfrac = 1.0 if _f(r, 'in_contact') else 0.0
+                mdist = _f(r, 'distance_bodylen')
+                itype = ''  # per_frame edges carry no interaction_type
+
+            a = acc[s]
+            a['partners'].add(t)
+            a['weighted_degree'] += weight
+            a['frames'] += n_obs
+            a['contact_frames'] += cfrac * n_obs
+            a['dist_weight_sum'] += mdist * n_obs
+            if itype:
+                a['type_frames'][itype] += n_obs
+
+    out = {}
+    for tid, a in acc.items():
+        frames = a['frames']
+        dominant_type = (max(a['type_frames'].items(), key=lambda kv: kv[1])[0]
+                         if a['type_frames'] else '')
+        out[tid] = {
+            'interaction_n_partners':            len(a['partners']),
+            'interaction_weighted_degree':       round(a['weighted_degree'], 4),
+            'interaction_time_s':                round(frames / fps, 2) if fps and fps > 0 else 0.0,
+            'contact_time_s':                    round(a['contact_frames'] / fps, 2) if fps and fps > 0 else 0.0,
+            'contact_fraction':                  round(a['contact_frames'] / frames, 4) if frames > 0 else 0.0,
+            'mean_interaction_distance_bodylen': round(a['dist_weight_sum'] / frames, 4) if frames > 0 else 0.0,
+            'dominant_interaction_type':         dominant_type,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Parse one tracking CSV
 # ---------------------------------------------------------------------------
 
@@ -464,7 +596,10 @@ def run_activity_budget(config_path, fps_default=30.0):
 
     # Collect all behavior names across all files first
     all_behaviors_global = set()
-    tracks_cache = {}
+    all_complex_global   = set()   # complex-behaviour labels across all videos
+    tracks_cache      = {}
+    complex_cache     = {}   # csv_path -> {track_id(str) -> {beh -> [s, n]}}
+    interaction_cache = {}   # csv_path -> {track_id(str) -> social-metric dict}
     for csv_path in csv_files:
         # Derive video filename from CSV name:  foo_tracking.csv -> foo.MP4 (best guess)
         csv_basename   = os.path.basename(csv_path)
@@ -525,7 +660,24 @@ def run_activity_budget(config_path, fps_default=30.0):
                 if r['behavior'] and r['behavior'] != 'unknown':
                     all_behaviors_global.add(r['behavior'])
 
+        # Optional: fold in the complex-behaviour predictions and interaction graph
+        # for this video (read-if-present; absent files leave the extra columns empty).
+        complex_by_track, complex_labels = load_complex_predictions(output_dir, video_stem, fps)
+        complex_cache[csv_path] = complex_by_track
+        all_complex_global |= complex_labels
+        interaction_cache[csv_path] = load_interaction_metrics(output_dir, video_stem, fps)
+
     all_behaviors = sorted(all_behaviors_global)
+    all_complex_behaviours = sorted(all_complex_global)
+
+    # Fixed schema for the optional social-metric columns. Added only when at least
+    # one video actually has an interaction graph, so a project that never built one
+    # produces a byte-for-byte identical file to before this feature.
+    _INTERACTION_FIELDS = ['interaction_n_partners', 'interaction_weighted_degree',
+                           'interaction_time_s', 'interaction_pct',
+                           'contact_time_s', 'contact_fraction',
+                           'mean_interaction_distance_bodylen', 'dominant_interaction_type']
+    has_interactions = any(bool(v) for v in interaction_cache.values())
 
     for csv_path in csv_files:
         tracks, max_frame, fps, video_filename, video_full_path = tracks_cache[csv_path]
@@ -566,7 +718,35 @@ def run_activity_budget(config_path, fps_default=30.0):
         individual_rows = compute_individual_budget(
             tracks, flag_info, fps, all_behaviors)
 
+        # Per-video complex-behaviour + interaction lookups (empty if no such files).
+        complex_by_track     = complex_cache.get(csv_path, {})
+        interaction_by_track = interaction_cache.get(csv_path, {})
+
         for rec in individual_rows:
+            tid_str    = str(rec['track_id'])
+            duration_s = rec.get('duration_s', 0.0)
+
+            # --- Complex behaviours: seconds / episodes / % of tracked presence ---
+            beh_map = complex_by_track.get(tid_str, {})
+            for b in all_complex_behaviours:
+                sec, n = beh_map.get(b, (0.0, 0))
+                pct = 100.0 * sec / duration_s if duration_s > 0 else 0.0
+                rec[f'complex_{b}_s']   = round(sec, 2)
+                rec[f'complex_{b}_n']   = n
+                rec[f'complex_{b}_pct'] = round(pct, 2)
+
+            # --- Interaction graph: social metrics (only when a graph exists) ---
+            if has_interactions:
+                soc = interaction_by_track.get(tid_str)
+                if soc:
+                    rec.update(soc)
+                    itime = soc.get('interaction_time_s', 0.0)
+                    rec['interaction_pct'] = round(100.0 * itime / duration_s, 2) \
+                        if duration_s > 0 else 0.0
+                else:
+                    for k in _INTERACTION_FIELDS:
+                        rec[k] = '' if k == 'dominant_interaction_type' else 0.0
+
             rec['video_filename'] = video_filename
             rec['group_id']       = group_id
             rec['group_type']     = group_type
@@ -612,8 +792,17 @@ def run_activity_budget(config_path, fps_default=30.0):
             behavior_fields += [f'behavior_{b}_s',
                                 f'behavior_{b}_n',
                                 f'behavior_{b}_pct']
+        # Optional complex-behaviour columns (empty across the board when no
+        # complex model has ever run on this project).
+        complex_fields = []
+        for b in all_complex_behaviours:
+            complex_fields += [f'complex_{b}_s',
+                               f'complex_{b}_n',
+                               f'complex_{b}_pct']
         extra_fields = ['dominant_behavior_time', 'dominant_behavior_count']
-        fieldnames = base_fields + behavior_fields + extra_fields
+        interaction_fields = _INTERACTION_FIELDS if has_interactions else []
+        fieldnames = (base_fields + behavior_fields + complex_fields
+                      + interaction_fields + extra_fields)
 
         with open(out1, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')

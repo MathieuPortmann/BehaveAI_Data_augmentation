@@ -1758,8 +1758,38 @@ if __name__ == '__main__':
 		print(f"Metric geometry failed: {e}")
 		traceback.print_exc()
 
+	# Auto-launch the interaction graph (deterministic dyadic/group features ->
+	# edges/nodes). Runs after metric geometry so it can consume the most-processed
+	# CSV; disabled -> no behaviour change. Must run BEFORE complex classification,
+	# which back-fills interaction_type into the edges file.
+	try:
+		if config['DEFAULT'].get('interaction_graph_enabled', 'true').lower() == 'true':
+			from BehaveAI_complex_features import run_complex_features
+			print("\nLaunching interaction graph...")
+			run_complex_features(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Interaction graph failed: {e}")
+		traceback.print_exc()
+
+	# Auto-launch the complex-behaviour stage: (re)train on new annotations when
+	# needed -- exactly like the YOLO models' maybe_retrain (automatic, keyed off
+	# model_complex/train_count.txt) -- then classify every video, writing
+	# *_complex_predictions.csv and populating interaction_type in the edges file.
+	# End-to-end NO-OP for projects with no complex annotations and no trained model.
+	try:
+		if config['DEFAULT'].get('complex_classify_enabled', 'true').lower() == 'true':
+			from BehaveAI_complex_model import run_complex_stage
+			print("\nLaunching complex-behaviour stage (train-if-new + classify)...")
+			run_complex_stage(config_path)
+	except Exception as e:
+		import traceback
+		print(f"Complex-behaviour stage failed: {e}")
+		traceback.print_exc()
+
 	# Auto-launch the activity budget LAST, so it runs on the most-processed CSV
-	# per video (stitched identities + any metric columns), not the raw one.
+	# per video (stitched identities + any metric columns) AND after the interaction
+	# graph + complex classification, whose outputs it now folds in per individual.
 	try:
 		from BehaveAI_activity_budget import run_activity_budget
 		print("\nLaunching activity budget analysis...")
