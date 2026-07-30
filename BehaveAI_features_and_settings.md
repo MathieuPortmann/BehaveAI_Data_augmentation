@@ -1,5 +1,16 @@
 # BehaveAI — Features, Settings & Methods Reference
 
+**Document version: 4.1** — updated 2026-07-30. **The interaction layer moved from image space to real metres.** Changes that supersede §6.10, §6.12, §6.13 and their parameter tables below:
+
+- **Everything in §6.10–6.13 is now in metres and m/s**, read from `<video>_tracking_metric.csv`. `metric_enabled = true` and a `.flightlog.csv` per video are **required**; a clip without them is skipped with a message rather than measured in another unit. Body-length normalisation is gone — `body_len_ref`, `foal_size_ratio_thresh` and `body_len_ref_scope` no longer exist. Old pixel/body-length INI keys are rejected with an error naming their replacement; **no automatic conversion**, since pixels cannot be turned into metres after the fact.
+- **Two ground frames**, because they are valid for different things. `X_m/Y_m` (per-frame, camera-relative) for **distances** between animals seen together; `Xs_m/Ys_m` (stabilised on one reference geometry, from the drone-corrected pixel) for **speeds**. Differencing `X_m` over time returns the drone's motion, not the animal's.
+- **Foal/adult comes from the age classifier** (`model_age`, `age_class`/`age_conf`), by per-track confidence-weighted majority vote — never from apparent box size. An individual the model never labelled is `unknown`, not guessed.
+- **The graph is undirected**: every metric the deterministic layer computes is symmetric, so it emits one row per unordered pair. Direction is supplied afterwards by the complex model as `interaction_type` + `actor_id`. In R: `directed = FALSE`.
+- **Edge weights are comparable across videos**: `sri` (simple ratio index, default), `duration_s`, `proximity_m`. The former `combined` metric min-max scaled weights *within* each clip, which made cross-video comparison meaningless.
+- **Two measurement guards, both automatic.** (1) The **speed noise floor is measured per clip** from the high-frequency residual of its own trajectories: differentiating position amplifies noise, so ~2 px of box jitter yields ~0.4 m/s of apparent speed on a standing horse. Speeds below the measured floor are treated as stationary and reported in the run log. (2) A **scale cross-check** compares the flight-log camera height against the height implied by the animals' apparent size; disagreement beyond `metric_scale_tolerance` flags the clip `uncertain`, catching a biased `rel_alt` or sloped terrain — which bias *every* distance in the clip by the same percentage.
+- **The activity budget is deterministic again**: model-derived columns (`complex_*`, `dominant_interaction_type`) moved to `activity_budget_predicted.csv`, joinable on `video_filename` + `track_id`.
+- **A sequence model without torch is an error**, not a silent downgrade to the baseline (which used to save an artefact contradicting its own `saved_settings.ini`).
+
 **Document version: 4.0** — updated 2026-07-24. **Tracking overhaul** (branch `tracking-overhaul`). Changes that supersede parts of this reference below:
 
 - **Detector — optional SAHI sliced inference** (`sahi_enabled_static/motion`, off by default). When on, the 4K frame is diced into native-resolution tiles so small horses are seen near their trained scale; the annotated dataset is then tiled and the detector retrained on tiles (`BehaveAI_tiling.py`) into a separate `*_tiled` project. *Note:* a Test-0 measurement found whole-frame detection already strong on the current model, so SAHI stays off until a tiled retrain proves a gain.
@@ -471,7 +482,7 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 
 ## 6A\. HERDWISE MULTI-INDIVIDUAL / COMPLEX-BEHAVIOUR PIPELINE
 
-*The modules below build on the per-individual tracking CSV to analyse **interactions between horses** in drone footage of herds. Everything stays in **image space** — there is no telemetry and no metric (m/s, GPS) conversion. All sizes and speeds are normalised by a **reference body length** body\_len\_ref = the robust median box diagonal of adult-sized horses (foals, below foal\_size\_ratio\_thresh, excluded), never each horse's own size. The interaction graph (§6.10) is the primary scientific output.*
+*The modules below build on the per-individual tracking CSV to analyse **interactions between horses** in drone footage of herds. Everything is in **real-world units** — metres and m/s — obtained by projecting each animal's feet onto the ground plane from flight-log telemetry (§6.9b). They therefore **require** metric\_enabled = true and a `.flightlog.csv` beside each video; a clip without usable metric geometry is skipped rather than measured in some other unit, because body-length- or pixel-normalised features are not comparable between clips flown at different altitudes. Foal/adult status comes from the trained **age classifier**, not from apparent size. The interaction graph (§6.10) is the primary scientific output.*
 
 ### 6.9 Drone motion correction (BehaveAI\_drone\_correction.py)
 
@@ -488,12 +499,12 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 ### 6.10 Interaction graph: dyadic & group features (BehaveAI\_complex\_features.py)
 
 - **\[Technical\]**  
-  - *How it works:* The deterministic layer that turns a (drone-corrected) tracking CSV into per-frame **dyadic** and **group** features and aggregates them into the **interaction graph** — the primary analysis output, directly importable into R igraph. Dyadic features (ordered pairs, role-encoded): distance\_bodylen (normalised by body\_len\_ref, not the pair mean), approach\_rate (d(distance)/dt), speed\_similarity (cosine of velocity vectors), in\_contact (box IoU \> complex\_contact\_iou\_thresh or distance \< complex\_contact\_dist\_bodylen), plus both endpoints' YOLO primary + secondary labels. Group features are computed over the **whole co-present herd per frame** (no spatial partitioning — every individual present in a frame counts as one group for that frame): polarisation, cohesion, convex-hull area, centroid speed, behavioural synchrony, PCA-based elongation (capped at 100 to avoid inf). body\_len\_ref is computed at video level by default, or per stable-scale **segment** (body\_len\_ref\_scope = segment recomputes on altitude/zoom drift). aggregate\_window() pools features (mean/std/min/max + a normalised label bag kept for the model in §6.12). build\_interaction\_graph() builds a **networkx DiGraph** at interaction\_edge\_granularity = per\_interaction | per\_segment | per\_frame, with edge weight = duration | proximity | combined, and summarises components / communities / centrality. If networkx is missing, the edges/nodes CSVs are still written and only the graph-metric summary is skipped.  
+  - *How it works:* The deterministic layer that turns a **metric** tracking CSV (\<video\>\_tracking\_metric.csv — REQUIRED) into per-frame **dyadic** and **group** features and aggregates them into the **interaction graph** — the primary analysis output, directly importable into R igraph. **Everything is in real metres and m/s**; a video without usable metric geometry is skipped rather than silently measured in another unit. Two ground frames are used, each for what it is valid for: the per-frame camera-relative frame (X\_m/Y\_m) for **distances** between animals seen together, and the stabilised frame (Xs\_m/Ys\_m) for **speeds** — differencing the camera-relative frame would return the drone's own motion, not the horse's. Dyadic features (ordered pairs, role-encoded): distance\_m, approach\_rate (m/s, negative = approaching), speed\_similarity (cosine of velocity vectors), heading\_diff, in\_contact (box IoU \> complex\_contact\_iou\_thresh or ground distance \< complex\_contact\_dist\_m), each endpoint's age class, plus both endpoints' YOLO primary + secondary labels. Direction-based features are zeroed below 0.05 m/s: a standing animal has no heading, and detection jitter would otherwise fill that field with noise. Group features are computed over the **whole co-present herd per frame** (no spatial partitioning — every individual present in a frame counts as one group for that frame): polarisation, cohesion (m), convex-hull area (m²), centroid speed (m/s), behavioural synchrony, PCA-based elongation (capped at 100 to avoid inf). Foal/adult comes from the **age classifier** (model\_age) via the age\_class/age\_conf columns, as a per-track confidence-weighted majority vote — never re-derived from apparent box size; an individual the age model never labelled is `unknown`, not guessed. aggregate\_window() pools features (mean/std/min/max + a normalised label bag kept for the model in §6.12). build\_interaction\_graph() builds an **undirected** networkx Graph at interaction\_edge\_granularity = per\_dyad | per\_segment | per\_frame — every metric the deterministic layer computes is symmetric, so it emits one row per unordered pair and direction is added later by the model (interaction\_type + actor\_id) — with edge weight = sri | duration\_s | proximity\_m, all absolute and therefore comparable between videos. If networkx is missing, the edges/nodes CSVs are still written and only the graph-metric summary is skipped.  
   - *Purpose:* Produce an analysis-ready, R-igraph-importable description of who interacts with whom, how, and for how long.  
-  - *Parameters:* interaction\_edge\_granularity, interaction\_weight\_metric, complex\_max\_interaction\_distance, complex\_min\_duration\_frames, complex\_contact\_iou\_thresh, complex\_contact\_dist\_bodylen, complex\_window\_frames; body\_len\_ref params (see §11).  
-  - *Implementation:* numpy, scipy, networkx; stdlib csv (lists-of-dicts, **no pandas**). Outputs \<video\>\_interaction\_edges.csv (columns ordered frame\_start, frame\_end, source\_id, target\_id, …) and \<video\>\_interaction\_nodes.csv. In R: `graph_from_data_frame(e[, c("source_id","target_id", ...)], directed=TRUE, vertices=v)`.  
+  - *Parameters:* interaction\_edge\_granularity, interaction\_weight\_metric, complex\_max\_interaction\_distance\_m, complex\_min\_duration\_frames, complex\_contact\_iou\_thresh, complex\_contact\_dist\_m, complex\_window\_frames (see §11). Requires metric\_enabled = true.  
+  - *Implementation:* numpy, scipy, networkx; stdlib csv (lists-of-dicts, **no pandas**). Outputs \<video\>\_interaction\_edges.csv (columns ordered frame\_start, frame\_end, source\_id, target\_id, …) and \<video\>\_interaction\_nodes.csv. In R: `graph_from_data_frame(e[, c("source_id","target_id", ...)], directed=FALSE, vertices=v)`. Edge files always carry n\_frames\_observed, n\_frames\_co\_present and duration\_s, so any association index can be recomputed in R without re-running the pipeline.  
 - **\[Plain\]**  
-  - *How it works:* For every pair of nearby horses, and for the herd as a whole, the tool measures things like how far apart they are (in horse-lengths), whether they are approaching or moving apart, whether they move alike, whether they are touching, and what each is doing. It then condenses all this into a network ("who interacts with whom") that can be opened directly in standard network-analysis software.  
+  - *How it works:* For every pair of nearby horses, and for the herd as a whole, the tool measures things like how far apart they are **in real metres**, whether they are approaching or moving apart, whether they move alike, whether they are touching, and what each is doing. It then condenses all this into a network ("who interacts with whom") that can be opened directly in standard network-analysis software.  
   - *Purpose:* Turn raw tracks into a clear map of the herd's interactions.  
   - *Parameters:* the graph granularity/weight and the interaction/contact thresholds (see §11).
 
@@ -526,7 +537,7 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 - **\[Technical\]**  
   - *How it works:* Run after the first hand-annotations / a trained model exist, to accelerate further annotation. Two complementary sources, both image-space: (1) **heuristic rules** over the §6.10 feature streams (frame-gap-tolerant run detection), thresholds from the INI and meant to be calibrated on the first annotations — allogrooming (in\_contact + both speeds ≈ 0, sustained), chase (high speed\_similarity + ≈ constant distance + both speeds high), stampede (high whole-herd mean speed + high polarisation), trek (high polarisation + moderate speed + non-zero centroid speed), synchronised\_rest\_graze (speed ≈ 0 + high synchrony + low dispersion); only behaviours present in the configured complex\_behaviours list are proposed. (2) **Active learning** with the trained §6.12 model: the most **uncertain** windows (lowest max-probability) over pairs and windows with ≥3 co-present individuals are surfaced, with the model's current best guess as the suggested label (top complex\_candidate\_topk). Heuristic-only when no model exists. Launched from the launcher's *Propose candidates* button; output is loaded by the annotation tool's *Load candidates* (§6.11) for confirmation — candidates are never consumed automatically.  
   - *Purpose:* Point the annotator at the segments most worth labelling next — both rule-flagged events and the model's least-certain windows.  
-  - *Parameters:* complex\_speed\_low\_bodylen, complex\_speed\_high\_bodylen, complex\_polarisation\_high, complex\_synchrony\_high, complex\_candidate\_topk, plus the contact/distance thresholds from §6.10 (see §11).  
+  - *Parameters:* complex\_speed\_low\_ms, complex\_speed\_high\_ms, complex\_polarisation\_high, complex\_synchrony\_high, complex\_candidate\_topk, plus the contact/distance thresholds from §6.10 (see §11).  
   - *Implementation:* numpy; reuses BehaveAI\_complex\_features and BehaveAI\_complex\_model; stdlib csv. Output \<video\>\_complex\_candidates.csv (same schema as §6.11, with annotator\_confidence = 'auto').  
 - **\[Plain\]**  
   - *How it works:* The system points you at the moments most worth labelling next: events that match simple rules (like two still horses in contact = grooming, or a fast aligned group = stampede), and — once a model exists — the moments the model is least sure about. You then open these in the annotation tool and confirm or correct them.  
@@ -751,23 +762,16 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 | drone\_correction\_smoothing\_window | 7 | Odd window length for the smoothing filter |
 | drone\_correction\_fallback\_smoothing | true | When features are persistently too few, smooth-only (no optical-flow correction) |
 
-### Reference body length
-
-| Parameter | Default | Description |
-| :---- | :---- | :---- |
-| foal\_size\_ratio\_thresh | 0.7 | body\_len\_i / body\_len\_ref below this flags a likely foal (excluded from body\_len\_ref) |
-| body\_len\_ref\_scope | video | Reference body-length scope: video or segment (recomputes on altitude/zoom drift) |
-
 ### Interaction graph (§6.10)
 
 | Parameter | Default | Description |
 | :---- | :---- | :---- |
-| interaction\_edge\_granularity | per\_interaction | Edge granularity: per\_interaction, per\_segment, or per\_frame |
-| interaction\_weight\_metric | duration | Edge weight metric: duration, proximity, or combined |
-| complex\_max\_interaction\_distance | 400 | Pairs farther apart than this (px) are ignored as interactions |
-| complex\_min\_duration\_frames | 10 | Minimum length (frames) of an interaction episode (per\_segment granularity) |
+| interaction\_edge\_granularity | per\_dyad | Edge granularity: per\_dyad (one row per pair for the whole clip), per\_segment (one row per episode), or per\_frame. `per_interaction` is still accepted as the old name for per\_dyad |
+| interaction\_weight\_metric | sri | Edge weight: sri (time together / time both visible, 0-1), duration\_s, or proximity\_m — all absolute, so comparable across videos |
+| complex\_max\_interaction\_distance\_m | 15.0 | Pairs farther apart than this ON THE GROUND (metres) are ignored as interactions |
+| complex\_min\_duration\_frames | 10 | Minimum observed frames for a dyad/episode to become an edge (all granularities) |
 | complex\_contact\_iou\_thresh | 0.05 | Box IoU above this counts as contact |
-| complex\_contact\_dist\_bodylen | 1.5 | Distance (in body lengths) below this counts as contact |
+| complex\_contact\_dist\_m | 2.5 | Ground distance (metres) below this counts as contact |
 | complex\_window\_frames | 30 | Window length (frames) for aggregating features for the model |
 
 ### Complex-behaviour model (§6.12) & candidates (§6.13)
@@ -788,8 +792,8 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 | complex\_deep\_batch | 16 | Mini-batch size for the deep model |
 | complex\_confusion\_merge\_rate | 0.20 | Min true-vs-predicted confusion rate to flag a class pair as a merge suggestion |
 | complex\_predict\_min\_proba | 0.5 | Minimum predicted probability to emit a complex-behaviour prediction |
-| complex\_speed\_low\_bodylen | 0.05 | Candidate heuristics: speed (body lengths/frame) below this counts as ~still |
-| complex\_speed\_high\_bodylen | 0.25 | Speed above this counts as fast (gallop/chase) |
+| complex\_speed\_low\_ms | 0.2 | Candidate heuristics: ground speed (m/s) below this counts as ~still |
+| complex\_speed\_high\_ms | 3.0 | Ground speed (m/s) above this counts as fast (gallop/chase) |
 | complex\_polarisation\_high | 0.7 | Group polarisation above this counts as aligned (trek/stampede) |
 | complex\_synchrony\_high | 0.7 | Behavioural synchrony above this counts as synchronised |
 | complex\_candidate\_topk | 50 | Number of most-uncertain windows surfaced by active learning |
