@@ -21,9 +21,26 @@ is checked per frame; frames near the horizon (where a pixel maps to many
 metres) are flagged. Videos without a flight log get metric_quality='none' and
 keep only their pixel coordinates — the activity budget itself is unaffected.
 
+TWO ground frames are emitted, because they answer different questions:
+
+  - X_m, Y_m       : per-frame, CAMERA-RELATIVE (origin under the drone, Y along
+                     the camera heading), from the RAW feet pixel and that
+                     frame's own height/pitch. Two animals in the SAME frame
+                     share this origin, so their separation is a true ground
+                     distance. Differencing these over TIME is meaningless as
+                     soon as the drone moves — the origin moves with it.
+  - Xs_m, Ys_m     : STABILISED, from the DRONE-CORRECTED feet pixel projected
+                     with ONE reference height/pitch. The drone correction has
+                     already re-anchored every centroid into the first processed
+                     frame's image frame, so a single projection yields a ground
+                     frame that stands still for the whole clip. This is the
+                     frame in which speeds, headings and approach rates are
+                     real. Valid only while the drone holds its station — see
+                     telemetry_drift().
+
 Input:  <video>_tracking(_corrected).csv  +  <video>.flightlog.csv (same stem).
-Output: <video>_tracking_metric.csv = the input CSV with three appended columns
-        X_m, Y_m (ground coords, metres; X forward, Y lateral) and metric_quality
+Output: <video>_tracking_metric.csv = the input CSV with five appended columns
+        X_m, Y_m, Xs_m, Ys_m (ground coords, metres) and metric_quality
         (one of 'ok', 'uncertain', 'none').
 
 Usage (batch over a project's output folder):
@@ -45,6 +62,8 @@ try:  # as a package member
 except ImportError:  # run directly from inside the package dir
 	from flightlog import load_flightlog, sample_flightlog, flightlog_summary
 	from horizon_geometry import pixel_focal_length, horizon_row, ground_point_from_pixel
+
+VIDEO_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.MP4', '.AVI', '.MOV', '.MKV')
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +93,12 @@ def load_metric_config(config_path):
 		'sensor_width_mm':  float(d.get('metric_sensor_width_mm', '36.0')),
 		'roll_max_deg':     float(d.get('metric_roll_max_deg', '3.0')),
 		'horizon_margin_px': float(d.get('metric_horizon_margin_px', '50')),
+		# Cross-check of the metric scale against the animals' apparent size.
+		# Tolerance 0.25 means the two independent estimates of camera height must
+		# agree within a factor 1.25 either way — the band the horizon CLI has
+		# always used to call a calibration plausible.
+		'assumed_body_length_m': float(d.get('metric_assumed_body_length_m', '2.2')),
+		'scale_tolerance':  float(d.get('metric_scale_tolerance', '0.25')),
 		'fpx_overrides':    fpx_overrides,
 	}
 
@@ -114,7 +139,7 @@ def _read_tracking_csv(csv_path):
 	return fieldnames, rows, has_bbox
 
 
-def _video_dims_fps(video_path):
+def video_dims_fps(video_path):
 	"""Read (width, height, fps) from a video header without decoding frames."""
 	import cv2
 	cap = cv2.VideoCapture(video_path)
@@ -143,16 +168,158 @@ def _ground_contact_pixel(row, has_bbox):
 		return None, None, False
 
 
+def _stabilised_contact_pixel(row, has_bbox):
+	"""Feet of the animal expressed in the drone-STABILISED image frame.
+
+	The drone correction maps each centroid from its own frame into the reference
+	frame's image coordinates; that displacement is a global re-anchoring, so the
+	same offset applies to the feet at first order:
+	    feet_stab = feet_raw + (corrected_centroid - raw_centroid)
+	Returns (u, v, from_bbox), or (None, None, False) when the row carries no
+	usable correction."""
+	try:
+		xc = (row.get('x_corrected', '') or '').strip()
+		yc = (row.get('y_corrected', '') or '').strip()
+		if not xc or not yc or row.get('correction_quality', '') == 'none':
+			return None, None, False
+		dx = float(xc) - float(row['x'])
+		dy = float(yc) - float(row['y'])
+	except (ValueError, KeyError, TypeError):
+		return None, None, False
+	u, v, from_bbox = _ground_contact_pixel(row, has_bbox)
+	if u is None:
+		return None, None, False
+	return u + dx, v + dy, from_bbox
+
+
+def _angular_range_deg(values):
+	"""Peak-to-peak range of an angle series, in degrees, wrap-safe (a heading
+	crossing 360 must not read as a 360-degree turn)."""
+	v = np.asarray(list(values) if values is not None else [], dtype=float)
+	v = v[~np.isnan(v)]
+	if v.size < 2:
+		return 0.0
+	unwrapped = np.degrees(np.unwrap(np.radians(v)))
+	return float(unwrapped.max() - unwrapped.min())
+
+
+def scale_disagreement(tracking_csv_path, flightlog, f_px, width, height,
+					   focal_len_mm, assumed_body_length_m, tolerance):
+	"""Cross-check the metric scale against a second, independent source.
+
+	Every ground distance scales LINEARLY with the camera height taken from the
+	flight log, so a biased rel_alt biases every distance by the same percentage
+	— a systematic error that no amount of averaging removes. rel_alt is
+	barometric and referenced to the TAKEOFF point, so a takeoff spot 2 m above
+	the animals' ground already costs ~7%, and sloped terrain costs more.
+
+	The independent check: fit the animals' apparent size against image row
+	(horizon_geometry.estimate_ground_plane) and ask what real body length that
+	implies given the telemetry height. If the two disagree, one of the
+	assumptions behind the metric conversion is violated — flat ground, an
+	unbiased rel_alt, or the focal length.
+
+	Returns (reason_or_None, ratio_or_None). reason is a human-readable string
+	when the check FAILS; None when it passes or cannot be run.
+	"""
+	try:
+		from .horizon_geometry import (load_boxes_csv, foal_flags,
+									   estimate_ground_plane, estimate_metric_scale)
+	except ImportError:
+		from horizon_geometry import (load_boxes_csv, foal_flags,
+									  estimate_ground_plane, estimate_metric_scale)
+
+	alt = flightlog.get('rel_alt_m') if flightlog else None
+	if alt is None:
+		return None, None
+	a = np.asarray(alt, dtype=float)
+	a = a[~np.isnan(a)]
+	if a.size == 0:
+		return None, None
+	rel_alt_mean = float(a.mean())
+
+	try:
+		td = load_boxes_csv(tracking_csv_path)
+		if not td['has_bbox']:
+			return None, None
+		fit = estimate_ground_plane(td, foal_flags(td))
+	except (ValueError, OSError, KeyError):
+		# Too few adult boxes to fit: no second opinion available, which is not
+		# itself evidence of a problem.
+		return None, None
+
+	calib = estimate_metric_scale(fit, rel_alt_mean, focal_len_mm, width, height,
+								  assumed_body_length_m=assumed_body_length_m, f_px=f_px)
+	ratio = calib['height_agreement_ratio']
+	if not np.isfinite(ratio) or ratio <= 0:
+		return None, None
+	lo, hi = 1.0 / (1.0 + tolerance), 1.0 + tolerance
+	if lo <= ratio <= hi:
+		return None, float(ratio)
+	return (f"the two independent scale sources disagree by {abs(ratio - 1.0):.0%} "
+			f"(telemetry says the camera was {rel_alt_mean:.1f} m up; the animals' "
+			f"apparent size implies {calib['implied_height_m']:.1f} m, i.e. a real "
+			f"body length of {calib['implied_body_length_m']:.2f} m vs the assumed "
+			f"{assumed_body_length_m:.2f} m)"), float(ratio)
+
+
+def telemetry_drift(flightlog, alt_frac_max=0.15, pitch_deg_max=2.0, yaw_deg_max=5.0):
+	"""Reasons why ONE fixed camera geometry cannot represent the whole clip.
+
+	The stabilised ground frame (Xs_m/Ys_m) projects every drone-corrected pixel
+	with a single (height, pitch) pair, which only holds while the drone keeps
+	its station. Returns a list of human-readable reasons; empty means stable.
+	The 15% altitude threshold matches the one the horizon-fit CLI already warns
+	on, so both paths flag the same clips."""
+	if not flightlog:
+		return ['no flight log']
+	reasons = []
+	alt = flightlog.get('rel_alt_m')
+	if alt is not None:
+		a = np.asarray(alt, dtype=float)
+		a = a[~np.isnan(a)]
+		if a.size >= 2 and a.mean() > 0:
+			frac = float(a.max() - a.min()) / float(a.mean())
+			if frac > alt_frac_max:
+				reasons.append(f"rel_alt varies by {frac:.0%} of its mean (> {alt_frac_max:.0%})")
+	pitch_range = _angular_range_deg(flightlog.get('gb_pitch'))
+	if pitch_range > pitch_deg_max:
+		reasons.append(f"gb_pitch drifts {pitch_range:.1f} deg (> {pitch_deg_max} deg)")
+	yaw_range = _angular_range_deg(flightlog.get('gb_yaw'))
+	if yaw_range > yaw_deg_max:
+		reasons.append(f"gb_yaw turns {yaw_range:.1f} deg (> {yaw_deg_max} deg)")
+	return reasons
+
+
 # ---------------------------------------------------------------------------
 # Main worker
 # ---------------------------------------------------------------------------
 
-_NEW_COLS = ['X_m', 'Y_m', 'metric_quality']
+_NEW_COLS = ['X_m', 'Y_m', 'Xs_m', 'Ys_m', 'metric_quality']
+
+
+def _anchor_frame(rows):
+	"""Lowest frame number carrying a usable drone correction — the frame whose
+	image coordinates the corrected columns are anchored to."""
+	best = None
+	for r in rows:
+		if not (r.get('x_corrected', '') or '').strip():
+			continue
+		if r.get('correction_quality', '') == 'none':
+			continue
+		try:
+			f = int(r['frame'])
+		except (ValueError, KeyError, TypeError):
+			continue
+		if best is None or f < best:
+			best = f
+	return best
 
 
 def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_csv_path,
 						  focal_len_mm=24.0, sensor_width_mm=36.0,
-						  roll_max_deg=3.0, horizon_margin_px=50.0, fpx_overrides=None):
+						  roll_max_deg=3.0, horizon_margin_px=50.0, fpx_overrides=None,
+						  assumed_body_length_m=2.2, scale_tolerance=0.25):
 	"""Project every tracked detection to ground-plane metres using the flight
 	log, and write <video>_tracking_metric.csv. Rows without usable telemetry
 	keep empty X_m/Y_m and metric_quality='none'."""
@@ -162,7 +329,7 @@ def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_
 		print(f"  {os.path.basename(tracking_csv_path)}: no rows, skipping.")
 		return
 
-	dims = _video_dims_fps(video_path) if video_path else None
+	dims = video_dims_fps(video_path) if video_path else None
 	if dims is None:
 		print(f"  {os.path.basename(tracking_csv_path)}: could not read video dims — "
 			  f"metric skipped (quality 'none').")
@@ -187,25 +354,61 @@ def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_
 		  f"pitch median={(summ.get('gb_pitch') or {}).get('median')}, "
 		  f"roll median={roll_med}, {summ.get('n_rows')} log rows.")
 
-	n_ok = n_unc = n_none = 0
+	# --- Reference geometry for the stabilised ground frame ---------------
+	# The drone-corrected coordinates all live in the anchor frame's image frame,
+	# so ONE (height, pitch) pair projects the whole clip into a ground frame
+	# that stands still. That only holds while the drone keeps its station.
+	anchor = _anchor_frame(rows)
+	h0 = pitch0_deg = float('nan')
+	if anchor is not None:
+		h0, gb_pitch0, _ = sample_flightlog(flightlog, (anchor - 1) / fps)
+		pitch0_deg = -gb_pitch0
+		print(f"  {stem}: stabilised frame anchored on frame {anchor} "
+			  f"(h={h0:.1f}m, pitch={pitch0_deg:.1f} deg below horizontal).")
+	else:
+		print(f"  {stem}: no drone-corrected rows — stabilised frame (Xs_m/Ys_m) "
+			  f"unavailable; run drone correction first if you need speeds.")
+
+	drift_reasons = telemetry_drift(flightlog)
+	if drift_reasons and anchor is not None:
+		print(f"  {stem}: WARNING — the drone did not hold its station "
+			  f"({'; '.join(drift_reasons)}). A single reference geometry no longer "
+			  f"describes the clip, so every row is downgraded to metric_quality="
+			  f"'uncertain' and Xs_m/Ys_m-derived speeds must not be trusted.")
+
+	# --- Scale cross-check: is the telemetry height believable? --------------
+	scale_reason, scale_ratio = scale_disagreement(
+		tracking_csv_path, flightlog, f_px, width, height,
+		focal_len_mm, assumed_body_length_m, scale_tolerance)
+	if scale_reason:
+		print(f"  {stem}: WARNING — {scale_reason}. Ground distances scale linearly "
+			  f"with camera height, so every distance in this clip is likely off by "
+			  f"a similar factor. Usual causes: sloped terrain, a takeoff point at a "
+			  f"different elevation than the animals, or a wrong focal length. Rows "
+			  f"downgraded to metric_quality='uncertain'.")
+	elif scale_ratio is not None:
+		print(f"  {stem}: scale cross-check OK (independent height estimates agree "
+			  f"within {abs(scale_ratio - 1.0):.0%}).")
+
+	n_ok = n_unc = n_none = n_stab = 0
 	for r in rows:
 		try:
 			frame = int(r['frame'])
 		except (ValueError, KeyError, TypeError):
-			r['X_m'] = ''; r['Y_m'] = ''; r['metric_quality'] = 'none'; n_none += 1
+			_blank_metric(r); n_none += 1
 			continue
 		t_s = (frame - 1) / fps                       # csv frame N -> video frame N-1
 		h_m, gb_pitch, gb_roll = sample_flightlog(flightlog, t_s)
 
 		u, v, from_bbox = _ground_contact_pixel(r, has_bbox)
 		if (u is None or np.isnan(h_m) or np.isnan(gb_pitch)):
-			r['X_m'] = ''; r['Y_m'] = ''; r['metric_quality'] = 'none'; n_none += 1
+			_blank_metric(r); n_none += 1
 			continue
 
 		pitch_deg = -gb_pitch                          # gb_pitch<0 looking down -> theta>0
 		pt = ground_point_from_pixel(u, v, h_m, pitch_deg, f_px, cx, cy)
 		if pt is None:                                 # at/above horizon
-			r['X_m'] = ''; r['Y_m'] = ''; r['metric_quality'] = 'none'; n_none += 1
+			_blank_metric(r); n_none += 1
 			continue
 
 		X_m, Y_m = pt
@@ -214,9 +417,21 @@ def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_
 		margin = v - v_horizon
 		quality = 'ok'
 		if (not np.isnan(gb_roll) and abs(gb_roll) > roll_max_deg) \
-				or not from_bbox or margin < horizon_margin_px:
+				or not from_bbox or margin < horizon_margin_px \
+				or drift_reasons or scale_reason:
 			quality = 'uncertain'
 		r['X_m'] = f"{X_m:.3f}"; r['Y_m'] = f"{Y_m:.3f}"; r['metric_quality'] = quality
+
+		# Stabilised ground frame: corrected feet, reference geometry.
+		r['Xs_m'] = ''; r['Ys_m'] = ''
+		if anchor is not None and not np.isnan(h0) and not np.isnan(pitch0_deg):
+			us, vs, _ = _stabilised_contact_pixel(r, has_bbox)
+			if us is not None:
+				pts = ground_point_from_pixel(us, vs, h0, pitch0_deg, f_px, cx, cy)
+				if pts is not None:
+					r['Xs_m'] = f"{pts[0]:.3f}"; r['Ys_m'] = f"{pts[1]:.3f}"
+					n_stab += 1
+
 		if quality == 'ok':
 			n_ok += 1
 		else:
@@ -224,12 +439,20 @@ def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_
 
 	_write_metric_csv(fieldnames, rows, output_csv_path)
 	print(f"  Wrote {os.path.basename(output_csv_path)}: "
-		  f"{len(rows)} rows (ok={n_ok}, uncertain={n_unc}, none={n_none}).")
+		  f"{len(rows)} rows (ok={n_ok}, uncertain={n_unc}, none={n_none}; "
+		  f"{n_stab} with stabilised coords).")
 
 
 # ---------------------------------------------------------------------------
 # CSV writers
 # ---------------------------------------------------------------------------
+
+def _blank_metric(row):
+	"""Mark a row as carrying no usable metric position, in either ground frame."""
+	row['X_m'] = ''; row['Y_m'] = ''
+	row['Xs_m'] = ''; row['Ys_m'] = ''
+	row['metric_quality'] = 'none'
+
 
 def _write_metric_csv(fieldnames, rows, output_csv_path):
 	out_fields = list(fieldnames) + [c for c in _NEW_COLS if c not in fieldnames]
@@ -244,7 +467,7 @@ def _write_all_none(fieldnames, rows, output_csv_path):
 	"""Emit the CSV with empty metric columns (quality 'none') — used when the
 	video or flight log is unavailable, so downstream steps still find the file."""
 	for r in rows:
-		r['X_m'] = ''; r['Y_m'] = ''; r['metric_quality'] = 'none'
+		_blank_metric(r)
 	_write_metric_csv(fieldnames, rows, output_csv_path)
 
 
@@ -271,6 +494,52 @@ def _find_by_stem(stem, index, exts):
 	return None
 
 
+def _media_dirs(config_path):
+	"""(input_dir, clips_dir) resolved against the project directory."""
+	cfg = configparser.ConfigParser()
+	cfg.optionxform = str
+	cfg.read(config_path)
+	project_dir = os.path.dirname(os.path.abspath(config_path))
+	d = cfg['DEFAULT']
+
+	def _resolve(key, default):
+		v = d.get(key, default)
+		return v if os.path.isabs(v) else os.path.join(project_dir, v)
+
+	return _resolve('input_dir', 'input'), _resolve('clips_dir', 'clips')
+
+
+def build_video_index(config_path):
+	"""Index every source video of a project by filename (input/ then clips/).
+	Public so other stages can locate a video without re-deriving the layout."""
+	input_dir, clips_dir = _media_dirs(config_path)
+	index = _build_index(input_dir, tuple(e.lower() for e in VIDEO_EXTS))
+	for fname, path in _build_index(clips_dir, tuple(e.lower() for e in VIDEO_EXTS)).items():
+		index.setdefault(fname, path)
+	return index
+
+
+def find_video_for_stem(stem, video_index):
+	"""Path of the source video for a tracking-CSV stem, or None."""
+	return _find_by_stem(stem, video_index, VIDEO_EXTS)
+
+
+def video_fps_for_stem(config_path, stem, default=30.0, video_index=None):
+	"""Frames per second of a video, by tracking-CSV stem.
+
+	Every stage that converts frames to seconds needs this; resolving it here
+	keeps one definition of where a project's videos live. Falls back to
+	`default` when the video cannot be found or read."""
+	index = build_video_index(config_path) if video_index is None else video_index
+	path = find_video_for_stem(stem, index)
+	if not path:
+		return float(default)
+	dims = video_dims_fps(path)
+	if not dims or dims[2] <= 0:
+		return float(default)
+	return float(dims[2])
+
+
 def run_metric_geometry(config_path):
 	"""Batch-project every *_tracking(_corrected).csv in the project's output
 	folder to ground-plane metres, writing <video>_tracking_metric.csv."""
@@ -283,18 +552,12 @@ def run_metric_geometry(config_path):
 	cfg.read(config_path)
 	d = cfg['DEFAULT']
 
-	def _resolve(key, default):
-		v = d.get(key, default)
-		return v if os.path.isabs(v) else os.path.join(project_dir, v)
+	output_dir_raw = d.get('output_dir', 'output')
+	output_dir = output_dir_raw if os.path.isabs(output_dir_raw) \
+		else os.path.join(project_dir, output_dir_raw)
+	input_dir, clips_dir = _media_dirs(config_path)
 
-	output_dir = _resolve('output_dir', 'output')
-	input_dir = _resolve('input_dir', 'input')
-	clips_dir = _resolve('clips_dir', 'clips')
-
-	video_exts = ('.mp4', '.avi', '.mov', '.mkv')
-	video_index = _build_index(input_dir, video_exts)
-	for fname, path in _build_index(clips_dir, video_exts).items():
-		video_index.setdefault(fname, path)
+	video_index = build_video_index(config_path)
 	log_index = _build_index(input_dir, ('.flightlog.csv',))
 	for fname, path in _build_index(clips_dir, ('.flightlog.csv',)).items():
 		log_index.setdefault(fname, path)
@@ -313,9 +576,8 @@ def run_metric_geometry(config_path):
 	print(f"Metric geometry: processing {len(jobs)} video(s) "
 		  f"(focal={params['focal_len_mm']}mm, sensor={params['sensor_width_mm']}mm)...")
 
-	vid_exts_cased = ('.MP4', '.mp4', '.avi', '.mov', '.mkv', '.AVI', '.MOV', '.MKV')
 	for stem, csv_path in sorted(jobs.items()):
-		video_path = _find_by_stem(stem, video_index, vid_exts_cased)
+		video_path = find_video_for_stem(stem, video_index)
 		log_path = _find_by_stem(stem, log_index, ('.flightlog.csv',))
 		out_path = os.path.join(output_dir, stem + '_tracking_metric.csv')
 		try:
@@ -325,7 +587,9 @@ def run_metric_geometry(config_path):
 				sensor_width_mm=params['sensor_width_mm'],
 				roll_max_deg=params['roll_max_deg'],
 				horizon_margin_px=params['horizon_margin_px'],
-				fpx_overrides=params['fpx_overrides'])
+				fpx_overrides=params['fpx_overrides'],
+				assumed_body_length_m=params['assumed_body_length_m'],
+				scale_tolerance=params['scale_tolerance'])
 		except Exception as e:
 			import traceback
 			print(f"  ERROR on {os.path.basename(csv_path)}: {e}")

@@ -27,16 +27,77 @@ direction compresses nonlinearly and still needs the full rectification.
 Inputs: a HERDWISE tracking CSV (<video>_tracking.csv or
 _tracking_corrected.csv) with the TASK 0 bbox columns (x1, y1, x2, y2), plus
 (for metric calibration) rel_alt telemetry from the matching .SRT — see
-BehaveAI_srt_telemetry.py.
+BehaveAI_srt_telemetry.py. Foals are excluded from the fit using the age
+classifier's age_class column when it is present; without it nobody is
+excluded and the fit is only indicative.
 
 CLI: python BehaveAI_horizon_geometry.py <tracking_csv> [--frame-height 2160]
 """
 
 import argparse
+import csv
+from collections import defaultdict
 
 import numpy as np
 
-from BehaveAI_complex_features import load_tracking_csv, compute_body_len_ref
+FOAL_LABEL = 'Foal'
+
+
+def load_boxes_csv(csv_path):
+	"""Read the box + age columns this module needs from any tracking CSV.
+
+	Deliberately independent of the interaction layer's loader: the horizon fit
+	runs BEFORE metric geometry exists (it is one way of estimating it), so it
+	must accept a plain <video>_tracking.csv with no ground coordinates at all.
+
+	Returns {'box': {(frame, id): (x1,y1,x2,y2)}, 'age': {id: label},
+	         'id_frames': {id: [frames]}, 'has_bbox': bool}.
+	"""
+	box, id_frames = {}, defaultdict(list)
+	age_votes = defaultdict(lambda: defaultdict(float))
+	has_bbox = False
+	with open(csv_path, newline='', encoding='utf-8') as f:
+		reader = csv.DictReader(f)
+		fields = set(reader.fieldnames or [])
+		has_bbox = {'x1', 'y1', 'x2', 'y2'} <= fields
+		for r in reader:
+			try:
+				frame = int(r['frame']); tid = str(r['id'])
+			except (ValueError, KeyError, TypeError):
+				continue
+			id_frames[tid].append(frame)
+			if has_bbox:
+				try:
+					x1, y1, x2, y2 = int(r['x1']), int(r['y1']), int(r['x2']), int(r['y2'])
+					if x2 > x1 and y2 > y1:
+						box[(frame, tid)] = (x1, y1, x2, y2)
+				except (ValueError, TypeError):
+					pass
+			label = (r.get('age_class', '') or '').strip()
+			if label:
+				try:
+					w = float(r.get('age_conf', '') or 0.0)
+				except (ValueError, TypeError):
+					w = 0.0
+				age_votes[tid][label] += max(w, 1e-6)
+	age = {tid: max(v, key=v.get) for tid, v in age_votes.items()}
+	return {'box': box, 'age': age,
+			'id_frames': {t: sorted(fs) for t, fs in id_frames.items()},
+			'has_bbox': has_bbox}
+
+
+def foal_flags(track_data):
+	"""{track_id: is_foal} from the AGE CLASSIFIER's labels (model_age).
+
+	Foals are excluded from the fit because their smaller apparent size breaks
+	the size-proportional-to-depth regression. Which individuals are foals is a
+	question the trained age model already answers, so it is not re-derived from
+	box size here — the confound the fit is trying to measure (apparent size vs
+	depth) is exactly the signal a size-based foal rule would key on.
+	Individuals the model never labelled are not treated as foals.
+	"""
+	age = track_data.get('age', {})
+	return {tid: (age.get(tid, '') == FOAL_LABEL) for tid in track_data['id_frames']}
 
 
 def _collect_adult_boxes(track_data, is_foal):
@@ -237,7 +298,7 @@ def camera_pitch_rad(y_horizon, frame_height_px, f_px):
 
 
 def estimate_metric_scale(fit_result, rel_alt_m, focal_len_mm, frame_width_px, frame_height_px,
-						   assumed_body_length_m=2.2):
+						   assumed_body_length_m=2.2, f_px=None):
 	"""Calibrate a ground-plane fit into real metres using drone altitude
 	telemetry (rel_alt), cross-checked against an assumed real horse body
 	length — never trust one scale source alone (see plan notes).
@@ -256,8 +317,9 @@ def estimate_metric_scale(fit_result, rel_alt_m, focal_len_mm, frame_width_px, f
 	    cos(theta) / slope — compare to the measured rel_alt_m.
 	Large disagreement between the two (height_agreement_ratio far from 1)
 	flags a violated assumption: sloped terrain, rel_alt biased by a
-	takeoff point at a different elevation than the horses, or
-	body_len_ref not measuring the same thing as assumed_body_length_m.
+	takeoff point at a different elevation than the horses, or the fitted
+	slope not measuring the same thing as assumed_body_length_m (the fit uses
+	the larger box side, which shrinks when a horse faces the camera).
 
 	Also returns gsd_lateral_mpp(y): metres-per-pixel in the LATERAL
 	(tangential) direction only at image row y — exact under the same
@@ -265,7 +327,10 @@ def estimate_metric_scale(fit_result, rel_alt_m, focal_len_mm, frame_width_px, f
 	compresses nonlinearly and is NOT covered here; converting depth
 	distances needs the full ground-plane rectification (module docstring).
 	"""
-	f_px = pixel_focal_length(focal_len_mm, frame_width_px)
+	# f_px may be supplied by the caller so a per-drone checkerboard calibration
+	# (or a non-36mm sensor width) is not silently replaced by the spec estimate.
+	if f_px is None:
+		f_px = pixel_focal_length(focal_len_mm, frame_width_px)
 	theta = camera_pitch_rad(fit_result['y_horizon'], frame_height_px, f_px)
 	cos_theta = float(np.cos(theta))
 	slope = fit_result['slope']
@@ -352,7 +417,6 @@ def _main():
 	parser.add_argument('tracking_csv', help="<video>_tracking.csv or _tracking_corrected.csv")
 	parser.add_argument('--frame-height', type=int, default=2160, help="Video frame height in pixels (default: 2160 for 4K).")
 	parser.add_argument('--frame-width', type=int, default=3840, help="Video frame width in pixels (default: 3840 for 4K).")
-	parser.add_argument('--foal-ratio', type=float, default=0.7, help="Size ratio below which a track is treated as a foal (default: 0.7).")
 	parser.add_argument('--srt', default=None,
 						 help="Matching .SRT telemetry file: calibrate the global fit into real metres using its "
 							  "rel_alt (mean over the clip) and focal_len. Only applies to the global fit "
@@ -370,15 +434,22 @@ def _main():
 							  "flagged unstable (default: 0.25).")
 	args = parser.parse_args()
 
-	track_data = load_tracking_csv(args.tracking_csv)
+	track_data = load_boxes_csv(args.tracking_csv)
 	if not track_data['has_bbox']:
 		print("ERROR: this tracking CSV has no bbox columns (x1,y1,x2,y2) — "
 			  "re-run classify_track (TASK 0 bbox output) to regenerate it.")
 		return
 
-	ref, size_ratio, is_foal = compute_body_len_ref(track_data, foal_ratio=args.foal_ratio)
+	is_foal = foal_flags(track_data)
 	n_foal = sum(1 for v in is_foal.values() if v)
-	print(f"body_len_ref={ref:.1f}px across {len(track_data['id_frames'])} track(s) ({n_foal} likely foal(s), excluded).")
+	n_tracks = len(track_data['id_frames'])
+	if not track_data['age']:
+		print(f"WARNING: no age labels in this CSV ({n_tracks} track(s)) — the age "
+			  f"classifier (model_age) has not run on it, so foals CANNOT be excluded "
+			  f"from the fit. A foal's smaller apparent size flattens the size-vs-depth "
+			  f"slope, biasing y_horizon; treat the numbers below as indicative only.")
+	else:
+		print(f"{n_tracks} track(s), {n_foal} foal(s) excluded (age classifier).")
 
 	if args.check_drift:
 		windows = estimate_ground_plane_windowed(

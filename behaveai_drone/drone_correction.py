@@ -66,9 +66,10 @@ _RANSAC_REPROJ = 3.0
 # persistently unusable and (when enabled) switch to smoothing-only fallback.
 _FALLBACK_POOR_FRACTION = 0.5
 
-# Relative change in the cumulative uniform-scale factor that marks a new
-# stable segment (altitude / zoom change). Exposed via the run log so TASK 3/4
-# can recompute body_len_ref per segment when body_len_ref_scope = segment.
+# Relative change in the cumulative uniform-scale factor that marks a new stable
+# segment (altitude / zoom change). Reported in the run log as a diagnostic: a
+# clip that changes scale mid-way breaks the single reference geometry the
+# stabilised metric frame assumes (see metric_geometry.telemetry_drift).
 _SCALE_SEGMENT_THRESH = 0.10
 
 
@@ -458,7 +459,8 @@ def correct_video_tracking(
 				  f"({n_poor}/{n_steps} steps) and fallback disabled — "
 				  f"positions flagged 'none'/'uncertain'.")
 
-	# Report cumulative-scale drift so TASK 3/4 can segment body_len_ref.
+	# Report cumulative-scale drift: it flags clips where the camera distance
+	# changed, which the metric stage's fixed reference geometry cannot represent.
 	_report_scale_segments(frame_scale, processed_frames)
 
 	# Diagnostic sidecar for evaluation: per-frame continuous residual flow std,
@@ -548,7 +550,8 @@ def _report_scale_segments(frame_scale, processed_frames):
 
 	A new segment starts whenever the cumulative uniform scale has drifted more
 	than _SCALE_SEGMENT_THRESH (relative) from the scale at the segment start.
-	This exposes altitude/zoom changes for TASK 3/4 (body_len_ref_scope=segment).
+	This exposes altitude/zoom changes, which invalidate the single reference
+	geometry the stabilised metric frame (Xs_m/Ys_m) is built on.
 	"""
 	if not frame_scale:
 		return
