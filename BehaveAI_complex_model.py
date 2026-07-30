@@ -10,8 +10,13 @@ The DEFAULT model is a scikit-learn baseline on fixed-size window feature vector
 (robust with little data, interpretable). The lstm/transformer models train a real
 torch sequence network over the per-timestep feature sequence (each segment is
 sliced into complex_seq_steps sub-windows); they reuse the same features and the
-same by-video evaluation, and degrade gracefully to the baseline when torch is
-absent.
+same by-video evaluation. Asking for a sequence model without torch is an ERROR,
+not a quiet downgrade: substituting the baseline used to produce a saved model
+whose own saved_settings.ini claimed a different architecture.
+
+All features are in METRES / m/s and come from <video>_tracking_metric.csv (see
+BehaveAI_complex_features). A video without metric geometry is skipped rather
+than measured in some other unit.
 
 First-class inputs: the per-individual YOLO simple-behaviour labels (primary AND,
 when present, secondary) for every involved individual, plus the group synchrony
@@ -47,7 +52,7 @@ import glob
 import argparse
 import configparser
 import shutil
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import numpy as np
 
@@ -86,18 +91,17 @@ def load_model_config(config_path):
 	cfg.optionxform = str
 	cfg.read(config_path)
 	d = cfg['DEFAULT']
+	CF.reject_retired_keys(d, config_path)
 	return {
 		'model_type':          d.get('complex_model_type', 'baseline'),
 		'baseline_classifier': d.get('complex_baseline_classifier', 'random_forest'),
 		'window_frames':       int(float(d.get('complex_window_frames', '30'))),
-		'max_interaction_distance': float(d.get('complex_max_interaction_distance', '400')),
+		'max_interaction_distance_m': float(d.get('complex_max_interaction_distance_m', '15')),
 		'contact_iou_thresh':  float(d.get('complex_contact_iou_thresh', '0.05')),
-		'contact_dist_bodylen': float(d.get('complex_contact_dist_bodylen', '1.5')),
+		'contact_dist_m':      float(d.get('complex_contact_dist_m', '2.5')),
 		'min_duration_frames': int(float(d.get('complex_min_duration_frames', '10'))),
-		'body_len_ref_scope':  d.get('body_len_ref_scope', 'video'),
-		'foal_size_ratio':     float(d.get('foal_size_ratio_thresh', '0.7')),
-		'edge_granularity':    d.get('interaction_edge_granularity', 'per_interaction'),
-		'weight_metric':       d.get('interaction_weight_metric', 'duration'),
+		'edge_granularity':    CF.normalise_granularity(d.get('interaction_edge_granularity', 'per_dyad')),
+		'weight_metric':       d.get('interaction_weight_metric', 'sri'),
 		'confusion_merge_rate': float(d.get('complex_confusion_merge_rate', '0.20')),
 		'predict_min_proba':   float(d.get('complex_predict_min_proba', '0.5')),
 		'holdout_fraction':    float(d.get('val_frequency', '0.1')),
@@ -129,6 +133,15 @@ def _config_path_for(project_path):
 	return os.path.join(p, 'BehaveAI_settings.ini') if os.path.isdir(p) else p
 
 
+def _video_index(config_path):
+	"""Project video index (for fps lookups), or None if unavailable."""
+	try:
+		from behaveai_drone.metric_geometry import build_video_index
+		return build_video_index(config_path)
+	except Exception:
+		return None
+
+
 # ---------------------------------------------------------------------------
 # Per-video cache (track data, features, quality)
 # ---------------------------------------------------------------------------
@@ -148,22 +161,22 @@ def _read_quality(csv_path):
 	return q
 
 
-def _build_video_cache(stem, csv_path, params):
+def _build_video_cache(stem, csv_path, params, config_path=None, video_index=None):
 	"""Load + precompute everything needed to extract features for one video."""
-	track_data = CF.load_tracking_csv(csv_path)
-	ref, size_ratio, is_foal = CF.compute_body_len_ref(
-		track_data, scope=params['body_len_ref_scope'], foal_ratio=params['foal_size_ratio'])
+	fps = CF.video_fps(config_path, stem, video_index) if config_path else 30.0
+	track_data = CF.load_tracking_csv(csv_path, fps=fps)
+	age_by_track, age_conf_by_track = CF.track_age_classes(track_data)
 	pairwise = CF.compute_pairwise_features(
-		track_data, ref, size_ratio,
-		max_distance=params['max_interaction_distance'],
+		track_data, age_by_track,
+		max_distance_m=params['max_interaction_distance_m'],
 		contact_iou_thresh=params['contact_iou_thresh'],
-		contact_dist_bodylen=params['contact_dist_bodylen'])
+		contact_dist_m=params['contact_dist_m'])
 	pair_index = defaultdict(list)
 	for r in pairwise:
 		pair_index[(r['source_id'], r['target_id'])].append(r)
 	return {
 		'stem': stem, 'csv_path': csv_path, 'track_data': track_data,
-		'ref': ref, 'size_ratio': size_ratio, 'is_foal': is_foal,
+		'age': age_by_track, 'age_conf': age_conf_by_track,
 		'pairwise': pairwise, 'pair_index': pair_index,
 		'quality': _read_quality(csv_path),
 	}
@@ -195,7 +208,7 @@ def segment_feature_dict(cache, ids, start, end):
 
 	Pools the dyadic features of all ordered pairs among `ids` over the window
 	(aggregate_window -> scalars + YOLO label bag), adds aggregated group features
-	for the ad-hoc group of `ids`, plus size/foal/individual-count meta.
+	for the ad-hoc group of `ids`, plus age/individual-count meta.
 	Returns (feature_dict, quality_weight).
 	"""
 	ids = [str(t) for t in ids]
@@ -220,16 +233,18 @@ def segment_feature_dict(cache, ids, start, end):
 			present = [t for t in ids if (f, t) in td['pos']]
 			if present:
 				sub[f] = [('seg', present)]
-	gfeat_rows = CF.compute_group_features(td, sub, cache['ref']) if sub else []
+	gfeat_rows = CF.compute_group_features(td, sub) if sub else []
 	feat.update(_aggregate_scalars(gfeat_rows, _GROUP_SCALARS, 'gp_'))
 
-	# --- Meta: individual count + size ratios + foal count ---
-	srs = [cache['size_ratio'].get(t, 1.0) for t in ids]
+	# --- Meta: individual count + age composition (from the age classifier) ---
+	# Counting each age class separately keeps 'unknown' visible to the model
+	# instead of folding it into "not a foal", which a single foal_count would.
+	ages = [cache['age'].get(t, CF.UNKNOWN_AGE) for t in ids]
 	feat['meta_n_individuals'] = float(len(ids))
-	feat['meta_size_ratio_mean'] = float(np.mean(srs)) if srs else 1.0
-	feat['meta_size_ratio_min'] = float(np.min(srs)) if srs else 1.0
-	feat['meta_size_ratio_max'] = float(np.max(srs)) if srs else 1.0
-	feat['meta_foal_count'] = float(sum(1 for t in ids if cache['is_foal'].get(t, False)))
+	for label, n in Counter(ages).items():
+		feat[f'meta_n_age={label}'] = float(n)
+	feat['meta_age_conf_mean'] = float(
+		np.mean([cache['age_conf'].get(t, 0.0) for t in ids])) if ids else 0.0
 
 	# --- Quality weight: fraction of involved (frame,id) rows that are 'ok' ---
 	q = cache['quality']
@@ -278,6 +293,7 @@ def build_dataset(project_path, include_holdout='train'):
 	X, y, groups, weights = [], [], [], []
 	if not ann_files:
 		return X, y, groups, weights
+	video_index = _video_index(config_path)
 
 	for ann_path in ann_files:
 		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
@@ -285,17 +301,16 @@ def build_dataset(project_path, include_holdout='train'):
 			is_ho = is_holdout_video(stem, params['holdout_fraction'])
 			if (include_holdout == 'train') == is_ho:
 				continue
-		# Locate the tracking CSV (corrected preferred).
-		csv_path = None
-		for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
-			p = os.path.join(output_dir, cand)
-			if os.path.exists(p):
-				csv_path = p
-				break
+		csv_path = CF.find_metric_csv(output_dir, stem)
 		if csv_path is None:
-			print(f"  {stem}: no tracking CSV — annotations skipped.")
+			print(f"  {stem}: no metric tracking CSV — annotations skipped "
+				  f"(the model works in metres; run the metric stage first).")
 			continue
-		cache = _build_video_cache(stem, csv_path, params)
+		try:
+			cache = _build_video_cache(stem, csv_path, params, config_path, video_index)
+		except CF.MissingMetricError as e:
+			print(f"  {stem}: {e} — annotations skipped.")
+			continue
 
 		with open(ann_path, newline='', encoding='utf-8') as f:
 			for r in csv.DictReader(f):
@@ -528,22 +543,20 @@ def classify_video(project_path, video_name):
 		if os.path.basename(video_name).endswith(suf):
 			stem = os.path.basename(video_name)[:-len(suf)]
 			break
-	# Predict on the most-processed CSV (best identities + metric columns), so the
-	# predictions share the id space of the interaction graph and the activity budget.
-	# Training (build_dataset) intentionally stays on corrected/raw to match the id
-	# space the complex annotations were made in.
-	csv_path = None
-	for cand in (stem + '_tracking_metric.csv', stem + '_tracking_stitched.csv',
-				 stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
-		p = os.path.join(output_dir, cand)
-		if os.path.exists(p):
-			csv_path = p
-			break
+	# Training and prediction now read the SAME metric CSV. They used to differ
+	# (train on corrected/raw, predict on metric/stitched), which silently put the
+	# two in different id spaces whenever stitching was on.
+	csv_path = CF.find_metric_csv(output_dir, stem)
 	if csv_path is None:
-		print(f"{stem}: no tracking CSV found.")
+		print(f"{stem}: no metric tracking CSV — nothing to classify (the model "
+			  f"works in metres; run the metric stage first).")
 		return
 
-	cache = _build_video_cache(stem, csv_path, params)
+	try:
+		cache = _build_video_cache(stem, csv_path, params, config_path, _video_index(config_path))
+	except CF.MissingMetricError as e:
+		print(f"{stem}: {e}")
+		return
 	win = params['window_frames']
 	thr = params['predict_min_proba']
 
@@ -616,18 +629,25 @@ def _merge_adjacent_predictions(preds):
 
 
 def _populate_edge_interaction_types(output_dir, stem, preds):
-	"""Fill interaction_type in the per-interaction edges file from predictions."""
+	"""Fill interaction_type (and actor_id) in the edges file from predictions.
+
+	The deterministic edges are UNDIRECTED — every metric it computes is
+	symmetric — so direction enters here and only here: the prediction's
+	track_ids are ordered by role, and its first id is recorded as actor_id.
+	Without that column the direction the model inferred would be lost when the
+	mirrored row was dropped.
+	"""
 	edges_path = os.path.join(output_dir, stem + '_interaction_edges.csv')
 	if not os.path.exists(edges_path) or not preds:
 		return
-	# Best (highest-probability) behaviour per ordered pair.
+	# Best (highest-probability) behaviour per UNORDERED pair, keeping the actor.
 	best = {}
 	for p in preds:
 		ids = p['track_ids'].split(';')
 		if len(ids) == 2:
-			key = (ids[0], ids[1])
-			if key not in best or p['probability'] > best[key][1]:
-				best[key] = (p['behaviour'], p['probability'])
+			key = tuple(sorted(ids, key=lambda t: (len(str(t)), str(t))))
+			if key not in best or p['probability'] > best[key][2]:
+				best[key] = (p['behaviour'], ids[0], p['probability'])
 	with open(edges_path, newline='', encoding='utf-8') as f:
 		reader = csv.DictReader(f)
 		fields = reader.fieldnames or []
@@ -635,9 +655,12 @@ def _populate_edge_interaction_types(output_dir, stem, preds):
 			return
 		rows = list(reader)
 	for r in rows:
-		key = (r.get('source_id'), r.get('target_id'))
+		key = tuple(sorted((r.get('source_id'), r.get('target_id')),
+						   key=lambda t: (len(str(t)), str(t))))
 		if key in best:
 			r['interaction_type'] = best[key][0]
+			if 'actor_id' in fields:
+				r['actor_id'] = best[key][1]
 	with open(edges_path, 'w', newline='', encoding='utf-8') as f:
 		w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
 		w.writeheader()
@@ -736,22 +759,23 @@ def build_sequence_dataset(project_path, params=None, include_holdout='train'):
 		return X_seq, y, groups, weights
 
 	n_steps = params['seq_steps']
+	video_index = _video_index(config_path)
 	for ann_path in ann_files:
 		stem = os.path.basename(ann_path).replace('_complex_behaviours.csv', '')
 		if include_holdout != 'all':
 			is_ho = is_holdout_video(stem, params['holdout_fraction'])
 			if (include_holdout == 'train') == is_ho:
 				continue
-		csv_path = None
-		for cand in (stem + '_tracking_corrected.csv', stem + '_tracking.csv'):
-			p = os.path.join(output_dir, cand)
-			if os.path.exists(p):
-				csv_path = p
-				break
+		csv_path = CF.find_metric_csv(output_dir, stem)
 		if csv_path is None:
-			print(f"  {stem}: no tracking CSV — annotations skipped.")
+			print(f"  {stem}: no metric tracking CSV — annotations skipped "
+				  f"(the model works in metres; run the metric stage first).")
 			continue
-		cache = _build_video_cache(stem, csv_path, params)
+		try:
+			cache = _build_video_cache(stem, csv_path, params, config_path, video_index)
+		except CF.MissingMetricError as e:
+			print(f"  {stem}: {e} — annotations skipped.")
+			continue
 		with open(ann_path, newline='', encoding='utf-8') as f:
 			for r in csv.DictReader(f):
 				try:
@@ -960,11 +984,21 @@ def _train_deep_model(project_path, params, project_dir, config_path):
 
 	comp = _make_deep_components()
 	if comp is None:
-		print(f"complex_model_type='{params['model_type']}' needs torch, which is "
-			  "not available — training the scikit-learn baseline instead. "
-			  "Install torch to enable the sequence model.")
-		base = dict(params); base['model_type'] = 'baseline'
-		return _train_baseline(project_path, base, project_dir, config_path)
+		# Deliberately NOT falling back to the baseline. Doing so wrote a bundle
+		# with model_kind='baseline' next to a saved_settings.ini still claiming
+		# 'lstm', so the artefact contradicted its own provenance record — the one
+		# thing a saved model must never do. torch is absent only when the
+		# environment is broken (the launcher installs it per CPU/CUDA; ultralytics
+		# needs it too), so this is a setup error, not a supported mode.
+		print(f"ERROR: complex_model_type='{params['model_type']}' needs torch, which "
+			  f"is not importable in this environment.\n"
+			  f"  Nothing was written to {MODEL_DIR_NAME}/ — the previously saved "
+			  f"model (if any) is untouched.\n"
+			  f"  Either repair the environment (re-run the launcher, which installs "
+			  f"the right torch build for this machine) or set "
+			  f"complex_model_type = baseline in the INI if you actually want the "
+			  f"scikit-learn model.")
+		return None
 
 	X_seq, y, groups, weights = build_sequence_dataset(project_path, params, include_holdout='train')
 	if len(X_seq) < 2:
@@ -1108,7 +1142,7 @@ def run_complex_classify(project_path):
 	model exists yet (model_complex/pipeline.joblib absent), which is the normal case
 	for projects without complex-behaviour annotations.
 
-	Prefers <video>_tracking_corrected.csv, falls back to <video>_tracking.csv, and
+	Requires <video>_tracking_metric.csv (the model works in metres) and
 	classifies each distinct video stem once.
 	"""
 	config_path = _config_path_for(project_path)
@@ -1120,23 +1154,13 @@ def run_complex_classify(project_path):
 			  "skipping complex classification.")
 		return
 
-	stems = []
-	seen = set()
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking*.csv'))):
-		base = os.path.basename(p)
-		stem = None
-		for suf in ('_tracking_metric.csv', '_tracking_stitched.csv',
-					'_tracking_corrected.csv', '_tracking.csv'):
-			if base.endswith(suf):
-				stem = base[:-len(suf)]
-				break
-		if stem is None or stem in seen:
-			continue
-		seen.add(stem)
-		stems.append(stem)
+	suffix = '_tracking_metric.csv'
+	stems = [os.path.basename(p)[:-len(suffix)]
+			 for p in sorted(glob.glob(os.path.join(output_dir, '*' + suffix)))]
 
 	if not stems:
-		print(f"  No tracking CSVs found in {output_dir} — nothing to classify.")
+		print(f"  No metric tracking CSVs in {output_dir} — nothing to classify "
+			  f"(the model works in metres; run the metric stage first).")
 		return
 
 	print(f"Complex classification: processing {len(stems)} video(s)...")
@@ -1164,10 +1188,8 @@ def count_complex_annotations(project_path, include_holdout='train'):
 			is_ho = is_holdout_video(stem, params['holdout_fraction'])
 			if (include_holdout == 'train') == is_ho:
 				continue
-		# build_dataset skips annotation files whose tracking CSV is missing.
-		has_csv = any(os.path.exists(os.path.join(output_dir, stem + suf))
-					  for suf in ('_tracking_corrected.csv', '_tracking.csv'))
-		if not has_csv:
+		# build_dataset skips annotation files whose metric tracking CSV is missing.
+		if CF.find_metric_csv(output_dir, stem) is None:
 			continue
 		with open(ann_path, newline='', encoding='utf-8') as f:
 			for r in csv.DictReader(f):

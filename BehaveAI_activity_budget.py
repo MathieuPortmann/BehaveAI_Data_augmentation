@@ -177,15 +177,15 @@ def load_interaction_metrics(output_dir, video_stem, fps):
     """Read <stem>_interaction_edges.csv and derive per-individual social metrics.
 
     Adapts to edge granularity (the header differs, see _EDGE_COLS in
-    BehaveAI_complex_features): episode files (per_interaction / per_segment) carry
-    n_frames_observed / contact_fraction / mean_distance_bodylen / interaction_type /
+    BehaveAI_complex_features): episode files (per_dyad / per_segment) carry
+    n_frames_observed / contact_fraction / mean_distance_m / interaction_type /
     weight; per_frame files carry one row per observed frame (in_contact,
-    distance_bodylen).
+    distance_m).
 
-    Both ordered directions (A,B) and (B,A) are emitted by the graph with identical
-    counts, so each edge row is attributed only to its source_id (partner =
-    target_id) — every individual is credited as the source of its own interactions,
-    with no double counting.
+    The graph is UNDIRECTED — one row per unordered pair — so each row is credited
+    to BOTH of its endpoints, each with the other as partner. (It used to emit both
+    orderings and credit only source_id; crediting one endpoint of a single
+    undirected row would leave every target_id with no partners at all.)
 
     Returns dict track_id(str) -> social-metric dict. Missing file -> {}.
     """
@@ -221,22 +221,23 @@ def load_interaction_metrics(output_dir, video_stem, fps):
             if episode_mode:
                 n_obs = _f(r, 'n_frames_observed')
                 cfrac = _f(r, 'contact_fraction')
-                mdist = _f(r, 'mean_distance_bodylen')
+                mdist = _f(r, 'mean_distance_m')
                 itype = (r.get('interaction_type', '') or '').strip()
             else:  # per_frame: one observed frame per row
                 n_obs = 1.0
                 cfrac = 1.0 if _f(r, 'in_contact') else 0.0
-                mdist = _f(r, 'distance_bodylen')
+                mdist = _f(r, 'distance_m')
                 itype = ''  # per_frame edges carry no interaction_type
 
-            a = acc[s]
-            a['partners'].add(t)
-            a['weighted_degree'] += weight
-            a['frames'] += n_obs
-            a['contact_frames'] += cfrac * n_obs
-            a['dist_weight_sum'] += mdist * n_obs
-            if itype:
-                a['type_frames'][itype] += n_obs
+            for me, partner in ((s, t), (t, s)):
+                a = acc[me]
+                a['partners'].add(partner)
+                a['weighted_degree'] += weight
+                a['frames'] += n_obs
+                a['contact_frames'] += cfrac * n_obs
+                a['dist_weight_sum'] += mdist * n_obs
+                if itype:
+                    a['type_frames'][itype] += n_obs
 
     out = {}
     for tid, a in acc.items():
@@ -244,13 +245,15 @@ def load_interaction_metrics(output_dir, video_stem, fps):
         dominant_type = (max(a['type_frames'].items(), key=lambda kv: kv[1])[0]
                          if a['type_frames'] else '')
         out[tid] = {
-            'interaction_n_partners':            len(a['partners']),
-            'interaction_weighted_degree':       round(a['weighted_degree'], 4),
-            'interaction_time_s':                round(frames / fps, 2) if fps and fps > 0 else 0.0,
-            'contact_time_s':                    round(a['contact_frames'] / fps, 2) if fps and fps > 0 else 0.0,
-            'contact_fraction':                  round(a['contact_frames'] / frames, 4) if frames > 0 else 0.0,
-            'mean_interaction_distance_bodylen': round(a['dist_weight_sum'] / frames, 4) if frames > 0 else 0.0,
-            'dominant_interaction_type':         dominant_type,
+            'interaction_n_partners':       len(a['partners']),
+            'interaction_weighted_degree':  round(a['weighted_degree'], 4),
+            'interaction_time_s':           round(frames / fps, 2) if fps and fps > 0 else 0.0,
+            'contact_time_s':               round(a['contact_frames'] / fps, 2) if fps and fps > 0 else 0.0,
+            'contact_fraction':             round(a['contact_frames'] / frames, 4) if frames > 0 else 0.0,
+            'mean_interaction_distance_m':  round(a['dist_weight_sum'] / frames, 4) if frames > 0 else 0.0,
+            # MODEL-DERIVED: interaction_type is back-filled by the complex model.
+            # Kept separate downstream so the budget CSV stays deterministic.
+            'dominant_interaction_type':    dominant_type,
         }
     return out
 
@@ -673,10 +676,14 @@ def run_activity_budget(config_path, fps_default=30.0):
     # Fixed schema for the optional social-metric columns. Added only when at least
     # one video actually has an interaction graph, so a project that never built one
     # produces a byte-for-byte identical file to before this feature.
+    # DETERMINISTIC social metrics: geometry + tracking only, no model in the loop.
     _INTERACTION_FIELDS = ['interaction_n_partners', 'interaction_weighted_degree',
                            'interaction_time_s', 'interaction_pct',
                            'contact_time_s', 'contact_fraction',
-                           'mean_interaction_distance_bodylen', 'dominant_interaction_type']
+                           'mean_interaction_distance_m']
+    # MODEL-DERIVED: everything below inherits the complex model's error rate and
+    # therefore lives in its own file (see the second CSV written at the end).
+    _PREDICTED_FIELDS = ['dominant_interaction_type']
     has_interactions = any(bool(v) for v in interaction_cache.values())
 
     for csv_path in csv_files:
@@ -745,7 +752,9 @@ def run_activity_budget(config_path, fps_default=30.0):
                         if duration_s > 0 else 0.0
                 else:
                     for k in _INTERACTION_FIELDS:
-                        rec[k] = '' if k == 'dominant_interaction_type' else 0.0
+                        rec[k] = 0.0
+                    for k in _PREDICTED_FIELDS:
+                        rec[k] = ''
 
             rec['video_filename'] = video_filename
             rec['group_id']       = group_id
@@ -792,29 +801,48 @@ def run_activity_budget(config_path, fps_default=30.0):
             behavior_fields += [f'behavior_{b}_s',
                                 f'behavior_{b}_n',
                                 f'behavior_{b}_pct']
-        # Optional complex-behaviour columns (empty across the board when no
-        # complex model has ever run on this project).
+        extra_fields = ['dominant_behavior_time', 'dominant_behavior_count']
+        interaction_fields = _INTERACTION_FIELDS if has_interactions else []
+        # NOTE: complex_* and dominant_interaction_type are NOT here. They are
+        # predictions of the complex-behaviour model, not measurements, and mixing
+        # them into this file made the whole budget look like one deterministic
+        # aggregation when part of it carried a classifier's error rate.
+        fieldnames = (base_fields + behavior_fields
+                      + interaction_fields + extra_fields)
+
+        # Sort by video then individual_type (group_member first)
+        all_individual_rows.sort(
+            key=lambda r: (r['video_filename'],
+                           0 if r['individual_type'] == 'group_member' else 1,
+                           r['track_id']))
+
+        with open(out1, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(all_individual_rows)
+
+        print(f"Written: {out1}")
+
+    # ── Write CSV 2: model-derived per-individual columns ─────────────────
+    # Same keys (video_filename + track_id) so it joins back onto CSV 1 in one
+    # line of R, but separate so a reader can never mistake a prediction for a
+    # measurement.
+    if all_individual_rows and (all_complex_behaviours or has_interactions):
+        out2 = os.path.join(output_dir, 'activity_budget_predicted.csv')
+        pred_key_fields = ['video_filename', 'group_id', 'group_type',
+                           'track_id', 'individual_type', 'duration_s']
         complex_fields = []
         for b in all_complex_behaviours:
             complex_fields += [f'complex_{b}_s',
                                f'complex_{b}_n',
                                f'complex_{b}_pct']
-        extra_fields = ['dominant_behavior_time', 'dominant_behavior_count']
-        interaction_fields = _INTERACTION_FIELDS if has_interactions else []
-        fieldnames = (base_fields + behavior_fields + complex_fields
-                      + interaction_fields + extra_fields)
-
-        with open(out1, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        pred_fields = pred_key_fields + complex_fields + \
+            (_PREDICTED_FIELDS if has_interactions else [])
+        with open(out2, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=pred_fields, extrasaction='ignore')
             writer.writeheader()
-            # Sort by video then individual_type (group_member first)
-            all_individual_rows.sort(
-                key=lambda r: (r['video_filename'],
-                               0 if r['individual_type'] == 'group_member' else 1,
-                               r['track_id']))
             writer.writerows(all_individual_rows)
-
-        print(f"Written: {out1}")
+        print(f"Written: {out2}  (model predictions — join on video_filename+track_id)")
 
     # ── Write CSV 4: suspects / strangers with timecodes ──────────────────
     if all_suspect_rows:

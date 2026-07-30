@@ -11,12 +11,27 @@ Group features are computed over the WHOLE co-present herd per frame (no
 spatial sub-grouping): every individual present in a frame counts as one group
 for that frame.
 
-Everything stays in image space (no metric conversion). All sizes/speeds are
-normalised by a reference body length body_len_ref = robust median box diagonal
-of ADULT-sized horses (clarification 3), never each horse's own size.
+EVERYTHING IS IN METRES. Distances are real ground distances (m), speeds are
+real ground speeds (m/s), areas are m^2. There is no body-length normalisation
+and no pixel-space fallback: a video without usable metric geometry is skipped
+outright rather than silently measured in a different unit, because mixing
+body-lengths and metres across videos makes the resulting features
+incomparable — which is the whole point of the graph.
+
+Two ground frames come out of the metric stage and are used for what each is
+valid for (see behaveai_drone/metric_geometry.py):
+  - X_m, Y_m   : per-frame, camera-relative -> DISTANCES between animals seen
+                 in the same frame, contact, group area/cohesion.
+  - Xs_m, Ys_m : stabilised, one reference geometry -> SPEEDS, headings,
+                 approach rates. Differencing X_m instead would measure the
+                 drone's motion, not the horse's.
+
+Foal/adult comes from the trained age classifier (model_age, "model 0.5") via
+the age_class/age_conf columns — never re-derived from box size here. An
+individual the age model did not label is 'unknown', not guessed.
 
 Inputs (per video, from the project output folder):
-  - <video>_tracking_corrected.csv  (preferred; falls back to <video>_tracking.csv)
+  - <video>_tracking_metric.csv  (REQUIRED: carries X_m/Y_m/Xs_m/Ys_m)
 
 Outputs (overwritten on every run / parameter change):
   - <video>_interaction_edges.csv   (one row per ordered dyad, episode, or frame)
@@ -58,9 +73,66 @@ except Exception:
 	_NX_AVAILABLE = False
 
 
+# Speed below which motion cannot be told from detection jitter. This is measured
+# per clip by estimate_speed_noise_floor(); the constant below is only the
+# fallback for clips with too little data to measure. A fixed value cannot be
+# right in general — the floor scales with altitude, box size and detector
+# quality. On 4K footage at ~45 m, the 1.8 px of box jitter measured in the
+# HERDWISE corpus already yields ~0.4 m/s of apparent speed on a standing horse,
+# so the few-cm/s value one would naively pick filters nothing at all.
+_FALLBACK_SPEED_FLOOR_MS = 0.4
+
+# Quantile of the simulated noise-only speed distribution taken as the floor.
+_SPEED_FLOOR_QUANTILE = 0.90
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+# Keys that measured things in pixels / body lengths, and what replaced them when
+# the interaction layer moved to metres. Silently ignoring a stale key would let a
+# project believe it is gating interactions at 800 (px) while the code reads a
+# default of 15 (m), so a leftover key is an error, not a warning. No automatic
+# conversion: turning 800 px into metres needs a scale that does not exist
+# retroactively.
+_RETIRED_KEYS = {
+	'complex_max_interaction_distance': 'complex_max_interaction_distance_m (now in METRES)',
+	'complex_contact_dist_bodylen':     'complex_contact_dist_m (now in METRES)',
+	'complex_speed_low_bodylen':        'complex_speed_low_ms (now in m/s)',
+	'complex_speed_high_bodylen':       'complex_speed_high_ms (now in m/s)',
+	'foal_size_ratio_thresh':           'nothing — foal/adult now comes from the age classifier (model_age)',
+	'body_len_ref_scope':               'nothing — it never had any effect and body lengths are gone',
+}
+
+# Granularity spellings: 'per_interaction' described one edge per EPISODE, which
+# is not what it produced (one edge per dyad for the whole clip). Renamed, old
+# spelling still accepted so existing INIs keep working.
+_GRANULARITY_ALIASES = {'per_interaction': 'per_dyad'}
+
+
+def reject_retired_keys(d, config_path=''):
+	"""Raise if an INI still carries a pixel/body-length key from before the
+	metric migration. Shared with the model + candidate stages so a stale project
+	fails the same way whichever entry point is used."""
+	stale = [k for k in _RETIRED_KEYS if k in d]
+	if not stale:
+		return
+	where = f" in {os.path.basename(config_path)}" if config_path else ""
+	lines = "\n".join(f"    {k}  ->  {_RETIRED_KEYS[k]}" for k in stale)
+	raise ValueError(
+		f"The interaction layer now works in metres, but{where} these retired "
+		f"settings are still present:\n{lines}\n"
+		f"Remove them (and set the replacement where there is one) — they are not "
+		f"converted automatically, because pixels cannot be turned into metres "
+		f"after the fact.")
+
+
+def normalise_granularity(value):
+	"""Canonical granularity name, accepting the pre-rename spelling."""
+	value = (value or '').strip() or 'per_dyad'
+	return _GRANULARITY_ALIASES.get(value, value)
+
 
 def load_complex_config(config_path):
 	"""Read the TASK 4 parameters from a BehaveAI INI (DEFAULT section)."""
@@ -68,16 +140,15 @@ def load_complex_config(config_path):
 	cfg.optionxform = str
 	cfg.read(config_path)
 	d = cfg['DEFAULT']
+	reject_retired_keys(d, config_path)
 	return {
-		'max_interaction_distance': float(d.get('complex_max_interaction_distance', '400')),
-		'min_duration_frames':      int(float(d.get('complex_min_duration_frames', '10'))),
-		'contact_iou_thresh':       float(d.get('complex_contact_iou_thresh', '0.05')),
-		'contact_dist_bodylen':     float(d.get('complex_contact_dist_bodylen', '1.5')),
-		'window_frames':            int(float(d.get('complex_window_frames', '30'))),
-		'edge_granularity':         d.get('interaction_edge_granularity', 'per_interaction'),
-		'weight_metric':            d.get('interaction_weight_metric', 'duration'),
-		'body_len_ref_scope':       d.get('body_len_ref_scope', 'video'),
-		'foal_size_ratio':          float(d.get('foal_size_ratio_thresh', '0.7')),
+		'max_interaction_distance_m': float(d.get('complex_max_interaction_distance_m', '15')),
+		'min_duration_frames':        int(float(d.get('complex_min_duration_frames', '10'))),
+		'contact_iou_thresh':         float(d.get('complex_contact_iou_thresh', '0.05')),
+		'contact_dist_m':             float(d.get('complex_contact_dist_m', '2.5')),
+		'window_frames':              int(float(d.get('complex_window_frames', '30'))),
+		'edge_granularity':           normalise_granularity(d.get('interaction_edge_granularity', 'per_dyad')),
+		'weight_metric':              d.get('interaction_weight_metric', 'sri'),
 	}
 
 
@@ -104,54 +175,81 @@ def _best_class(row, kind):
 	return ''
 
 
-def load_tracking_csv(csv_path):
-	"""Load a (corrected) tracking CSV into a track_data dict.
+class MissingMetricError(Exception):
+	"""A tracking CSV carries no usable ground-plane coordinates.
 
-	Prefers the drone-corrected columns (x_corrected, y_corrected and, when
-	present, vx_corrected/vy_corrected); otherwise falls back to raw (x, y) with
-	a one-time warning and velocities computed by finite differences. Detects the
-	bbox columns; when absent, box/overlap features are disabled (warn once).
+	Raised instead of falling back to pixels: a video measured in a different
+	unit than its neighbours would poison every cross-video comparison the
+	interaction graph exists to support."""
+
+
+def load_tracking_csv(csv_path, fps=30.0):
+	"""Load a metric tracking CSV into a track_data dict, in METRES.
+
+	Requires the columns the metric stage appends (X_m/Y_m and, for speeds,
+	Xs_m/Ys_m). Rows whose metric_quality is 'none' carry no ground position and
+	are dropped. Raises MissingMetricError when nothing usable is left.
+
+	pos  : per-frame camera-relative ground metres  -> distances within a frame
+	pos_s: stabilised ground metres                 -> displacement over time
+	vel  : m/s in the stabilised frame, from smoothed finite differences
 	"""
 	with open(csv_path, newline='', encoding='utf-8') as f:
 		reader = csv.DictReader(f)
 		fieldnames = list(reader.fieldnames or [])
 		rows = [dict(r) for r in reader]
 
-	used_corrected = 'x_corrected' in fieldnames and 'y_corrected' in fieldnames
-	has_vel = 'vx_corrected' in fieldnames and 'vy_corrected' in fieldnames
+	name = os.path.basename(csv_path)
+	if not ('X_m' in fieldnames and 'Y_m' in fieldnames):
+		raise MissingMetricError(
+			f"{name} has no X_m/Y_m columns — run the metric geometry stage "
+			f"(metric_enabled = true) before the interaction graph.")
+	has_stab = 'Xs_m' in fieldnames and 'Ys_m' in fieldnames
 	has_bbox = all(c in fieldnames for c in ('x1', 'y1', 'x2', 'y2'))
-	has_metric = 'X_m' in fieldnames and 'Y_m' in fieldnames
-	if not used_corrected:
-		print(f"  NOTE: {os.path.basename(csv_path)} has no corrected columns — using raw (x, y).")
+	has_age = 'age_class' in fieldnames
 	if not has_bbox:
-		print(f"  WARNING: {os.path.basename(csv_path)} has no bbox columns — "
-			  f"overlap/size features disabled.")
+		print(f"  WARNING: {name} has no bbox columns — overlap features disabled.")
+	if not has_stab:
+		print(f"  WARNING: {name} has no Xs_m/Ys_m columns — speeds unavailable "
+			  f"(re-run the metric stage after drone correction).")
 
 	present = defaultdict(list)
-	pos, vel, box, diag, prim, sec = {}, {}, {}, {}, {}, {}
-	pos_m = {}                                        # metric ground coords (X_m, Y_m) when present
+	pos, pos_s, box, prim, sec = {}, {}, {}, {}, {}
+	age, age_conf = {}, {}
 	id_frames = defaultdict(list)
+	n_dropped = 0
 
 	for r in rows:
 		try:
 			frame = int(r['frame'])
 			tid = str(r['id'])
-			if used_corrected and r.get('x_corrected', '') != '':
-				x = float(r['x_corrected']); y = float(r['y_corrected'])
-			else:
-				x = float(r['x']); y = float(r['y'])
 		except (ValueError, KeyError, TypeError):
 			continue
 		if (frame, tid) in pos:
 			continue
+		if r.get('metric_quality', '') == 'none' or (r.get('X_m', '') or '').strip() == '':
+			n_dropped += 1
+			continue
+		try:
+			x = float(r['X_m']); y = float(r['Y_m'])
+		except (ValueError, TypeError):
+			n_dropped += 1
+			continue
+
 		present[frame].append(tid)
 		pos[(frame, tid)] = (x, y)
 		id_frames[tid].append(frame)
 		prim[(frame, tid)] = _best_class(r, 'primary')
 		sec[(frame, tid)] = _best_class(r, 'secondary')
-		if has_vel and r.get('vx_corrected', '') != '':
+		if has_age:
+			age[(frame, tid)] = (r.get('age_class', '') or '').strip()
 			try:
-				vel[(frame, tid)] = (float(r['vx_corrected']), float(r['vy_corrected']))
+				age_conf[(frame, tid)] = float(r.get('age_conf', '') or 0.0)
+			except (ValueError, TypeError):
+				age_conf[(frame, tid)] = 0.0
+		if has_stab and (r.get('Xs_m', '') or '').strip() != '':
+			try:
+				pos_s[(frame, tid)] = (float(r['Xs_m']), float(r['Ys_m']))
 			except (ValueError, TypeError):
 				pass
 		if has_bbox:
@@ -159,40 +257,126 @@ def load_tracking_csv(csv_path):
 				x1, y1, x2, y2 = int(r['x1']), int(r['y1']), int(r['x2']), int(r['y2'])
 				if x2 > x1 and y2 > y1:
 					box[(frame, tid)] = (x1, y1, x2, y2)
-					diag[(frame, tid)] = float(np.hypot(x2 - x1, y2 - y1))
-			except (ValueError, TypeError):
-				pass
-		if has_metric and r.get('X_m', '') != '' and r.get('metric_quality', '') != 'none':
-			try:
-				pos_m[(frame, tid)] = (float(r['X_m']), float(r['Y_m']))
 			except (ValueError, TypeError):
 				pass
 
-	# Compute velocities by finite differences when corrected velocities are absent.
-	if not has_vel:
-		for tid, frames in id_frames.items():
-			fs = sorted(frames)
-			xs = np.array([pos[(f, tid)][0] for f in fs], dtype=float)
-			ys = np.array([pos[(f, tid)][1] for f in fs], dtype=float)
-			xs = _smooth(xs); ys = _smooth(ys)
-			fa = np.array(fs, dtype=float)
-			if len(fs) >= 2 and np.all(np.diff(fa) > 0):
-				vx = np.gradient(xs, fa); vy = np.gradient(ys, fa)
-			else:
-				vx = np.zeros(len(fs)); vy = np.zeros(len(fs))
-			for i, f in enumerate(fs):
-				vel[(f, tid)] = (float(vx[i]), float(vy[i]))
+	if not present:
+		raise MissingMetricError(
+			f"{name}: every row has metric_quality='none' — no usable ground "
+			f"positions (missing flight log, or the camera never saw the ground "
+			f"below the horizon).")
+	if n_dropped:
+		print(f"  {name}: dropped {n_dropped} row(s) without a ground position.")
+
+	# Speeds live in the STABILISED frame: differencing the per-frame camera
+	# frame would return the drone's own motion. Metres per second, from the real
+	# frame gap (frame_skip aware).
+	vel = _stabilised_velocities(pos_s, id_frames, fps)
+
+	# What counts as "moving" in THIS clip, measured from its own noise.
+	speed_floor, sigma_pos, n_resid = estimate_speed_noise_floor(pos_s, id_frames, fps)
 
 	return {
 		'frames': sorted(present.keys()),
 		'present': present,
-		'pos': pos, 'vel': vel, 'box': box, 'diag': diag,
+		'pos': pos, 'pos_s': pos_s, 'vel': vel, 'box': box,
 		'prim': prim, 'sec': sec,
-		'pos_m': pos_m,
+		'age': age, 'age_conf': age_conf,
 		'id_frames': {t: sorted(fs) for t, fs in id_frames.items()},
-		'has_bbox': has_bbox, 'used_corrected': used_corrected,
-		'has_metric': has_metric and bool(pos_m),
+		'has_bbox': has_bbox, 'has_stab': bool(pos_s), 'has_age': has_age,
+		'fps': float(fps),
+		'speed_floor_ms': speed_floor,
+		'pos_noise_m': sigma_pos,
+		'pos_noise_samples': n_resid,
 	}
+
+
+def _stabilised_velocities(pos_s, id_frames, fps):
+	"""Per-track ground velocity in m/s, from smoothed stabilised positions.
+
+	Tracks with no stabilised coordinates get zero velocity rather than a
+	pixel-space substitute — a wrong speed is worse than a missing one."""
+	vel = {}
+	fps = float(fps) if fps and fps > 0 else 30.0
+	for tid, frames in id_frames.items():
+		fs = [f for f in sorted(frames) if (f, tid) in pos_s]
+		if len(fs) < 2:
+			for f in frames:
+				vel[(f, tid)] = (0.0, 0.0)
+			continue
+		xs = _smooth(np.array([pos_s[(f, tid)][0] for f in fs], dtype=float))
+		ys = _smooth(np.array([pos_s[(f, tid)][1] for f in fs], dtype=float))
+		# t in SECONDS -> gradient is already m/s.
+		ts = np.array(fs, dtype=float) / fps
+		if np.all(np.diff(ts) > 0):
+			vx = np.gradient(xs, ts); vy = np.gradient(ys, ts)
+		else:
+			vx = np.zeros(len(fs)); vy = np.zeros(len(fs))
+		for i, f in enumerate(fs):
+			vel[(f, tid)] = (float(vx[i]), float(vy[i]))
+		for f in frames:
+			vel.setdefault((f, tid), (0.0, 0.0))
+	return vel
+
+
+def estimate_speed_noise_floor(pos_s, id_frames, fps, win=5,
+							   quantile=_SPEED_FLOOR_QUANTILE, min_samples=60):
+	"""Ground speed (m/s) below which motion cannot be told from detection noise.
+
+	Differentiating position amplifies noise enormously: at 30 fps a 4 cm error on
+	a single frame is over 1 m/s of apparent speed before smoothing. So the same
+	box jitter that leaves distances accurate to a few centimetres makes a
+	standing horse look like it is walking. That threshold has to be MEASURED,
+	not guessed, because it scales with altitude, box size and detector quality.
+
+	Two steps:
+	  1. Position-noise scale: the high-frequency residual pos - smooth(pos),
+	     which real movement (slow relative to the smoothing window) does not
+	     reach. A robust MAD-based scale keeps genuine manoeuvres from inflating
+	     it, and the residual is de-biased for the variance a w-point moving
+	     average absorbs (var(resid) = sigma^2 * (1 - 1/w)).
+	  2. Propagate through the EXACT smoothing + gradient path the pipeline uses,
+	     by Monte-Carlo on a synthetic stationary track, and take `quantile` of
+	     the resulting speeds. Simulating beats an analytic formula here because
+	     it automatically tracks any change to _smooth() or the differencing.
+
+	Returns (floor_ms, sigma_pos_m, n_samples); floor falls back to
+	_FALLBACK_SPEED_FLOOR_MS when there is too little data to measure.
+	"""
+	fps = float(fps) if fps and fps > 0 else 30.0
+	resid = []
+	for tid, frames in id_frames.items():
+		fs = [f for f in sorted(frames) if (f, tid) in pos_s]
+		if len(fs) < 3 * win:
+			continue
+		xs = np.array([pos_s[(f, tid)][0] for f in fs], dtype=float)
+		ys = np.array([pos_s[(f, tid)][1] for f in fs], dtype=float)
+		resid.extend(np.hypot(xs - _smooth(xs, win), ys - _smooth(ys, win)).tolist())
+
+	if len(resid) < min_samples:
+		return _FALLBACK_SPEED_FLOOR_MS, float('nan'), len(resid)
+
+	r = np.asarray(resid, dtype=float)
+	# Robust scale of a 2-D residual magnitude: median / 1.1774 is the Rayleigh
+	# equivalent of the MAD, and is unmoved by the heavy tail that real movement
+	# and tracking glitches put on this distribution.
+	sigma = float(np.median(r)) / 1.1774
+	absorbed = math.sqrt(max(1.0 - 1.0 / win, 1e-6))
+	sigma /= absorbed
+	if not np.isfinite(sigma) or sigma <= 0:
+		return _FALLBACK_SPEED_FLOOR_MS, float('nan'), len(resid)
+
+	# Monte-Carlo the noise-only speed distribution through the real code path.
+	rng = np.random.default_rng(0)          # fixed seed: same data -> same floor
+	n_steps, n_tracks = 120, 40
+	t = np.arange(n_steps) / fps
+	speeds = []
+	for _ in range(n_tracks):
+		nx = _smooth(rng.normal(0.0, sigma, n_steps), win)
+		ny = _smooth(rng.normal(0.0, sigma, n_steps), win)
+		speeds.extend(np.hypot(np.gradient(nx, t), np.gradient(ny, t)).tolist())
+	floor = float(np.quantile(speeds, quantile))
+	return floor, sigma, len(resid)
 
 
 def _smooth(arr, win=5):
@@ -211,63 +395,42 @@ def _smooth(arr, win=5):
 
 
 # ---------------------------------------------------------------------------
-# Body-length reference (robust adult median) + per-id size ratio / foal flag
+# Age (foal / adult) from the trained age classifier
 # ---------------------------------------------------------------------------
 
-def compute_body_len_ref(track_data, scope="video", foal_ratio=0.7):
-	"""Return (body_len_ref, size_ratio, is_foal).
+UNKNOWN_AGE = 'unknown'
 
-	body_len_ref is the robust median box diagonal of adult-sized horses; foals
-	(per-track median diagonal below foal_ratio * initial median) are excluded so
-	they do not shrink the reference. size_ratio[id] = body_len_i / body_len_ref;
-	is_foal[id] = size_ratio < foal_ratio. When boxes are unavailable, falls back
-	to a nearest-neighbour scene scale (sizes then default to 1.0, no foals).
+
+def track_age_classes(track_data):
+	"""Return (age_by_track, mean_conf_by_track) from the age classifier's
+	per-detection output.
+
+	The pipeline already runs a dedicated age model (model_age, "model 0.5")
+	whose verdict rides in the age_class/age_conf columns; a per-track
+	CONFIDENCE-WEIGHTED majority vote turns those per-detection labels into one
+	label per individual. A track the model never labelled is UNKNOWN_AGE — it
+	is not guessed from box size, because apparent size at 15-50 m confounds age
+	with distance, posture and orientation.
 	"""
-	diag = track_data['diag']
-	per_track = defaultdict(list)
-	for (f, tid), d in diag.items():
-		if d and d > 0:
-			per_track[tid].append(d)
-	track_med = {tid: float(np.median(ds)) for tid, ds in per_track.items() if ds}
+	votes = defaultdict(lambda: defaultdict(float))
+	confs = defaultdict(list)
+	for (f, tid), label in track_data.get('age', {}).items():
+		if not label:
+			continue
+		w = track_data.get('age_conf', {}).get((f, tid), 0.0)
+		votes[tid][label] += max(float(w), 1e-6)   # an unconfident vote still counts
+		confs[tid].append(float(w))
 
-	if not track_med:
-		# No boxes at all: use a nearest-neighbour length scale; no foal info.
-		ref = _nn_scale(track_data)
-		return ref, {tid: 1.0 for tid in track_data['id_frames']}, \
-			{tid: False for tid in track_data['id_frames']}
-
-	arr = np.array(list(track_med.values()), dtype=float)
-	initial = float(np.median(arr))
-	adults = arr[arr >= foal_ratio * initial]
-	ref = float(np.median(adults)) if adults.size else float(np.median(arr))
-	if ref <= 0:
-		ref = _nn_scale(track_data)
-
-	size_ratio = {}
-	is_foal = {}
+	age_by_track, conf_by_track = {}, {}
 	for tid in track_data['id_frames']:
-		d = track_med.get(tid)
-		if d and ref > 0:
-			size_ratio[tid] = d / ref
-			is_foal[tid] = (d / ref) < foal_ratio
+		v = votes.get(tid)
+		if v:
+			age_by_track[tid] = max(v, key=v.get)
+			conf_by_track[tid] = float(np.mean(confs[tid])) if confs.get(tid) else 0.0
 		else:
-			size_ratio[tid] = 1.0
-			is_foal[tid] = False
-	return ref, size_ratio, is_foal
-
-
-def _nn_scale(track_data):
-	"""Median nearest-neighbour distance across frames (fallback length unit)."""
-	from scipy.spatial import cKDTree
-	nn = []
-	for f in track_data['frames']:
-		ids = track_data['present'][f]
-		if len(ids) >= 2:
-			pts = np.array([track_data['pos'][(f, t)] for t in ids], dtype=float)
-			tree = cKDTree(pts)
-			dd, _ = tree.query(pts, k=2)
-			nn.extend(dd[:, 1].tolist())
-	return float(np.median(nn)) if nn else 50.0
+			age_by_track[tid] = UNKNOWN_AGE
+			conf_by_track[tid] = 0.0
+	return age_by_track, conf_by_track
 
 
 # ---------------------------------------------------------------------------
@@ -289,18 +452,20 @@ def _iou(a, b):
 	return inter / union if union > 0 else 0.0
 
 
-def _cosine(u, v):
-	"""Cosine similarity of two 2-vectors (0 if either is ~zero)."""
+def _cosine(u, v, min_norm=_FALLBACK_SPEED_FLOOR_MS):
+	"""Cosine similarity of two velocity vectors; 0 when either is too slow for
+	its direction to mean anything."""
 	nu = math.hypot(u[0], u[1]); nv = math.hypot(v[0], v[1])
-	if nu < 1e-9 or nv < 1e-9:
+	if nu < min_norm or nv < min_norm:
 		return 0.0
 	return (u[0] * v[0] + u[1] * v[1]) / (nu * nv)
 
 
-def _heading_diff(u, v):
-	"""Absolute angular difference of two movement directions, in [0, pi]."""
+def _heading_diff(u, v, min_norm=_FALLBACK_SPEED_FLOOR_MS):
+	"""Absolute angular difference of two movement directions, in [0, pi]; 0 when
+	either animal is too slow to have a heading."""
 	nu = math.hypot(u[0], u[1]); nv = math.hypot(v[0], v[1])
-	if nu < 1e-9 or nv < 1e-9:
+	if nu < min_norm or nv < min_norm:
 		return 0.0
 	a = math.atan2(u[1], u[0]); b = math.atan2(v[1], v[0])
 	d = abs(a - b) % (2 * math.pi)
@@ -311,19 +476,24 @@ def _heading_diff(u, v):
 # 4.1 Dyadic (pairwise) features
 # ---------------------------------------------------------------------------
 
-def compute_pairwise_features(track_data, body_len_ref, size_ratio,
-							  max_distance=400.0, contact_iou_thresh=0.05,
-							  contact_dist_bodylen=1.5):
-	"""Per-frame dyadic features for ordered pairs within max_distance.
+def compute_pairwise_features(track_data, age_by_track,
+							  max_distance_m=15.0, contact_iou_thresh=0.05,
+							  contact_dist_m=2.5):
+	"""Per-frame dyadic features, in metres, for ordered pairs within
+	max_distance_m of each other on the ground.
 
 	Returns a list of dicts (one per ordered (source, target) pair per frame).
 	The ordering encodes role (e.g. chaser first); both (A,B) and (B,A) are
 	emitted. approach_rate is filled in a second pass per pair (time derivative
-	of distance; negative = approaching). Distances are normalised by
-	body_len_ref (NOT the pair mean), so mare-foal contact is handled correctly.
+	of distance in m/s; negative = approaching).
+
+	The distance gate is in METRES, so the same physical separation qualifies
+	whether the drone flew at 15 m or 50 m — a pixel gate silently meant two
+	different things at two altitudes.
 	"""
-	ref = body_len_ref if body_len_ref and body_len_ref > 0 else 1.0
-	pos_m = track_data.get('pos_m', {})
+	fps = track_data.get('fps', 30.0) or 30.0
+	# Direction features are meaningless below this clip's own noise floor.
+	floor = track_data.get('speed_floor_ms', _FALLBACK_SPEED_FLOOR_MS)
 	rows = []
 	for f in track_data['frames']:
 		ids = track_data['present'][f]
@@ -336,45 +506,39 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 					continue
 				a, b = ids[i], ids[j]
 				pa = track_data['pos'][(f, a)]; pb = track_data['pos'][(f, b)]
-				dist = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
-				if dist > max_distance:
+				distance_m = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+				if distance_m > max_distance_m:
 					continue
-				# Real-world ground distance (metres) when both endpoints have a
-				# metric position; None otherwise (pixel features are unaffected).
-				pma, pmb = pos_m.get((f, a)), pos_m.get((f, b))
-				distance_m = (math.hypot(pma[0] - pmb[0], pma[1] - pmb[1])
-							  if pma is not None and pmb is not None else None)
 				va = track_data['vel'].get((f, a), (0.0, 0.0))
 				vb = track_data['vel'].get((f, b), (0.0, 0.0))
-				speed_a = math.hypot(va[0], va[1]) / ref
-				speed_b = math.hypot(vb[0], vb[1]) / ref
+				speed_a = math.hypot(va[0], va[1])
+				speed_b = math.hypot(vb[0], vb[1])
 				box_a = track_data['box'].get((f, a))
 				box_b = track_data['box'].get((f, b))
 				iou = _iou(box_a, box_b) if track_data['has_bbox'] else 0.0
-				dist_bl = dist / ref
-				in_contact = (iou > contact_iou_thresh) or (dist_bl < contact_dist_bodylen)
+				in_contact = (iou > contact_iou_thresh) or (distance_m < contact_dist_m)
 				rows.append({
 					'frame': f,
 					'source_id': a, 'target_id': b,
-					'distance': dist,
-					'distance_bodylen': dist_bl,
 					'distance_m': distance_m,
 					'speed_A': speed_a, 'speed_B': speed_b,
 					'rel_speed': speed_a - speed_b,
-					'speed_similarity': _cosine(va, vb),
+					'speed_similarity': _cosine(va, vb, floor),
 					'approach_rate': 0.0,  # filled below
-					'heading_diff': _heading_diff(va, vb),
+					'heading_diff': _heading_diff(va, vb, floor),
 					'bbox_iou': iou,
 					'in_contact': bool(in_contact),
-					'size_ratio_A': size_ratio.get(a, 1.0),
-					'size_ratio_B': size_ratio.get(b, 1.0),
+					'age_A': age_by_track.get(a, UNKNOWN_AGE),
+					'age_B': age_by_track.get(b, UNKNOWN_AGE),
 					'class_A_primary': track_data['prim'].get((f, a), ''),
 					'class_A_secondary': track_data['sec'].get((f, a), ''),
 					'class_B_primary': track_data['prim'].get((f, b), ''),
 					'class_B_secondary': track_data['sec'].get((f, b), ''),
 				})
 
-	# Second pass: approach_rate = d(distance)/dt over consecutive observed frames.
+	# Second pass: approach_rate = d(distance)/dt in m/s over consecutive
+	# observed frames (frame gaps converted to seconds, so frame_skip and fps
+	# never leak into the value).
 	by_pair = defaultdict(list)
 	for idx, r in enumerate(rows):
 		by_pair[(r['source_id'], r['target_id'])].append(idx)
@@ -382,9 +546,9 @@ def compute_pairwise_features(track_data, body_len_ref, size_ratio,
 		idxs.sort(key=lambda k: rows[k]['frame'])
 		for k in range(1, len(idxs)):
 			cur, prev = rows[idxs[k]], rows[idxs[k - 1]]
-			df = cur['frame'] - prev['frame']
-			if df > 0:
-				cur['approach_rate'] = (cur['distance'] - prev['distance']) / df
+			dt = (cur['frame'] - prev['frame']) / fps
+			if dt > 0:
+				cur['approach_rate'] = (cur['distance_m'] - prev['distance_m']) / dt
 	return rows
 
 
@@ -418,22 +582,28 @@ def whole_herd_window_candidates(track_data, win, min_members=3):
 	return out
 
 
-def compute_group_features(track_data, groups, body_len_ref):
-	"""Per-frame, per-group fixed-size feature vector (see module docstring).
+def compute_group_features(track_data, groups):
+	"""Per-frame, per-group fixed-size feature vector, in metres (see module
+	docstring).
 
 	`groups` maps frame -> [(group_id, [track_ids]), ...]; use whole_herd_groups()
 	for the whole co-present herd, or an ad-hoc single-group mapping (e.g. a
 	labelled segment's own ids) for other callers.
 
-	Returns a list of dicts. Independent of N (the number of members). Centroid
-	speed is derived from the barycentre trajectory over consecutive frames.
+	Returns a list of dicts. Independent of N (the number of members). Shape
+	statistics (cohesion, area, elongation) use the per-frame ground frame;
+	centroid speed uses the STABILISED one, so a moving drone cannot make a
+	standing herd look like it is travelling.
 	"""
-	ref = body_len_ref if body_len_ref and body_len_ref > 0 else 1.0
-	# Pre-compute per-(frame, group) barycentre for centroid-speed differencing.
+	fps = track_data.get('fps', 30.0) or 30.0
+	floor = track_data.get('speed_floor_ms', _FALLBACK_SPEED_FLOOR_MS)
+	pos_s = track_data.get('pos_s', {})
+	# Pre-compute per-(frame, group) barycentre in the stabilised frame for
+	# centroid-speed differencing.
 	bary = {}
 	for f in track_data['frames']:
 		for gid, ids in groups.get(f, []):
-			pts = [track_data['pos'][(f, t)] for t in ids if (f, t) in track_data['pos']]
+			pts = [pos_s[(f, t)] for t in ids if (f, t) in pos_s]
 			if pts:
 				bary[(f, gid)] = np.mean(np.array(pts, dtype=float), axis=0)
 
@@ -448,10 +618,10 @@ def compute_group_features(track_data, groups, body_len_ref):
 			if k == 0:
 				centroid_speed[(f, gid)] = 0.0
 			else:
-				dfr = f - fs[k - 1]
-				if dfr > 0:
+				dt = (f - fs[k - 1]) / fps
+				if dt > 0:
 					d = np.linalg.norm(bary[(f, gid)] - bary[(fs[k - 1], gid)])
-					centroid_speed[(f, gid)] = float(d / dfr / ref)
+					centroid_speed[(f, gid)] = float(d / dt)
 				else:
 					centroid_speed[(f, gid)] = 0.0
 
@@ -464,11 +634,14 @@ def compute_group_features(track_data, groups, body_len_ref):
 				continue
 			pts = np.array([track_data['pos'][(f, t)] for t in ids], dtype=float)
 			vels = np.array([track_data['vel'].get((f, t), (0.0, 0.0)) for t in ids], dtype=float)
-			speeds = np.linalg.norm(vels, axis=1) / ref
+			speeds = np.linalg.norm(vels, axis=1)
 
-			# Polarisation: magnitude of the mean unit velocity.
+			# Polarisation: magnitude of the mean unit velocity, over the members
+			# that are actually moving. Counting standing animals would turn
+			# detection jitter into a confident collective heading — a grazing
+			# herd scored 0.87 before this floor.
 			norms = np.linalg.norm(vels, axis=1)
-			moving = norms > 1e-9
+			moving = norms > floor
 			if moving.any():
 				units = vels[moving] / norms[moving][:, None]
 				polarisation = float(np.linalg.norm(units.mean(axis=0)))
@@ -476,7 +649,7 @@ def compute_group_features(track_data, groups, body_len_ref):
 				polarisation = 0.0
 
 			centroid = pts.mean(axis=0)
-			disp = np.linalg.norm(pts - centroid, axis=1) / ref
+			disp = np.linalg.norm(pts - centroid, axis=1)
 			cohesion = float(disp.std()) if n > 1 else 0.0
 
 			area = _hull_area(pts)
@@ -538,7 +711,7 @@ def _elongation(pts):
 # 4.3 Window aggregation (fixed-size vector for the TASK 7 model)
 # ---------------------------------------------------------------------------
 
-_SCALAR_DYADIC = ['distance_bodylen', 'speed_A', 'speed_B', 'rel_speed',
+_SCALAR_DYADIC = ['distance_m', 'speed_A', 'speed_B', 'rel_speed',
 				  'speed_similarity', 'approach_rate', 'heading_diff', 'bbox_iou']
 _CLASS_KEYS = ['class_A_primary', 'class_A_secondary',
 			   'class_B_primary', 'class_B_secondary']
@@ -595,68 +768,100 @@ def _typical_step(frames):
 	return int(np.median(diffs)) if len(diffs) else 1
 
 
-def build_interaction_graph(pairwise, nodes, granularity="per_interaction",
-							weight_metric="duration", min_duration_frames=10,
-							all_frames=None):
+def _id_key(tid):
+	"""Sort key giving numeric-looking track ids their natural order."""
+	return (len(str(tid)), str(tid))
+
+
+def _canonical_pair(a, b):
+	"""Unordered pair as an ordered tuple, so (A,B) and (B,A) collapse to one."""
+	return (a, b) if _id_key(a) <= _id_key(b) else (b, a)
+
+
+def build_interaction_graph(pairwise, nodes, track_data, granularity="per_dyad",
+							weight_metric="sri", min_duration_frames=10):
 	"""Aggregate per-frame dyadic features into interaction-graph edges.
 
-	pairwise : list of per-frame ordered-pair feature dicts (compute_pairwise_features).
-	nodes    : list of node-attribute dicts (one per track_id).
-	Returns (edges_rows, nodes_rows). networkx (when present) is used to print
-	connected-components / community / centrality summaries; node columns follow
-	the spec and do not include centralities.
-	"""
-	step = _typical_step(all_frames if all_frames is not None
-						  else [r['frame'] for r in pairwise])
+	The deterministic layer is UNDIRECTED. Every metric it can compute
+	(separation, contact, speed similarity, approach rate) is symmetric, so
+	emitting both (A,B) and (B,A) doubled the file while duplicating each value
+	and dressing the result up as a directed graph it is not. Direction only
+	becomes meaningful once the complex model names an actor, which it does by
+	filling interaction_type/actor_id afterwards.
 
+	pairwise   : per-frame ORDERED-pair feature dicts (the model needs role, so
+	             compute_pairwise_features still emits both directions).
+	nodes      : node-attribute dicts (one per track_id).
+	track_data : used for co-presence (SRI denominator) and fps.
+	Returns (edges_rows, nodes_rows).
+	"""
+	granularity = normalise_granularity(granularity)
+	step = _typical_step(track_data['frames'])
+	fps = track_data.get('fps', 30.0) or 30.0
+	min_obs = max(1, min_duration_frames)
+
+	# Collapse the mirrored orderings onto one canonical unordered pair.
 	by_pair = defaultdict(list)
 	for r in pairwise:
-		by_pair[(r['source_id'], r['target_id'])].append(r)
+		key = _canonical_pair(r['source_id'], r['target_id'])
+		if (r['source_id'], r['target_id']) == key:
+			by_pair[key].append(r)
 	for k in by_pair:
 		by_pair[k].sort(key=lambda r: r['frame'])
 
+	co_present = _co_presence_counts(track_data, by_pair.keys())
+
 	if granularity == 'per_frame':
-		edges = [{
-			'frame': r['frame'], 'source_id': r['source_id'], 'target_id': r['target_id'],
-			'weight': 1.0,
-			'distance_bodylen': round(r['distance_bodylen'], 4),
-			'distance_m': ('' if r.get('distance_m') is None else round(r['distance_m'], 3)),
-			'in_contact': int(bool(r['in_contact'])),
-			'speed_similarity': round(r['speed_similarity'], 4),
-			'approach_rate': round(r['approach_rate'], 4),
-			'class_source_primary': r['class_A_primary'],
-			'class_source_secondary': r['class_A_secondary'],
-			'class_target_primary': r['class_B_primary'],
-			'class_target_secondary': r['class_B_secondary'],
-		} for r in pairwise]
+		# min_duration_frames applies here too: a dyad seen for three frames is
+		# noise at every granularity, not only when episodes are cut.
+		edges = []
+		for key, rs in by_pair.items():
+			if len(rs) < min_obs:
+				continue
+			for r in rs:
+				edges.append({
+					'frame': r['frame'], 'source_id': key[0], 'target_id': key[1],
+					'directed': 'false', 'weight': 1.0,
+					'distance_m': round(r['distance_m'], 3),
+					'in_contact': int(bool(r['in_contact'])),
+					'speed_similarity': round(r['speed_similarity'], 4),
+					'approach_rate': round(r['approach_rate'], 4),
+					'class_source_primary': r['class_A_primary'],
+					'class_source_secondary': r['class_A_secondary'],
+					'class_target_primary': r['class_B_primary'],
+					'class_target_secondary': r['class_B_secondary'],
+				})
 	else:
-		episodes = []  # (source, target, [rows])
-		for (s, t), rs in by_pair.items():
+		episodes = []  # (pair, [rows])
+		for key, rs in by_pair.items():
 			if granularity == 'per_segment':
 				cur = [rs[0]]
 				for r in rs[1:]:
 					if r['frame'] - cur[-1]['frame'] > 2 * step:
-						episodes.append((s, t, cur)); cur = [r]
+						episodes.append((key, cur)); cur = [r]
 					else:
 						cur.append(r)
-				episodes.append((s, t, cur))
-			else:  # per_interaction: one episode spanning the whole video
-				episodes.append((s, t, rs))
+				episodes.append((key, cur))
+			else:  # per_dyad: one row per dyad, spanning the whole clip
+				episodes.append((key, rs))
 
 		edges = []
-		for (s, t, rs) in episodes:
+		for (key, rs) in episodes:
 			n_obs = len(rs)
-			if granularity == 'per_segment' and n_obs < max(1, min_duration_frames):
+			if n_obs < min_obs:
 				continue
-			dbl = np.array([r['distance_bodylen'] for r in rs], dtype=float)
+			dm = np.array([r['distance_m'] for r in rs], dtype=float)
+			n_co = co_present.get(key, n_obs)
 			edges.append({
 				'frame_start': rs[0]['frame'], 'frame_end': rs[-1]['frame'],
-				'source_id': s, 'target_id': t, 'directed': 'true',
-				'interaction_type': '',
-				'weight': 0.0,  # filled after normalisation
+				'source_id': key[0], 'target_id': key[1], 'directed': 'false',
+				'interaction_type': '', 'actor_id': '',
+				'weight': 0.0,  # filled below
 				'n_frames_observed': n_obs,
-				'mean_distance_bodylen': round(float(dbl.mean()), 4),
-				'min_distance_bodylen': round(float(dbl.min()), 4),
+				'n_frames_co_present': n_co,
+				'duration_s': round(n_obs / fps, 3),
+				'mean_distance_m': round(float(dm.mean()), 3),
+				'min_distance_m': round(float(dm.min()), 3),
 				'contact_fraction': round(float(np.mean([1.0 if r['in_contact'] else 0.0 for r in rs])), 4),
 				'mean_speed_similarity': round(float(np.mean([r['speed_similarity'] for r in rs])), 4),
 				'mean_approach_rate': round(float(np.mean([r['approach_rate'] for r in rs])), 4),
@@ -671,26 +876,36 @@ def build_interaction_graph(pairwise, nodes, granularity="per_interaction",
 	return edges, nodes
 
 
+def _co_presence_counts(track_data, pairs):
+	"""Frames in which BOTH members of a pair were tracked — the denominator that
+	makes an association index comparable between clips of different lengths."""
+	frame_sets = {tid: set(fs) for tid, fs in track_data['id_frames'].items()}
+	out = {}
+	for (a, b) in pairs:
+		out[(a, b)] = len(frame_sets.get(a, set()) & frame_sets.get(b, set()))
+	return out
+
+
 def _assign_weights(edges, weight_metric):
-	"""Set the 'weight' column per the chosen metric (duration | proximity | combined)."""
+	"""Set the 'weight' column: sri | duration_s | proximity_m.
+
+	All three are ABSOLUTE quantities. The previous 'combined' metric min-max
+	scaled the weights WITHIN each video, so an edge weight of 0.8 meant
+	"strong for this clip" and nothing else — two videos could not be compared,
+	which defeats the point of building the network per video.
+	"""
 	if not edges:
 		return
-	durations = np.array([e['n_frames_observed'] for e in edges], dtype=float)
-	prox = np.array([1.0 / e['mean_distance_bodylen'] if e['mean_distance_bodylen'] > 1e-9 else 0.0
-					 for e in edges], dtype=float)
-
-	def _norm(a):
-		lo, hi = a.min(), a.max()
-		return (a - lo) / (hi - lo) if hi > lo else np.zeros_like(a)
-
-	if weight_metric == 'proximity':
-		w = prox
-	elif weight_metric == 'combined':
-		w = 0.5 * _norm(durations) + 0.5 * _norm(prox)
-	else:  # duration (default)
-		w = durations
-	for e, wi in zip(edges, w):
-		e['weight'] = round(float(wi), 4)
+	for e in edges:
+		if weight_metric == 'duration_s':
+			w = e['duration_s']
+		elif weight_metric == 'proximity_m':
+			w = 1.0 / e['mean_distance_m'] if e['mean_distance_m'] > 1e-9 else 0.0
+		else:  # sri (default): simple ratio index, bounded [0, 1]
+			n_co = e.get('n_frames_co_present') or 0
+			w = (e['n_frames_observed'] / n_co) if n_co > 0 else 0.0
+			w = min(w, 1.0)
+		e['weight'] = round(float(w), 4)
 
 
 def _graph_summary(edges, granularity):
@@ -701,12 +916,12 @@ def _graph_summary(edges, granularity):
 		print("  networkx not available — skipping centrality/community summary "
 			  "(edges/nodes still written). Install with: pip install networkx")
 		return
-	g = nx.DiGraph()
+	g = nx.Graph()
 	for e in edges:
 		g.add_edge(e['source_id'], e['target_id'], weight=e.get('weight', 1.0))
 	if g.number_of_nodes() == 0:
 		return
-	ug = g.to_undirected()
+	ug = g
 	n_comp = nx.number_connected_components(ug)
 	deg = nx.degree_centrality(g)
 	try:
@@ -735,7 +950,7 @@ def _graph_summary(edges, granularity):
 # Node attributes
 # ---------------------------------------------------------------------------
 
-def build_nodes(track_data, size_ratio, is_foal):
+def build_nodes(track_data, age_by_track, age_conf_by_track):
 	"""Build per-track node-attribute rows for the nodes CSV."""
 	total_span = (max(track_data['frames']) - min(track_data['frames']) + 1) \
 		if track_data['frames'] else 1
@@ -748,13 +963,13 @@ def build_nodes(track_data, size_ratio, is_foal):
 			'track_id': tid,
 			'first_frame': min(frames),
 			'last_frame': max(frames),
-			'size_ratio': round(size_ratio.get(tid, 1.0), 4),
-			'is_foal': int(bool(is_foal.get(tid, False))),
+			'age_class': age_by_track.get(tid, UNKNOWN_AGE),
+			'age_conf_mean': round(age_conf_by_track.get(tid, 0.0), 4),
 			'primary_class_dominant': _dominant(prim),
 			'secondary_class_dominant': _dominant(sec),
 			'presence_ratio': round(len(frames) / total_span, 4) if total_span else 0.0,
 		})
-	nodes.sort(key=lambda n: (len(str(n['track_id'])), str(n['track_id'])))
+	nodes.sort(key=lambda n: _id_key(n['track_id']))
 	return nodes
 
 
@@ -762,36 +977,37 @@ def build_nodes(track_data, size_ratio, is_foal):
 # Writing
 # ---------------------------------------------------------------------------
 
+_EPISODE_COLS = ['frame_start', 'frame_end', 'source_id', 'target_id', 'directed',
+				 'interaction_type', 'actor_id', 'weight',
+				 'n_frames_observed', 'n_frames_co_present', 'duration_s',
+				 'mean_distance_m', 'min_distance_m', 'contact_fraction',
+				 'mean_speed_similarity', 'mean_approach_rate',
+				 'class_source_primary', 'class_source_secondary',
+				 'class_target_primary', 'class_target_secondary']
+# n_frames_observed / n_frames_co_present / duration_s are written whatever the
+# chosen weight metric, so any association index can be recomputed in R without
+# re-running the pipeline.
 _EDGE_COLS = {
-	'per_interaction': ['frame_start', 'frame_end', 'source_id', 'target_id', 'directed',
-						'interaction_type', 'weight', 'n_frames_observed',
-						'mean_distance_bodylen', 'min_distance_bodylen', 'contact_fraction',
-						'mean_speed_similarity', 'mean_approach_rate',
-						'class_source_primary', 'class_source_secondary',
-						'class_target_primary', 'class_target_secondary'],
-	'per_segment': ['frame_start', 'frame_end', 'source_id', 'target_id', 'directed',
-					'interaction_type', 'weight', 'n_frames_observed',
-					'mean_distance_bodylen', 'min_distance_bodylen', 'contact_fraction',
-					'mean_speed_similarity', 'mean_approach_rate',
-					'class_source_primary', 'class_source_secondary',
-					'class_target_primary', 'class_target_secondary'],
-	'per_frame': ['frame', 'source_id', 'target_id', 'weight', 'distance_bodylen',
+	'per_dyad': _EPISODE_COLS,
+	'per_segment': _EPISODE_COLS,
+	'per_frame': ['frame', 'source_id', 'target_id', 'directed', 'weight',
 				  'distance_m',
 				  'in_contact', 'speed_similarity', 'approach_rate',
 				  'class_source_primary', 'class_source_secondary',
 				  'class_target_primary', 'class_target_secondary'],
 }
 _NODE_COLS = ['track_id', 'first_frame', 'last_frame',
-			  'size_ratio', 'is_foal', 'primary_class_dominant',
+			  'age_class', 'age_conf_mean', 'primary_class_dominant',
 			  'secondary_class_dominant', 'presence_ratio']
 
 
 def write_interaction_graph(edges_rows, nodes_rows, edges_path, nodes_path,
-							granularity="per_interaction"):
+							granularity="per_dyad"):
 	"""Write (overwrite) the edges and nodes CSVs. Always truncates the file so a
 	changed granularity/weight never leaves stale rows behind."""
 	os.makedirs(os.path.dirname(os.path.abspath(edges_path)), exist_ok=True)
-	edge_cols = _EDGE_COLS.get(granularity, _EDGE_COLS['per_interaction'])
+	granularity = normalise_granularity(granularity)
+	edge_cols = _EDGE_COLS.get(granularity, _EDGE_COLS['per_dyad'])
 	with open(edges_path, 'w', newline='', encoding='utf-8') as f:
 		w = csv.DictWriter(f, fieldnames=edge_cols, extrasaction='ignore')
 		w.writeheader()
@@ -806,48 +1022,67 @@ def write_interaction_graph(edges_rows, nodes_rows, edges_path, nodes_path,
 # Batch / project entry point
 # ---------------------------------------------------------------------------
 
-def run_complex_features(config_path):
-	"""Build the interaction graph for every tracking CSV in the output folder.
-
-	Prefers <video>_tracking_corrected.csv; writes <video>_interaction_edges.csv
-	and <video>_interaction_nodes.csv (overwritten each run / parameter change).
-	"""
-	config_path = os.path.abspath(config_path)
-	project_dir = os.path.dirname(config_path)
-	params = load_complex_config(config_path)
-
+def resolve_output_dir(config_path):
+	"""Absolute output folder of a project, from its INI."""
 	cfg = configparser.ConfigParser()
 	cfg.optionxform = str
 	cfg.read(config_path)
-	d = cfg['DEFAULT']
-	output_dir_raw = d.get('output_dir', 'output')
-	output_dir = output_dir_raw if os.path.isabs(output_dir_raw) \
-		else os.path.join(project_dir, output_dir_raw)
+	project_dir = os.path.dirname(os.path.abspath(config_path))
+	raw = cfg['DEFAULT'].get('output_dir', 'output')
+	return raw if os.path.isabs(raw) else os.path.join(project_dir, raw)
 
-	# Preference: metric CSV (superset with X_m/Y_m) > stitched (best identities) >
-	# drone-corrected > raw. metric geometry itself consumes the stitched CSV, so
-	# metric already carries the stitched identities; the stitched fallback matters
-	# when stitching is on but metric is off -- without it the graph (and, through it,
-	# the activity budget) would silently run on the pre-stitch identities.
-	jobs = {}
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_metric.csv'))):
-		jobs[os.path.basename(p).replace('_tracking_metric.csv', '')] = p
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_stitched.csv'))):
-		jobs.setdefault(os.path.basename(p).replace('_tracking_stitched.csv', ''), p)
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):
-		jobs.setdefault(os.path.basename(p).replace('_tracking_corrected.csv', ''), p)
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):
-		jobs.setdefault(os.path.basename(p).replace('_tracking.csv', ''), p)
+
+def find_metric_csv(output_dir, stem):
+	"""The metric tracking CSV for a video stem, or None. This is the ONLY input
+	the interaction layer accepts — see the module docstring on why there is no
+	pixel-space fallback."""
+	path = os.path.join(output_dir, stem + '_tracking_metric.csv')
+	return path if os.path.exists(path) else None
+
+
+def run_complex_features(config_path):
+	"""Build the interaction graph for every metric tracking CSV in the output
+	folder.
+
+	Requires <video>_tracking_metric.csv; writes <video>_interaction_edges.csv
+	and <video>_interaction_nodes.csv (overwritten each run / parameter change).
+	The metric stage itself already consumes the most-processed CSV (stitched >
+	drone-corrected > raw), so the metric file carries the best identities
+	available — there is no separate fallback chain to maintain here.
+	"""
+	config_path = os.path.abspath(config_path)
+	params = load_complex_config(config_path)
+	output_dir = resolve_output_dir(config_path)
+
+	jobs = {os.path.basename(p)[:-len('_tracking_metric.csv')]: p
+			for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_metric.csv')))}
 
 	if not jobs:
-		print(f"Complex features: no tracking CSVs found in {output_dir}")
+		# Name what IS there, so "nothing happened" is never a mystery.
+		other = glob.glob(os.path.join(output_dir, '*_tracking*.csv'))
+		if other:
+			print(f"Complex features: found {len(other)} tracking CSV(s) in {output_dir} but "
+				  f"none with metric geometry. The interaction graph works in metres — set "
+				  f"metric_enabled = true, give each video its .flightlog.csv, and re-run so "
+				  f"*_tracking_metric.csv is produced.")
+		else:
+			print(f"Complex features: no tracking CSVs found in {output_dir}")
 		return
+
+	video_index = None
+	try:
+		from behaveai_drone.metric_geometry import build_video_index
+		video_index = build_video_index(config_path)
+	except Exception:
+		pass
 
 	print(f"Complex features: processing {len(jobs)} video(s) "
 		  f"(granularity={params['edge_granularity']}, weight={params['weight_metric']})...")
 	for stem, csv_path in sorted(jobs.items()):
 		try:
-			_process_one(stem, csv_path, output_dir, params)
+			_process_one(stem, csv_path, output_dir, params, config_path, video_index)
+		except MissingMetricError as e:
+			print(f"  SKIPPED {stem}: {e}")
 		except Exception as e:
 			import traceback
 			print(f"  ERROR on {os.path.basename(csv_path)}: {e}")
@@ -855,40 +1090,63 @@ def run_complex_features(config_path):
 	print("Complex features complete.")
 
 
-def _process_one(stem, csv_path, output_dir, params):
+def video_fps(config_path, stem, video_index=None):
+	"""Frames per second for a video stem; 30.0 when it cannot be determined.
+	Delegates to the metric stage so one module owns where a project's videos
+	live."""
+	try:
+		from behaveai_drone.metric_geometry import video_fps_for_stem
+		return video_fps_for_stem(config_path, stem, default=30.0, video_index=video_index)
+	except Exception:
+		return 30.0
+
+
+def _process_one(stem, csv_path, output_dir, params, config_path, video_index=None):
 	"""Run the full TASK 4 pipeline for a single video."""
-	track_data = load_tracking_csv(csv_path)
+	fps = video_fps(config_path, stem, video_index)
+	track_data = load_tracking_csv(csv_path, fps=fps)
 	if not track_data['frames']:
 		print(f"  {stem}: no rows, skipping.")
 		return
 
-	ref, size_ratio, is_foal = compute_body_len_ref(
-		track_data, scope=params['body_len_ref_scope'], foal_ratio=params['foal_size_ratio'])
-	n_foal = sum(1 for v in is_foal.values() if v)
-	print(f"  {stem}: body_len_ref={ref:.1f}px, {len(track_data['id_frames'])} tracks "
-		  f"({n_foal} likely foal(s)).")
+	age_by_track, age_conf_by_track = track_age_classes(track_data)
+	counts = Counter(age_by_track.values())
+	print(f"  {stem}: {len(track_data['id_frames'])} track(s) at {fps:.2f} fps "
+		  f"(age: {', '.join(f'{k}={v}' for k, v in sorted(counts.items()))}).")
+	# Report the measured noise floor: it is a property of THIS clip's footage and
+	# belongs in the methods section, not buried in a constant.
+	sigma = track_data.get('pos_noise_m', float('nan'))
+	if np.isfinite(sigma):
+		print(f"  {stem}: position noise {sigma * 100:.1f} cm -> speeds below "
+			  f"{track_data['speed_floor_ms']:.2f} m/s are indistinguishable from "
+			  f"jitter and are treated as stationary.")
+	else:
+		print(f"  {stem}: too few contiguous tracks to measure the noise floor — "
+			  f"using the {_FALLBACK_SPEED_FLOOR_MS:.2f} m/s fallback.")
+	if counts.get(UNKNOWN_AGE) == len(age_by_track):
+		print(f"  {stem}: NOTE — no individual carries an age label. Train the age "
+			  f"classifier (annot_age_crop/) if foal/adult matters for this analysis.")
 
 	pairwise = compute_pairwise_features(
-		track_data, ref, size_ratio,
-		max_distance=params['max_interaction_distance'],
+		track_data, age_by_track,
+		max_distance_m=params['max_interaction_distance_m'],
 		contact_iou_thresh=params['contact_iou_thresh'],
-		contact_dist_bodylen=params['contact_dist_bodylen'])
+		contact_dist_m=params['contact_dist_m'])
 
 	# Group features (whole co-present herd per frame) computed for downstream
 	# use (TASK 7) and summarised here.
 	groups = whole_herd_groups(track_data)
-	gfeat = compute_group_features(track_data, groups, ref)
+	gfeat = compute_group_features(track_data, groups)
 	if gfeat:
 		pol = np.mean([g['polarisation'] for g in gfeat])
 		print(f"  {stem}: {len(gfeat)} group-feature rows (mean polarisation={pol:.2f}).")
 
-	nodes = build_nodes(track_data, size_ratio, is_foal)
+	nodes = build_nodes(track_data, age_by_track, age_conf_by_track)
 	edges, nodes = build_interaction_graph(
-		pairwise, nodes,
+		pairwise, nodes, track_data,
 		granularity=params['edge_granularity'],
 		weight_metric=params['weight_metric'],
-		min_duration_frames=params['min_duration_frames'],
-		all_frames=track_data['frames'])
+		min_duration_frames=params['min_duration_frames'])
 
 	edges_path = os.path.join(output_dir, stem + '_interaction_edges.csv')
 	nodes_path = os.path.join(output_dir, stem + '_interaction_nodes.csv')

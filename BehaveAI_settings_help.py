@@ -587,29 +587,18 @@ PARAM_HELP = {
                      "the entire video.",
     },
 
-    # ---------------- Reference body length ----------------
-    "foal_size_ratio": {
-        "short": "body_len / reference below this flags a likely foal.",
-        "what": "Relative size threshold to tag small individuals as foals.",
-        "influence": "Lower tags only the smallest; higher tags more individuals as foals.",
-    },
-    "body_len_ref_scope": {
-        "short": "Scope of the reference body length: whole video or per segment.",
-        "what": "video = one reference for the clip; segment = recompute on altitude/zoom drift.",
-        "influence": "'segment' adapts to changing camera distance (drone) but is noisier; 'video' "
-                     "is stable when the camera is fixed.",
-    },
-
     # ---------------- Interaction ----------------
     "complex_max_dist": {
-        "short": "Pairs farther apart than this (px) are not treated as interacting.",
-        "what": "Maximum distance for a dyad to be considered an interaction.",
+        "short": "Pairs farther apart than this on the ground (m) are not interacting.",
+        "what": "Maximum real-world ground distance for a dyad to be considered an interaction. "
+                "Needs metric geometry; in metres it means the same thing at any flight altitude, "
+                "which a pixel threshold could not.",
         "influence": "Larger captures loose proximity events (more, weaker edges); smaller keeps only "
                      "close encounters.",
     },
     "complex_min_duration": {
-        "short": "Minimum length (frames) of an interaction episode.",
-        "what": "Episodes shorter than this are dropped (per_segment granularity).",
+        "short": "Minimum observed frames for a dyad/episode to become an edge.",
+        "what": "Pairs seen for fewer frames than this are dropped, at every granularity.",
         "influence": "Higher removes brief incidental contacts; lower keeps short interactions.",
     },
     "complex_contact_iou": {
@@ -618,8 +607,9 @@ PARAM_HELP = {
         "influence": "Higher requires strong overlap for 'contact'; lower flags grazing touches.",
     },
     "complex_contact_dist": {
-        "short": "Distance (body lengths) below which subjects count as in contact.",
-        "what": "Proximity-based contact criterion, complementing IoU.",
+        "short": "Ground distance (m) below which subjects count as in contact.",
+        "what": "Proximity-based contact criterion, complementing IoU. Measured centre to centre "
+                "in real metres, so ~2-3 m is roughly touching for an adult horse.",
         "influence": "Larger labels near-misses as contact; smaller demands true closeness.",
     },
     "complex_window": {
@@ -629,15 +619,18 @@ PARAM_HELP = {
     },
     "interaction_granularity": {
         "short": "Edge granularity in the interaction graph.",
-        "what": "per_interaction (one edge per episode), per_segment, or per_frame.",
+        "what": "per_dyad = ONE row per pair summarising the whole clip (an association summary, "
+                "not an episode); per_segment = one row per continuous episode; per_frame = one row "
+                "per observed frame.",
         "influence": "Finer granularity yields larger, more detailed edge files. Changing this "
                      "regenerates and overwrites the edges file.",
     },
     "interaction_weight": {
-        "short": "How interaction edge weights are computed.",
-        "what": "duration, proximity, or combined.",
-        "influence": "Chooses what 'strength' means in the social graph — time spent together, "
-                     "closeness, or both.",
+        "short": "How interaction edge weights are computed (all comparable across videos).",
+        "what": "sri = simple ratio index, time together / time both were visible, bounded 0-1; "
+                "duration_s = seconds together; proximity_m = 1 / mean ground distance.",
+        "influence": "Chooses what 'strength' means in the social graph. All three are absolute "
+                     "quantities, so weights can be compared between clips and between sites.",
     },
 
     # ---------------- Complex behaviours ----------------
@@ -651,7 +644,8 @@ PARAM_HELP = {
     "complex_model_type": {
         "short": "Model family for complex behaviours: baseline / lstm / transformer.",
         "what": "baseline = scikit-learn classifier on aggregated features; lstm/transformer model "
-                "the temporal sequence (need torch).",
+                "the temporal sequence (require torch, and error out if it is missing rather than "
+                "silently training the baseline instead).",
         "influence": "Sequence models can capture temporal dynamics better but need torch and more "
                      "data/compute; baseline is the dependency-light default.",
     },
@@ -717,13 +711,15 @@ PARAM_HELP = {
                      "with more errors.",
     },
     "complex_speed_low": {
-        "short": "Speed (body lengths/frame) below which a subject counts as ~still.",
-        "what": "Lower bound used by the candidate-proposal heuristics.",
+        "short": "Ground speed (m/s) below which a subject counts as ~still.",
+        "what": "Lower bound used by the candidate-proposal heuristics. A grazing horse moves at "
+                "well under 0.5 m/s, so ~0.2 is a reasonable 'standing' bound.",
         "influence": "Tunes what 'stationary' means when surfacing candidate windows.",
     },
     "complex_speed_high": {
-        "short": "Speed (body lengths/frame) above which motion counts as fast (gallop/chase).",
-        "what": "Upper bound used by the candidate-proposal heuristics.",
+        "short": "Ground speed (m/s) above which motion counts as fast (gallop/chase).",
+        "what": "Upper bound used by the candidate-proposal heuristics. A horse trots at roughly "
+                "3-4 m/s and canters faster.",
         "influence": "Tunes what 'fast' means when surfacing candidate windows.",
     },
     "complex_polarisation_high": {

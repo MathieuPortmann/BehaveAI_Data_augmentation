@@ -1759,14 +1759,20 @@ if __name__ == '__main__':
 		traceback.print_exc()
 
 	# Auto-launch the interaction graph (deterministic dyadic/group features ->
-	# edges/nodes). Runs after metric geometry so it can consume the most-processed
-	# CSV; disabled -> no behaviour change. Must run BEFORE complex classification,
-	# which back-fills interaction_type into the edges file.
+	# edges/nodes). REQUIRES metric geometry: the graph works in metres and skips
+	# any video without *_tracking_metric.csv. Must run BEFORE complex
+	# classification, which back-fills interaction_type into the edges file.
 	try:
 		if config['DEFAULT'].get('interaction_graph_enabled', 'true').lower() == 'true':
-			from BehaveAI_complex_features import run_complex_features
-			print("\nLaunching interaction graph...")
-			run_complex_features(config_path)
+			if config['DEFAULT'].get('metric_enabled', 'false').lower() != 'true':
+				print("\nInteraction graph: SKIPPED — it measures distances and speeds in "
+					  "metres, which needs metric_enabled = true (plus a .flightlog.csv "
+					  "beside each video). Enable it in the settings, or set "
+					  "interaction_graph_enabled = false to stop seeing this notice.")
+			else:
+				from BehaveAI_complex_features import run_complex_features
+				print("\nLaunching interaction graph...")
+				run_complex_features(config_path)
 	except Exception as e:
 		import traceback
 		print(f"Interaction graph failed: {e}")

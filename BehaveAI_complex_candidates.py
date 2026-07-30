@@ -26,7 +26,8 @@ Two complementary sources:
      (lowest max-probability) are surfaced as the next segments to annotate, with
      the model's current best guess as the suggested behaviour.
 
-Everything is image-space; no metric conversion.
+All thresholds are in real units (metres, m/s) and read the metric tracking CSV,
+so a rule means the same thing at 15 m and at 50 m of altitude.
 """
 
 import os
@@ -48,9 +49,13 @@ TASK6_COLUMNS = [
 	'annotator_confidence', 'fps', 'frame_width', 'frame_height',
 ]
 
-# Internal constant: |approach_rate| (body lengths / frame) below this is treated
-# as "roughly constant distance" for the chase rule.
-_CHASE_CONST_DIST_BODYLEN = 0.05
+# Internal constant: |approach_rate| (metres / second) below this is treated as
+# "roughly constant distance" for the chase rule — a chaser holds its gap.
+_CHASE_CONST_DIST_MS = 0.5
+
+# Internal constant: standard deviation (metres) of members' distance to the herd
+# centroid below which the group counts as tightly clustered.
+_TIGHT_GROUP_SPREAD_M = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +70,13 @@ def load_candidate_config(config_path):
 	d = cfg['DEFAULT']
 	base = CM.load_model_config(config_path)
 	base.update({
-		'speed_low_bodylen':  float(d.get('complex_speed_low_bodylen', '0.05')),
-		'speed_high_bodylen': float(d.get('complex_speed_high_bodylen', '0.25')),
+		# In METRES PER SECOND. The old body-lengths-per-frame thresholds were
+		# never usable: 0.05 body-len/frame is ~3.3 m/s at 30 fps — a trot — yet
+		# the rules used it to mean "standing still", so allogrooming and
+		# synchronised rest could fire on moving animals and chase almost never
+		# fired. Metric features make an honest threshold expressible.
+		'speed_low_ms':       float(d.get('complex_speed_low_ms', '0.2')),
+		'speed_high_ms':      float(d.get('complex_speed_high_ms', '3.0')),
 		'polarisation_high':  float(d.get('complex_polarisation_high', '0.7')),
 		'synchrony_high':     float(d.get('complex_synchrony_high', '0.7')),
 		'candidate_topk':     int(float(d.get('complex_candidate_topk', '50'))),
@@ -126,10 +136,17 @@ def _heuristic_candidates(cache, params):
 	"""
 	allowed = set(params['behaviours'])
 	td = cache['track_data']
-	ref = cache['ref'] if cache['ref'] and cache['ref'] > 0 else 1.0
 	tol = 2 * _typical_step(td['frames'])
 	min_dur = params['min_duration_frames']
-	lo, hi = params['speed_low_bodylen'], params['speed_high_bodylen']
+	# A "standing still" threshold set below the clip's own noise floor would call
+	# every grazing horse a mover, so the configured value is raised to the floor
+	# when the footage is noisier than the setting assumes.
+	floor = td.get('speed_floor_ms', 0.0)
+	lo = max(params['speed_low_ms'], floor)
+	hi = max(params['speed_high_ms'], lo * 1.5)
+	if lo > params['speed_low_ms']:
+		print(f"  {cache['stem']}: complex_speed_low_ms={params['speed_low_ms']:.2f} is below "
+			  f"this clip's noise floor; using {lo:.2f} m/s instead.")
 	out = []
 
 	# --- Dyadic rules per ordered pair ---
@@ -143,7 +160,7 @@ def _heuristic_candidates(cache, params):
 		if 'chase' in allowed:
 			seq = [(r['frame'],
 					r['speed_similarity'] > 0.6 and r['speed_A'] > hi and r['speed_B'] > hi
-					and abs(r['approach_rate']) / ref < _CHASE_CONST_DIST_BODYLEN)
+					and abs(r['approach_rate']) < _CHASE_CONST_DIST_MS)
 				   for r in rows]
 			for (s, e) in _find_runs(seq, min_dur, tol):
 				out.append((s, e, [a, b], 'chase'))
@@ -160,7 +177,7 @@ def _group_heuristics(cache, params, tol, min_dur, lo, hi, group_rules):
 	stream (no spatial sub-grouping — every co-present individual counts)."""
 	out = []
 	td = cache['track_data']
-	gfeat = CF.compute_group_features(td, CF.whole_herd_groups(td), cache['ref'])
+	gfeat = CF.compute_group_features(td, CF.whole_herd_groups(td))
 	if not gfeat:
 		return out
 	gfeat.sort(key=lambda g: g['frame'])
@@ -170,8 +187,10 @@ def _group_heuristics(cache, params, tol, min_dur, lo, hi, group_rules):
 		'stampede': lambda g: g['mean_speed'] > hi and g['polarisation'] > pol_hi,
 		'trek': lambda g: (g['polarisation'] > pol_hi and lo <= g['mean_speed'] <= hi
 						   and g['centroid_speed'] > lo),
+		# cohesion is now the spread of members around the centroid IN METRES, so
+		# the "tight group" bound is a real distance rather than a body-length count.
 		'synchronised_rest_graze': lambda g: (g['mean_speed'] < lo and g['synchrony'] > syn_hi
-											  and g['cohesion'] < 1.0),
+											  and g['cohesion'] < _TIGHT_GROUP_SPREAD_M),
 	}
 	for beh in group_rules:
 		cond = rules[beh]
@@ -286,9 +305,10 @@ def _dedup(cands):
 	return out
 
 
-def generate_candidates_for_video(stem, csv_path, output_dir, params, bundle):
+def generate_candidates_for_video(stem, csv_path, output_dir, params, bundle,
+								  config_path=None, video_index=None):
 	"""Write <stem>_complex_candidates.csv from heuristic + active-learning sources."""
-	cache = CM._build_video_cache(stem, csv_path, params)
+	cache = CM._build_video_cache(stem, csv_path, params, config_path, video_index)
 	cache['output_dir'] = output_dir
 	cache['stem'] = stem
 
@@ -338,19 +358,22 @@ def generate_candidates(project_path):
 		print("No trained complex model found — generating heuristic candidates only "
 			  "(train the model to enable active learning).")
 
-	jobs = {}
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):
-		jobs[os.path.basename(p).replace('_tracking_corrected.csv', '')] = p
-	for p in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):
-		jobs.setdefault(os.path.basename(p).replace('_tracking.csv', ''), p)
+	suffix = '_tracking_metric.csv'
+	jobs = {os.path.basename(p)[:-len(suffix)]: p
+			for p in sorted(glob.glob(os.path.join(output_dir, '*' + suffix)))}
 	if not jobs:
-		print(f"Candidates: no tracking CSVs found in {output_dir}")
+		print(f"Candidates: no metric tracking CSVs in {output_dir} — the heuristics "
+			  f"are expressed in m and m/s, so the metric stage must run first.")
 		return
 
+	video_index = CM._video_index(config_path)
 	print(f"Candidates: processing {len(jobs)} video(s)...")
 	for stem, csv_path in sorted(jobs.items()):
 		try:
-			generate_candidates_for_video(stem, csv_path, output_dir, params, bundle)
+			generate_candidates_for_video(stem, csv_path, output_dir, params, bundle,
+										  config_path, video_index)
+		except CF.MissingMetricError as e:
+			print(f"  SKIPPED {stem}: {e}")
 		except Exception as e:
 			import traceback
 			print(f"  ERROR on {stem}: {e}")

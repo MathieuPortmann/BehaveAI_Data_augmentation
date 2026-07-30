@@ -795,6 +795,13 @@ metric_sensor_width_mm = 36.0
 metric_roll_max_deg = 3.0
 # Min pixels below the horizon line required, else flagged 'uncertain' (near-horizon = huge error).
 metric_horizon_margin_px = 50
+# Scale cross-check. Every ground distance scales linearly with the flight-log
+# camera height, so a biased rel_alt (takeoff point above/below the animals, or
+# sloped terrain) biases ALL distances by the same percentage. The animals'
+# apparent size gives a second, independent height estimate; if the two disagree
+# by more than metric_scale_tolerance, the clip is flagged 'uncertain'.
+metric_assumed_body_length_m = 2.2
+metric_scale_tolerance = 0.25
 # Optional per-drone pixel-focal overrides from a checkerboard calibration, e.g.:
 # metric_fpx_Mini4Pro = 2560.0
 
@@ -827,13 +834,10 @@ ab_min_presence_seconds = 30
 # short-presence subject entered from (explains a flag, never decides it).
 ab_edge_margin_px = 100
 
-# === Reference body length ===
-# body_len_i / body_len_ref below this flags a likely foal.
-foal_size_ratio_thresh = 0.7
-# Reference body-length scope: video | segment (segment recomputes on scale drift).
-body_len_ref_scope = video
-
 # === Complex behaviours / interaction features ===
+# NOTE: this layer works entirely in METRES and requires metric_enabled = true plus
+# a .flightlog.csv next to each video. Foal/adult comes from the age classifier
+# (age_classes above), never from apparent size.
 # Auto-run the complex-behaviour stage at the end of batch classify: (re)train on
 # new annotations when needed (like the YOLO models, keyed off train_count.txt),
 # then classify. Its predictions feed the activity budget. NO-OP when a project has
@@ -864,24 +868,24 @@ complex_deep_dropout = 0.2
 complex_deep_lr = 0.001
 # Mini-batch size for the deep model.
 complex_deep_batch = 16
-# Pairs farther apart than this (px) are ignored as interactions.
-complex_max_interaction_distance = 400
-# Minimum length (frames) of an interaction episode (per_segment granularity).
+# Pairs farther apart than this ON THE GROUND (metres) are ignored as interactions.
+complex_max_interaction_distance_m = 15.0
+# Minimum number of observed frames for a dyad/episode to become an edge.
 complex_min_duration_frames = 10
 # Box IoU above this counts as contact.
 complex_contact_iou_thresh = 0.05
-# Distance (in body lengths) below this counts as contact.
-complex_contact_dist_bodylen = 1.5
+# Ground distance (metres) below this counts as contact.
+complex_contact_dist_m = 2.5
 # Window length (frames) for aggregating features for the model.
 complex_window_frames = 30
 # Min true-vs-predicted confusion rate to flag a class pair as a merge suggestion.
 complex_confusion_merge_rate = 0.20
 # Minimum predicted probability to emit a complex-behaviour prediction.
 complex_predict_min_proba = 0.5
-# Candidate heuristics (body lengths / frame): speeds below 'low' count as ~still.
-complex_speed_low_bodylen = 0.05
+# Candidate heuristics (metres/second): speeds below 'low' count as ~still.
+complex_speed_low_ms = 0.2
 # Speeds above 'high' count as fast (gallop/chase).
-complex_speed_high_bodylen = 0.25
+complex_speed_high_ms = 3.0
 # Group polarisation above this counts as aligned (trek/stampede).
 complex_polarisation_high = 0.7
 # Behavioural synchrony above this counts as synchronised.
@@ -893,10 +897,12 @@ complex_candidate_topk = 50
 # Auto-run the (deterministic) interaction graph at the end of batch classify, so
 # its edges/nodes feed the activity budget. Off = graph not built automatically.
 interaction_graph_enabled = true
-# Edge granularity: per_interaction | per_segment | per_frame.
-interaction_edge_granularity = per_interaction
-# Edge weight metric: duration | proximity | combined.
-interaction_weight_metric = duration
+# Edge granularity: per_dyad (one row per pair for the clip) | per_segment
+# (one row per episode) | per_frame.
+interaction_edge_granularity = per_dyad
+# Edge weight metric, all comparable ACROSS videos: sri (simple ratio index,
+# time together / time both visible, in [0,1]) | duration_s | proximity_m.
+interaction_weight_metric = sri
 
 """
 

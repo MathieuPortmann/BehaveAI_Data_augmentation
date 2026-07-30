@@ -29,6 +29,16 @@ from behaveai_config import (
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
 
+
+def _granularity(value):
+	"""Canonical edge-granularity name, accepting the pre-rename 'per_interaction'
+	spelling so an existing INI still selects the right combobox entry."""
+	try:
+		from BehaveAI_complex_features import normalise_granularity
+		return normalise_granularity(value)
+	except Exception:
+		return 'per_dyad' if (value or '').strip() in ('', 'per_interaction') else value
+
 CLASS_GROUPS = [
 	('primary_static', 'Primary static'),
 	('primary_motion', 'Primary motion'),
@@ -620,18 +630,14 @@ class SettingsEditorApp(tk.Tk):
 		# now lives on the Tracking tab).
 		self.ab_min_classified_var     = tk.IntVar(value=5)
 
-		# Reference body length parameters
-		self.foal_size_ratio_var       = tk.DoubleVar(value=0.7)
-		self.body_len_ref_scope_var    = tk.StringVar(value='video')
-
 		# Interaction features / graph parameters
-		self.complex_max_dist_var       = tk.DoubleVar(value=400.0)
+		self.complex_max_dist_var       = tk.DoubleVar(value=15.0)
 		self.complex_min_duration_var   = tk.IntVar(value=10)
 		self.complex_contact_iou_var    = tk.DoubleVar(value=0.05)
-		self.complex_contact_dist_var   = tk.DoubleVar(value=1.5)
+		self.complex_contact_dist_var   = tk.DoubleVar(value=2.5)
 		self.complex_window_var         = tk.IntVar(value=30)
-		self.interaction_granularity_var = tk.StringVar(value='per_interaction')
-		self.interaction_weight_var     = tk.StringVar(value='duration')
+		self.interaction_granularity_var = tk.StringVar(value='per_dyad')
+		self.interaction_weight_var     = tk.StringVar(value='sri')
 
 		# Complex-behaviour model selectors
 		self.complex_model_type_var        = tk.StringVar(value='baseline')
@@ -640,8 +646,8 @@ class SettingsEditorApp(tk.Tk):
 		# Complex-behaviour model thresholds + candidate heuristics
 		self.complex_confusion_merge_rate_var = tk.DoubleVar(value=0.20)
 		self.complex_predict_min_proba_var    = tk.DoubleVar(value=0.5)
-		self.complex_speed_low_var            = tk.DoubleVar(value=0.05)
-		self.complex_speed_high_var           = tk.DoubleVar(value=0.25)
+		self.complex_speed_low_var            = tk.DoubleVar(value=0.2)
+		self.complex_speed_high_var           = tk.DoubleVar(value=3.0)
 		self.complex_polarisation_high_var    = tk.DoubleVar(value=0.7)
 		self.complex_synchrony_high_var       = tk.DoubleVar(value=0.7)
 		self.complex_candidate_topk_var       = tk.IntVar(value=50)
@@ -1455,29 +1461,15 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab_int, text='Per-frame dyadic/group features aggregated into the interaction graph (edges/nodes CSVs). Group features are computed over the whole co-present herd per frame.',
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
+		ttk.Label(tab_int, text='Requires metric geometry (Metric tab) — everything below is in real metres, and videos without it are skipped. Foal/adult comes from the age classifier, not from apparent size.',
+			font=_help_font, foreground='#a05000').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
 
-		help_label(tab_int, 'Foal size ratio threshold', 'foal_size_ratio').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_int, from_=0.0, to=1.0, increment=0.05,
-			textvariable=self.foal_size_ratio_var, width=6, command=self._set_dirty).grid(
-			row=ir, column=1, sticky='w', padx=8); ir += 1
-		ttk.Label(tab_int, text='body_len / reference below this flags a likely foal.',
-			font=_help_font, foreground='grey').grid(
-			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
-
-		help_label(tab_int, 'Body-length reference scope', 'body_len_ref_scope').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_int, values=['video', 'segment'],
-			textvariable=self.body_len_ref_scope_var, state='readonly', width=12).grid(
-			row=ir, column=1, sticky='w', padx=8); ir += 1
-		ttk.Label(tab_int, text='video = one reference; segment = recompute on altitude/zoom drift.',
-			font=_help_font, foreground='grey').grid(
-			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
-		self.body_len_ref_scope_var.trace_add('write', lambda *a: self._set_dirty())
-
-		help_label(tab_int, 'Max interaction distance (px)', 'complex_max_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_int, from_=1.0, to=100000.0, increment=10.0,
+		help_label(tab_int, 'Max interaction distance (m)', 'complex_max_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=0.5, to=500.0, increment=1.0,
 			textvariable=self.complex_max_dist_var, width=8, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
-		ttk.Label(tab_int, text='Pairs farther apart than this are not treated as interacting.',
+		ttk.Label(tab_int, text='Pairs farther apart than this ON THE GROUND are not treated as interacting.',
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 
@@ -1491,8 +1483,8 @@ class SettingsEditorApp(tk.Tk):
 			textvariable=self.complex_contact_iou_var, width=6, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
-		help_label(tab_int, 'Contact distance (body lengths)', 'complex_contact_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Spinbox(tab_int, from_=0.0, to=50.0, increment=0.1,
+		help_label(tab_int, 'Contact distance (m)', 'complex_contact_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Spinbox(tab_int, from_=0.0, to=50.0, increment=0.5,
 			textvariable=self.complex_contact_dist_var, width=6, command=self._set_dirty).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
@@ -1502,18 +1494,21 @@ class SettingsEditorApp(tk.Tk):
 			row=ir, column=1, sticky='w', padx=8); ir += 1
 
 		help_label(tab_int, 'Edge granularity', 'interaction_granularity').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_int, values=['per_interaction', 'per_segment', 'per_frame'],
+		ttk.Combobox(tab_int, values=['per_dyad', 'per_segment', 'per_frame'],
 			textvariable=self.interaction_granularity_var, state='readonly', width=16).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
-		ttk.Label(tab_int, text='Changing this regenerates and overwrites the edges file.',
+		ttk.Label(tab_int, text='per_dyad = one row per pair for the whole clip; per_segment = one row per episode. Changing this overwrites the edges file.',
 			font=_help_font, foreground='grey').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 		self.interaction_granularity_var.trace_add('write', lambda *a: self._set_dirty())
 
 		help_label(tab_int, 'Edge weight metric', 'interaction_weight').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
-		ttk.Combobox(tab_int, values=['duration', 'proximity', 'combined'],
+		ttk.Combobox(tab_int, values=['sri', 'duration_s', 'proximity_m'],
 			textvariable=self.interaction_weight_var, state='readonly', width=16).grid(
 			row=ir, column=1, sticky='w', padx=8); ir += 1
+		ttk.Label(tab_int, text='All three are absolute, so weights are comparable between videos.',
+			font=_help_font, foreground='grey').grid(
+			row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 		self.interaction_weight_var.trace_add('write', lambda *a: self._set_dirty())
 
 		# TAB: Complex Behaviours (label list + model selectors)
@@ -1555,9 +1550,9 @@ class SettingsEditorApp(tk.Tk):
 				 'Confusion >= this flags a class pair as a merge suggestion.', 'complex_confusion_merge_rate')
 		_thr_row(1, 'Predict min probability', self.complex_predict_min_proba_var, 0.0, 1.0, 0.05,
 				 'Minimum probability to emit a complex-behaviour prediction.', 'complex_predict_min_proba')
-		_thr_row(2, 'Speed ~still (body len/frame)', self.complex_speed_low_var, 0.0, 5.0, 0.01,
+		_thr_row(2, 'Speed ~still (m/s)', self.complex_speed_low_var, 0.0, 5.0, 0.05,
 				 'Speeds below this count as ~stationary in the candidate heuristics.', 'complex_speed_low')
-		_thr_row(3, 'Speed fast (body len/frame)', self.complex_speed_high_var, 0.0, 10.0, 0.05,
+		_thr_row(3, 'Speed fast (m/s)', self.complex_speed_high_var, 0.0, 20.0, 0.5,
 				 'Speeds above this count as fast (gallop / chase).', 'complex_speed_high')
 		_thr_row(4, 'Polarisation high', self.complex_polarisation_high_var, 0.0, 1.0, 0.05,
 				 'Group alignment above this suggests trek/stampede.', 'complex_polarisation_high')
@@ -1868,18 +1863,14 @@ class SettingsEditorApp(tk.Tk):
 		# activity-budget membership gate (Re-ID removed)
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
 
-		# reference body length
-		self.foal_size_ratio_var.set(float(d.get('foal_size_ratio_thresh', fallback='0.7')))
-		self.body_len_ref_scope_var.set(d.get('body_len_ref_scope', fallback='video'))
-
 		# interaction features / graph
-		self.complex_max_dist_var.set(float(d.get('complex_max_interaction_distance', fallback='400')))
+		self.complex_max_dist_var.set(float(d.get('complex_max_interaction_distance_m', fallback='15')))
 		self.complex_min_duration_var.set(int(float(d.get('complex_min_duration_frames', fallback='10'))))
 		self.complex_contact_iou_var.set(float(d.get('complex_contact_iou_thresh', fallback='0.05')))
-		self.complex_contact_dist_var.set(float(d.get('complex_contact_dist_bodylen', fallback='1.5')))
+		self.complex_contact_dist_var.set(float(d.get('complex_contact_dist_m', fallback='2.5')))
 		self.complex_window_var.set(int(float(d.get('complex_window_frames', fallback='30'))))
-		self.interaction_granularity_var.set(d.get('interaction_edge_granularity', fallback='per_interaction'))
-		self.interaction_weight_var.set(d.get('interaction_weight_metric', fallback='duration'))
+		self.interaction_granularity_var.set(_granularity(d.get('interaction_edge_granularity', fallback='per_dyad')))
+		self.interaction_weight_var.set(d.get('interaction_weight_metric', fallback='sri'))
 
 		# complex behaviours list + model selectors
 		self.complex_model_type_var.set(d.get('complex_model_type', fallback='baseline'))
@@ -1892,8 +1883,8 @@ class SettingsEditorApp(tk.Tk):
 			self.complex_editor.add_row(name=nm, hotkey=hk)
 		self.complex_confusion_merge_rate_var.set(float(d.get('complex_confusion_merge_rate', fallback='0.20')))
 		self.complex_predict_min_proba_var.set(float(d.get('complex_predict_min_proba', fallback='0.5')))
-		self.complex_speed_low_var.set(float(d.get('complex_speed_low_bodylen', fallback='0.05')))
-		self.complex_speed_high_var.set(float(d.get('complex_speed_high_bodylen', fallback='0.25')))
+		self.complex_speed_low_var.set(float(d.get('complex_speed_low_ms', fallback='0.2')))
+		self.complex_speed_high_var.set(float(d.get('complex_speed_high_ms', fallback='3.0')))
 		self.complex_polarisation_high_var.set(float(d.get('complex_polarisation_high', fallback='0.7')))
 		self.complex_synchrony_high_var.set(float(d.get('complex_synchrony_high', fallback='0.7')))
 		self.complex_candidate_topk_var.set(int(float(d.get('complex_candidate_topk', fallback='50'))))
@@ -2386,15 +2377,11 @@ class SettingsEditorApp(tk.Tk):
 		# activity-budget membership gate (Re-ID removed)
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
 
-		# reference body length
-		new_default['foal_size_ratio_thresh'] = str(self.foal_size_ratio_var.get())
-		new_default['body_len_ref_scope'] = self.body_len_ref_scope_var.get()
-
 		# interaction features / graph
-		new_default['complex_max_interaction_distance'] = str(self.complex_max_dist_var.get())
+		new_default['complex_max_interaction_distance_m'] = str(self.complex_max_dist_var.get())
 		new_default['complex_min_duration_frames'] = str(self.complex_min_duration_var.get())
 		new_default['complex_contact_iou_thresh'] = str(self.complex_contact_iou_var.get())
-		new_default['complex_contact_dist_bodylen'] = str(self.complex_contact_dist_var.get())
+		new_default['complex_contact_dist_m'] = str(self.complex_contact_dist_var.get())
 		new_default['complex_window_frames'] = str(self.complex_window_var.get())
 		new_default['interaction_edge_granularity'] = self.interaction_granularity_var.get()
 		new_default['interaction_weight_metric'] = self.interaction_weight_var.get()
@@ -2407,8 +2394,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['complex_baseline_classifier'] = self.complex_baseline_clf_var.get()
 		new_default['complex_confusion_merge_rate'] = str(self.complex_confusion_merge_rate_var.get())
 		new_default['complex_predict_min_proba'] = str(self.complex_predict_min_proba_var.get())
-		new_default['complex_speed_low_bodylen'] = str(self.complex_speed_low_var.get())
-		new_default['complex_speed_high_bodylen'] = str(self.complex_speed_high_var.get())
+		new_default['complex_speed_low_ms'] = str(self.complex_speed_low_var.get())
+		new_default['complex_speed_high_ms'] = str(self.complex_speed_high_var.get())
 		new_default['complex_polarisation_high'] = str(self.complex_polarisation_high_var.get())
 		new_default['complex_synchrony_high'] = str(self.complex_synchrony_high_var.get())
 		new_default['complex_candidate_topk'] = str(self.complex_candidate_topk_var.get())
