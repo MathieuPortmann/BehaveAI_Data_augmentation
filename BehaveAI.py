@@ -409,8 +409,34 @@ class ScriptRunnerApp:
 	                          f"({pct:.1f}%, target {val_frequency*100:.0f}%)")
 
 	        # ── Per-class annotation counts ────────────────────────────
+	        # Boxes come from the primary label files. The secondaries hanging
+	        # off each primary come from secondary_map (INI), and their crop
+	        # counts from the pooled folders annot_<stream>_crop/<secondary>/,
+	        # which is what maybe_retrain('secondary_*') hands to Ultralytics
+	        # (see BehaveAI_classify_track.py). '__none__' is a real trained
+	        # class: crops of a secondary-eligible primary with no secondary.
+	        sec_cfg = load_secondary_config(cfg, primary_static_classes,
+	                                        primary_motion_classes)
+	        sec_map = sec_cfg['secondary_map']
+
+	        def crop_counts(crop_dir):
+	            """{class folder: number of crops} for one annot_*_crop dir."""
+	            counts = {}
+	            if not crop_dir.is_dir():
+	                return counts
+	            for class_dir in sorted(crop_dir.iterdir()):
+	                if not class_dir.is_dir():
+	                    continue
+	                # scandir, not list_images(): these folders hold thousands
+	                # of crops and this runs on every project selection.
+	                with os.scandir(class_dir) as it:
+	                    counts[class_dir.name] = sum(
+	                        1 for e in it if e.name.lower().endswith(img_ext))
+	            return counts
+
 	        if all_primary_classes:
-	            lines.append(f"\n  CLASS DISTRIBUTION  (from label files)")
+	            lines.append(f"\n  CLASS DISTRIBUTION  (boxes from label files, "
+	                          f"crops from annot_<stream>_crop/)")
 
 	            # Map class index -> name for static and motion
 	            static_class_map = {i: name for i, name in enumerate(primary_static_classes)}
@@ -445,70 +471,63 @@ class ScriptRunnerApp:
 	            tally_labels(annot_dirs['motion_val_lbl'],   motion_class_map)
 
 	            total_boxes = sum(class_counts.values())
-	            for name in all_primary_classes:
-	                count = class_counts[name]
-	                pct   = 100.0 * count / total_boxes if total_boxes > 0 else 0.0
-	                warn  = "  ⚠ under-represented" if pct < 10 and total_boxes > 0 else ""
-	                lines.append(f"    {name:<28} {count:>5} boxes  ({pct:5.1f}%){warn}")
-
-	        # ── Secondary class distribution (crop classifiers) ────────
-	        # The secondary models are trained straight off the pooled crop
-	        # folders annot_<stream>_crop/<secondary>/ (see maybe_retrain
-	        # ('secondary_*') in BehaveAI_classify_track.py), so those folders
-	        # ARE the class list. '__none__' is a real trained class: crops of a
-	        # secondary-eligible primary that carry no secondary label.
-	        sec_cfg = load_secondary_config(cfg, primary_static_classes,
-	                                        primary_motion_classes)
-	        sec_map = sec_cfg['secondary_map']
-
-	        def declared_for(primaries):
-	            """Secondaries reachable from a stream's primaries, INI order."""
-	            allowed = {s for p in primaries for s in sec_map.get(p, [])}
-	            return [s for s in sec_cfg['secondary_classes'] if s in allowed]
-
-	        sec_section_printed = False
-	        for stream, stream_primaries in (('static', primary_static_classes),
-	                                         ('motion', primary_motion_classes)):
-	            for crop_dir in sorted(project_path.glob(f'annot_{stream}_crop*')):
-	                # Skip the derived train/val split copies and old backups
-	                if not crop_dir.is_dir() \
-	                   or crop_dir.name.endswith('_split') \
-	                   or re.search(r'_backup\d+$', crop_dir.name):
+	            for stream, stream_primaries in (('static', primary_static_classes),
+	                                             ('motion', primary_motion_classes)):
+	                if not stream_primaries:
 	                    continue
+	                pool = crop_counts(project_path / f'annot_{stream}_crop')
+	                lines.append(f"\n    [{stream}]")
 
-	                counts = {}
-	                for class_dir in sorted(crop_dir.iterdir()):
-	                    if not class_dir.is_dir():
-	                        continue
-	                    # scandir, not list_images(): these folders hold thousands
-	                    # of crops and this runs on every project selection.
-	                    with os.scandir(class_dir) as it:
-	                        counts[class_dir.name] = sum(
-	                            1 for e in it
-	                            if e.name.lower().endswith(img_ext))
-	                if not counts:
+	                for name in stream_primaries:
+	                    count = class_counts[name]
+	                    pct   = 100.0 * count / total_boxes if total_boxes > 0 else 0.0
+	                    warn  = "  ⚠ under-represented" if pct < 10 and total_boxes > 0 else ""
+	                    lines.append(f"    {name:<28} {count:>5} boxes  ({pct:5.1f}%){warn}")
+
+	                    # Secondaries allowed on this primary, in INI pool order
+	                    secs = [s for s in sec_cfg['secondary_classes']
+	                            if s in sec_map.get(name, [])]
+	                    for i, sec in enumerate(secs):
+	                        branch  = '└─' if i == len(secs) - 1 else '├─'
+	                        n_crops = pool.get(sec, 0)
+	                        flag    = "  ⚠ never annotated" if n_crops == 0 else ""
+	                        lines.append(f"      {branch} {sec:<23} "
+	                                      f"{n_crops:>5} crops{flag}")
+
+	                if not pool:
 	                    continue
-
-	                if not sec_section_printed:
-	                    lines.append(f"\n  SECONDARY CLASS DISTRIBUTION  (from crop folders)")
-	                    sec_section_printed = True
-
-	                total_crops = sum(counts.values())
-	                non_empty   = sum(1 for n in counts.values() if n > 0)
-	                lines.append(f"\n    [{crop_dir.name}]  {total_crops} crops")
-	                # __none__ last: it is the negative class, not a behaviour
-	                for name in sorted(counts, key=lambda n: (n == NONE_LABEL, n.lower())):
-	                    count = counts[name]
-	                    pct   = 100.0 * count / total_crops if total_crops > 0 else 0.0
-	                    lines.append(f"    {name:<28} {count:>5} crops  ({pct:5.1f}%)")
-
-	                missing = [s for s in declared_for(stream_primaries)
-	                           if counts.get(s, 0) == 0]
-	                if missing:
-	                    lines.append(f"    declared but never annotated: {', '.join(missing)}")
+	                # Crops are pooled per stream, not per primary: one classifier
+	                # per stream trains on the whole pool, so a secondary allowed
+	                # on several primaries repeats the same count under each.
+	                total_crops = sum(pool.values())
+	                non_empty   = sum(1 for n in pool.values() if n > 0)
+	                lines.append(f"    {'crop pool (whole stream)':<28} "
+	                              f"{total_crops:>5} crops  "
+	                              f"({pool.get(NONE_LABEL, 0)} in {NONE_LABEL})")
+	                mapped  = {s for p in stream_primaries for s in sec_map.get(p, [])}
+	                orphans = [f"{k} ({v})" for k, v in sorted(pool.items())
+	                           if k != NONE_LABEL and k not in mapped]
+	                if orphans:
+	                    lines.append(f"    crop folders not in secondary_map: "
+	                                  f"{', '.join(orphans)}")
 	                # Same gate as the pipeline: <2 non-empty folders -> no training
 	                if non_empty < 2:
 	                    lines.append(f"    ⚠ needs ≥2 non-empty class folders to train")
+
+	            # Species-scoped pools (annot_<stream>_crop__<species>) belong to
+	            # their own models and to species-scoped INI keys this summary
+	            # does not read, so they get a flat listing rather than a tree.
+	            for stream in ('static', 'motion'):
+	                for crop_dir in sorted(project_path.glob(f'annot_{stream}_crop__*')):
+	                    if re.search(r'_backup\d+$', crop_dir.name):
+	                        continue
+	                    pool = crop_counts(crop_dir)
+	                    if not pool:
+	                        continue
+	                    lines.append(f"\n    [{crop_dir.name}]  {sum(pool.values())} crops")
+	                    # __none__ last: it is the negative class, not a behaviour
+	                    for name in sorted(pool, key=lambda n: (n == NONE_LABEL, n.lower())):
+	                        lines.append(f"    {name:<28} {pool[name]:>5} crops")
 
 	        # ── Videos in clips dir ────────────────────────────────────
 	        clips_dir_raw = d.get('clips_dir', 'clips')
