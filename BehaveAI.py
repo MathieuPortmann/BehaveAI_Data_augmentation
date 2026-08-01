@@ -45,6 +45,32 @@ ansi_escape = re.compile(r'\x1B\[[0-9;?]*[ -/]*[@-~]')
 def strip_ansi(s: str) -> str:
 	return ansi_escape.sub('', s)
 
+def list_dir_with_timeout(path: Path, timeout: float = 3.0):
+	"""List *path*, returning (entries, status).
+
+	status is 'ok', 'missing' (path is not a directory) or 'unreachable'.
+	clips_dir often points at a network share; when the share is offline the
+	OS call blocks for a minute or more, which would stall whoever is walking
+	the project (and swallow everything printed afterwards). Probing from a
+	throw-away daemon thread lets us give up quickly instead.
+	"""
+	box = {}
+
+	def _probe():
+		try:
+			box['entries'] = list(path.iterdir())
+		except (FileNotFoundError, NotADirectoryError):
+			box['status'] = 'missing'
+		except OSError:
+			box['status'] = 'unreachable'
+
+	t = threading.Thread(target=_probe, daemon=True)
+	t.start()
+	t.join(timeout)
+	if 'entries' in box:
+		return box['entries'], 'ok'
+	return [], box.get('status', 'unreachable')
+
 # --------------------- text redirector ---------------------
 
 class TextRedirector:
@@ -430,8 +456,12 @@ class ScriptRunnerApp:
 	                    else project_path / clips_dir_raw
 
 	        video_ext = ('.mp4', '.avi', '.mov', '.mkv')
-	        if clips_dir.is_dir():
-	            all_videos = [f for f in clips_dir.iterdir()
+	        clips_entries, clips_status = list_dir_with_timeout(clips_dir)
+	        if clips_status == 'unreachable':
+	            lines.append(f"\n  VIDEOS")
+	            lines.append(f"  clips dir unreachable — skipped  ({clips_dir})")
+	        elif clips_status == 'ok':
+	            all_videos = [f for f in clips_entries
 	                          if f.suffix.lower() in video_ext]
 	            # Which videos have at least one annotated frame?
 	            annotated_video_labels = set()
@@ -657,7 +687,16 @@ class ScriptRunnerApp:
 	        lines.append(f"\n{sep}\n")
 	        self._write_stats_lines(lines)
 
-	    threading.Thread(target=_collect_and_display, daemon=True).start()
+	    def _collect_and_display_safe():
+	        # Without this the thread dies silently and the summary just stops
+	        # mid-way, with no clue as to why.
+	        try:
+	            _collect_and_display()
+	        except Exception as e:
+	            self._write_stats_lines([f"\n  Stats collection failed: "
+	                                     f"{type(e).__name__}: {e}\n"])
+
+	    threading.Thread(target=_collect_and_display_safe, daemon=True).start()
 
 
 	def _write_stats_lines(self, lines):
