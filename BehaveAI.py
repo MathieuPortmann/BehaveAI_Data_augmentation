@@ -26,6 +26,7 @@ import configparser
 from BehaveAI_augmentation import load_augmentation_config
 from BehaveAI_settings_help import apply_theme, Tooltip, BUTTON_HELP
 from behaveai_holdout import is_holdout_video, video_label_for_annotation
+from behaveai_config import load_secondary_config, NONE_LABEL
 
 
 # -------------------------- utils --------------------------
@@ -449,6 +450,65 @@ class ScriptRunnerApp:
 	                pct   = 100.0 * count / total_boxes if total_boxes > 0 else 0.0
 	                warn  = "  ⚠ under-represented" if pct < 10 and total_boxes > 0 else ""
 	                lines.append(f"    {name:<28} {count:>5} boxes  ({pct:5.1f}%){warn}")
+
+	        # ── Secondary class distribution (crop classifiers) ────────
+	        # The secondary models are trained straight off the pooled crop
+	        # folders annot_<stream>_crop/<secondary>/ (see maybe_retrain
+	        # ('secondary_*') in BehaveAI_classify_track.py), so those folders
+	        # ARE the class list. '__none__' is a real trained class: crops of a
+	        # secondary-eligible primary that carry no secondary label.
+	        sec_cfg = load_secondary_config(cfg, primary_static_classes,
+	                                        primary_motion_classes)
+	        sec_map = sec_cfg['secondary_map']
+
+	        def declared_for(primaries):
+	            """Secondaries reachable from a stream's primaries, INI order."""
+	            allowed = {s for p in primaries for s in sec_map.get(p, [])}
+	            return [s for s in sec_cfg['secondary_classes'] if s in allowed]
+
+	        sec_section_printed = False
+	        for stream, stream_primaries in (('static', primary_static_classes),
+	                                         ('motion', primary_motion_classes)):
+	            for crop_dir in sorted(project_path.glob(f'annot_{stream}_crop*')):
+	                # Skip the derived train/val split copies and old backups
+	                if not crop_dir.is_dir() \
+	                   or crop_dir.name.endswith('_split') \
+	                   or re.search(r'_backup\d+$', crop_dir.name):
+	                    continue
+
+	                counts = {}
+	                for class_dir in sorted(crop_dir.iterdir()):
+	                    if not class_dir.is_dir():
+	                        continue
+	                    # scandir, not list_images(): these folders hold thousands
+	                    # of crops and this runs on every project selection.
+	                    with os.scandir(class_dir) as it:
+	                        counts[class_dir.name] = sum(
+	                            1 for e in it
+	                            if e.name.lower().endswith(img_ext))
+	                if not counts:
+	                    continue
+
+	                if not sec_section_printed:
+	                    lines.append(f"\n  SECONDARY CLASS DISTRIBUTION  (from crop folders)")
+	                    sec_section_printed = True
+
+	                total_crops = sum(counts.values())
+	                non_empty   = sum(1 for n in counts.values() if n > 0)
+	                lines.append(f"\n    [{crop_dir.name}]  {total_crops} crops")
+	                # __none__ last: it is the negative class, not a behaviour
+	                for name in sorted(counts, key=lambda n: (n == NONE_LABEL, n.lower())):
+	                    count = counts[name]
+	                    pct   = 100.0 * count / total_crops if total_crops > 0 else 0.0
+	                    lines.append(f"    {name:<28} {count:>5} crops  ({pct:5.1f}%)")
+
+	                missing = [s for s in declared_for(stream_primaries)
+	                           if counts.get(s, 0) == 0]
+	                if missing:
+	                    lines.append(f"    declared but never annotated: {', '.join(missing)}")
+	                # Same gate as the pipeline: <2 non-empty folders -> no training
+	                if non_empty < 2:
+	                    lines.append(f"    ⚠ needs ≥2 non-empty class folders to train")
 
 	        # ── Videos in clips dir ────────────────────────────────────
 	        clips_dir_raw = d.get('clips_dir', 'clips')
