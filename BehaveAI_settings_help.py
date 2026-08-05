@@ -397,10 +397,11 @@ PARAM_HELP = {
     # ---------------- Model type ----------------
     "val_frequency": {
         "short": "Fraction of whole videos permanently held out from training.",
-        "what": "Share of videos (never partial videos) assigned to a held-out set, used for both "
-                "the YOLO train/val split and the complex-behaviour model's honest evaluation. "
-                "Assignment is deterministic by video name: an existing video's status never "
-                "changes, and new videos are classified automatically.",
+        "what": "Share of videos (never partial videos) assigned to a held-out set. Every model "
+                "uses this one partition: the primary detectors' train/val split, the crop "
+                "classifiers (secondary, species, age) and the complex-behaviour model's honest "
+                "evaluation. Assignment is deterministic by video name: an existing video's "
+                "status never changes, and new videos are classified automatically.",
         "influence": "Bigger holdout = more reliable, honest metrics but fewer training videos. "
                      "~0.1–0.2 is typical.",
     },

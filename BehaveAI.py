@@ -411,10 +411,12 @@ class ScriptRunnerApp:
 	        # ── Per-class annotation counts ────────────────────────────
 	        # Boxes come from the primary label files. The secondaries hanging
 	        # off each primary come from secondary_map (INI), and their crop
-	        # counts from the pooled folders annot_<stream>_crop/<secondary>/,
-	        # which is what maybe_retrain('secondary_*') hands to Ultralytics
-	        # (see BehaveAI_classify_track.py). '__none__' is a real trained
-	        # class: crops of a secondary-eligible primary with no secondary.
+	        # counts from the pooled folders annot_<stream>_crop/<secondary>/.
+	        # Those pools are the whole annotated set; training splits them by
+	        # whole video into annot_<stream>_crop_split/{train,val}/ first (see
+	        # behaveai_holdout.build_classification_split), so these counts are
+	        # train + val. '__none__' is a real trained class: crops of a
+	        # secondary-eligible primary with no secondary.
 	        sec_cfg = load_secondary_config(cfg, primary_static_classes,
 	                                        primary_motion_classes)
 	        sec_map = sec_cfg['secondary_map']
