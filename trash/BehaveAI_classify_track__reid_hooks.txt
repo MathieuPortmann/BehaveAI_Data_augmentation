@@ -1,0 +1,204 @@
+BehaveAI_classify_track.py — Re-ID integration hooks (removed)
+==============================================================
+
+Every line of Re-ID wiring that used to live in BehaveAI_classify_track.py, kept
+verbatim so the feature can be put back without re-deriving it. The Re-ID engine
+itself is trash/BehaveAI_reid.py (class ReIDRegistry); the descriptor's optional
+segmentation foreground is trash/BehaveAI_segmentation.py.
+
+Why it went: appearance carries no usable signal on a ~60x35 px horse at 15-50 m
+altitude with uniform coats. Long-gap identity recovery is the offline kinematic
+stitching pass's job (BehaveAI_stitch_tracklets.py).
+
+Indentation below is the original: these blocks live inside main(), so the class
+body is at three tabs.
+
+
+-------------------------------------------------------------------------------
+1) BoT-SORT / ByteTrack config flag
+-------------------------------------------------------------------------------
+Was set right after botsort.yaml / bytetrack.yaml is loaded into _tcfg:
+
+			_tcfg.with_reid = False
+
+Dropped because ultralytics==8.4.16 already ships `with_reid: False` in
+cfg/trackers/botsort.yaml. If that pin ever moves, re-check the shipped default
+before assuming appearance is off. To turn BoT-SORT's *own* appearance branch on
+(this is Ultralytics' ReID, NOT ReIDRegistry) set with_reid True plus the
+`model`, `proximity_thresh` and `appearance_thresh` keys of that same yaml.
+
+The tracker banner also named it:
+
+			print(f"Tracker: {tracker_type} (Ultralytics), ReID off.")
+
+
+-------------------------------------------------------------------------------
+2) Registry construction (in process_video, before the tracker is built)
+-------------------------------------------------------------------------------
+By the time of removal this had already been reduced to a hard None -- the code
+that actually built a ReIDRegistry from the INI was deleted in an earlier pass
+and is NOT recoverable from here. Rebuilding it means reading the `reid_*` keys
+(reid_enabled, reid_method, reid_descriptor, reid_grid, reid_foreground,
+reid_orient, reid_backbone, reid_checkpoint, reid_similarity_threshold,
+reid_histogram_min_similarity, reid_max_position_distance,
+reid_max_disappeared_seconds) and passing them to ReIDRegistry's constructor —
+see trash/BehaveAI_reid.py for the exact signature.
+
+		# Appearance Re-ID was removed; the tracker runs without it.
+		reid_registry = None
+
+		...
+			reid_registry = None   # appearance/ReID is not used by the new tracker
+
+Note: the INI keys themselves were removed from BehaveAI_settings_gui.py (the
+whole Re-ID tab) in the same earlier pass, so the GUI would need them back too.
+
+
+-------------------------------------------------------------------------------
+3) KalmanTracker.__init__ — registry + last-known-crop cache
+-------------------------------------------------------------------------------
+Signature was:
+
+		def __init__(self, dist_thresh, max_missed, reid_registry=None):
+
+and the body carried, after self.max_missed = max_missed:
+
+			# Optional intra-video Re-ID. When None, the tracker behaves exactly
+			# as before. last_known_crops keeps the most recent BGR crop per active
+			# id so a descriptor can be computed at deletion time only.
+			self.reid_registry = reid_registry
+			self.last_known_crops = {}
+
+
+-------------------------------------------------------------------------------
+4) KalmanTracker.update — the four Re-ID blocks
+-------------------------------------------------------------------------------
+Signature and docstring comments were:
+
+		def update(self, detections, detection_crops=None, frame_number=None):
+
+			#detections: list of (x, y) centroids
+			#detection_crops: optional list of BGR crops aligned with detections (Re-ID)
+			#frame_number: current frame index (required for Re-ID register/prune)
+			#Returns a dict: detection_index -> track_id
+
+4a) Activation guard + crop memo helper, at the top of update():
+
+			# Re-ID is only active when a registry, crops and a frame number are all
+			# provided; otherwise every block below is skipped and behaviour is unchanged.
+			reid_on = (self.reid_registry is not None
+					   and detection_crops is not None
+					   and frame_number is not None)
+
+			def _remember_crop(tid, det_index):
+				if detection_crops is not None and det_index < len(detection_crops):
+					crop = detection_crops[det_index]
+					if crop is not None:
+						self.last_known_crops[tid] = crop
+
+	_remember_crop(tid, c) was called at the end of the step-3 association loop,
+	_remember_crop(best_tid, i) after the step-4 near-miss re-association, and
+	_remember_crop(tid, i) in the "New track" branch just before self.next_id += 1.
+
+4b) Recovery attempt before minting a new id (step 4, the else branch). The
+    surviving code keeps only the "New track" half of this if/else:
+
+				else:
+					# Before creating a brand-new id, try to recover a lost track
+					# via intra-video Re-ID (spatio-temporal gate + appearance).
+					reid_id = None
+					crop = None
+					if reid_on and i < len(detection_crops):
+						crop = detection_crops[i]
+						descriptor = self.reid_registry.extract_descriptor(crop)
+						reid_id = self.reid_registry.find_match(descriptor, dpt, frame_number)
+
+					if reid_id is not None:
+						# Recover the old id (do NOT consume next_id).
+						tid = reid_id
+						kf = self._create_kf(dpt)
+						self.tracks[tid] = {'kf': kf, 'missed': 0}
+						assigned_detects[i] = tid
+						self.prev_positions[tid] = (dpt[0], dpt[1])
+						matched_tracks.add(tid)
+						if crop is not None:
+							self.last_known_crops[tid] = crop
+						print(f"Re-ID: track {tid} recovered at frame {frame_number} "
+							  f"(score={self.reid_registry.last_match_score:.3f})")
+					else:
+						# New track
+						tid = self.next_id
+						kf = self._create_kf(dpt)
+						self.tracks[tid] = {'kf': kf, 'missed': 0}
+						assigned_detects[i] = tid
+						self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
+						matched_tracks.add(tid)  # Add to matched tracks
+						_remember_crop(tid, i)
+						self.next_id += 1
+
+4c) Register a dying track in the gallery (step 5, immediately before
+    `del self.tracks[tid]`), plus the crop-cache cleanup that followed the
+    prev_positions cleanup:
+
+					if self.tracks[tid]['missed'] > self.max_missed:
+						# Register the lost track for possible Re-ID before deleting it.
+						if reid_on:
+							pos = self.prev_positions.get(tid)
+							if pos is not None:
+								crop = self.last_known_crops.get(tid)
+								desc = (self.reid_registry.extract_descriptor(crop)
+										if crop is not None else None)
+								self.reid_registry.register_lost_track(
+									tid, desc, pos, frame_number)
+						del self.tracks[tid]
+						...
+						if tid in self.last_known_crops:
+							del self.last_known_crops[tid]
+
+4d) Per-frame gallery pruning, just before `return assigned_detects`:
+
+			# Prune the Re-ID registry once per frame (pruning guard only).
+			if reid_on:
+				self.reid_registry.prune_old_entries(frame_number)
+
+
+-------------------------------------------------------------------------------
+5) Call site — crop extraction and the update() call
+-------------------------------------------------------------------------------
+In the per-frame loop, between `cents = [...]` and the tracker dispatch:
+
+				# Build BGR crops (from the static frame) aligned with the detections,
+				# used only for Re-ID descriptors. Skip crops smaller than 10x10 px.
+				det_crops = None
+				if reid_registry is not None:
+					det_crops = []
+					for d in processed_detections:
+						cx1, cy1, cx2, cy2 = d['coords']
+						cx1 = max(0, cx1); cy1 = max(0, cy1)
+						if (cx2 - cx1) >= 10 and (cy2 - cy1) >= 10:
+							crop = frame[cy1:cy2, cx1:cx2]
+							det_crops.append(crop.copy() if crop.size > 0 else None)
+						else:
+							det_crops.append(None)
+
+and the legacy-tracker branch of the dispatch passed them through:
+
+					assignment = tracker.update(cents, detection_crops=det_crops, frame_number=frame_idx)
+
+which is now simply:
+
+					assignment = tracker.update(cents)
+
+
+-------------------------------------------------------------------------------
+6) Elsewhere
+-------------------------------------------------------------------------------
+- KalmanTracker construction lost its keyword:
+      tracker = KalmanTracker(match_distance_thresh, delete_after_missed,
+                              reid_registry=reid_registry)
+- BehaveAI_settings_gui.py had a dedicated "Re-ID" notebook tab. It was already
+  gone before this pass; only three comments referencing it survived, and those
+  were reworded. The activity-budget "min classified frames" control it used to
+  host now lives on the Tracking tab.
+- requirements.txt no longer pins `timm` (MegaDescriptor backbone). Re-add it if
+  reid_method=megadescriptor is ever revived.
