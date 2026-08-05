@@ -479,7 +479,12 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
             'duration_s':       round(duration_s, 2),   # = tracked presence in seconds
         }
 
-        total_classified = sum(behavior_frames.values())
+        # Time the individual was tracked but carried no primary class. Reported
+        # explicitly: without it the per-behaviour seconds silently fail to add up
+        # to duration_s, and a reader cannot tell measured absence from missing data.
+        unclassified_frames = behavior_frames.get('unknown', 0)
+        rec['unclassified_s'] = round(unclassified_frames / fps, 2) if fps > 0 else 0.0
+
         dominant_time = None
         dominant_count = None
         max_time = -1
@@ -488,12 +493,13 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
         for b in all_behaviors:
             n  = behavior_frames.get(b, 0)
             s  = n / fps if fps > 0 else 0.0
-            pct = 100.0 * n / total_classified if total_classified > 0 else 0.0
             tr = transitions.get(b, 0)
 
+            # Durations only: no percentage is derived here. A percentage hides
+            # which denominator it used (tracked presence vs clip duration), and
+            # both are written out so any ratio can be computed downstream.
             rec[f'behavior_{b}_s']   = round(s, 2)
             rec[f'behavior_{b}_n']   = tr
-            rec[f'behavior_{b}_pct'] = round(pct, 2)
 
             if s > max_time:
                 max_time     = s
@@ -629,8 +635,11 @@ def run_activity_budget(config_path, fps_default=30.0):
                     video_full_path = candidate_path
                     break
 
-        # FPS: try to read from video file, else use default
+        # FPS and clip length: read from the video file, else fall back.
+        # The clip length is needed because a budget in seconds is only
+        # interpretable against the duration actually analysed.
         fps = fps_default
+        video_frames_total = 0
         try:
             import cv2
             if video_full_path and os.path.exists(video_full_path):
@@ -638,6 +647,9 @@ def run_activity_budget(config_path, fps_default=30.0):
                 fps_read = cap.get(cv2.CAP_PROP_FPS)
                 if fps_read > 0:
                     fps = fps_read
+                n_read = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if n_read and n_read > 0:
+                    video_frames_total = int(n_read)
                 cap.release()
         except Exception:
             pass
@@ -655,8 +667,21 @@ def run_activity_budget(config_path, fps_default=30.0):
         if max_frame_limit is not None:
             max_frame = min(max_frame, max_frame_limit)
 
+        # Duration actually analysed, in seconds — the reference every per-track
+        # duration is read against. Priority: the analysis window if one was set,
+        # else the real clip length, else the last frame carrying a detection
+        # (which under-estimates the clip when it ends with no animal in view).
+        if max_frame_limit is not None:
+            analysed_frames = max_frame_limit
+        elif video_frames_total > 0:
+            analysed_frames = video_frames_total
+        else:
+            analysed_frames = max_frame
+        video_duration_s = round(analysed_frames / fps, 2) if fps > 0 else 0.0
+
         # Cache tracks together with pre-resolved video info
-        tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename, video_full_path)
+        tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename,
+                                  video_full_path, video_duration_s)
 
         for rows in tracks.values():
             for r in rows:
@@ -678,7 +703,7 @@ def run_activity_budget(config_path, fps_default=30.0):
     # produces a byte-for-byte identical file to before this feature.
     # DETERMINISTIC social metrics: geometry + tracking only, no model in the loop.
     _INTERACTION_FIELDS = ['interaction_n_partners', 'interaction_weighted_degree',
-                           'interaction_time_s', 'interaction_pct',
+                           'interaction_time_s',
                            'contact_time_s', 'contact_fraction',
                            'mean_interaction_distance_m']
     # MODEL-DERIVED: everything below inherits the complex model's error rate and
@@ -687,7 +712,8 @@ def run_activity_budget(config_path, fps_default=30.0):
     has_interactions = any(bool(v) for v in interaction_cache.values())
 
     for csv_path in csv_files:
-        tracks, max_frame, fps, video_filename, video_full_path = tracks_cache[csv_path]
+        (tracks, max_frame, fps, video_filename, video_full_path,
+         video_duration_s) = tracks_cache[csv_path]
 
         # Video dimensions for border detection
         video_width = video_height = None
@@ -733,32 +759,28 @@ def run_activity_budget(config_path, fps_default=30.0):
             tid_str    = str(rec['track_id'])
             duration_s = rec.get('duration_s', 0.0)
 
-            # --- Complex behaviours: seconds / episodes / % of tracked presence ---
+            # --- Complex behaviours: seconds and number of episodes ---
             beh_map = complex_by_track.get(tid_str, {})
             for b in all_complex_behaviours:
                 sec, n = beh_map.get(b, (0.0, 0))
-                pct = 100.0 * sec / duration_s if duration_s > 0 else 0.0
                 rec[f'complex_{b}_s']   = round(sec, 2)
                 rec[f'complex_{b}_n']   = n
-                rec[f'complex_{b}_pct'] = round(pct, 2)
 
             # --- Interaction graph: social metrics (only when a graph exists) ---
             if has_interactions:
                 soc = interaction_by_track.get(tid_str)
                 if soc:
                     rec.update(soc)
-                    itime = soc.get('interaction_time_s', 0.0)
-                    rec['interaction_pct'] = round(100.0 * itime / duration_s, 2) \
-                        if duration_s > 0 else 0.0
                 else:
                     for k in _INTERACTION_FIELDS:
                         rec[k] = 0.0
                     for k in _PREDICTED_FIELDS:
                         rec[k] = ''
 
-            rec['video_filename'] = video_filename
-            rec['group_id']       = group_id
-            rec['group_type']     = group_type
+            rec['video_filename']   = video_filename
+            rec['group_id']         = group_id
+            rec['group_type']       = group_type
+            rec['video_duration_s'] = video_duration_s
             all_individual_rows.append(rec)
 
         # Build suspect rows (strangers only)
@@ -793,14 +815,19 @@ def run_activity_budget(config_path, fps_default=30.0):
         out1 = os.path.join(output_dir, 'activity_budget_individual.csv')
 
         # Build ordered fieldnames
+        # Two reference durations are written side by side, so every quantity in
+        # this file is a duration in seconds and any ratio can be formed
+        # downstream against an explicit denominator:
+        #   video_duration_s -- the clip duration actually analysed
+        #   duration_s       -- how long this individual was tracked within it
         base_fields = ['video_filename', 'group_id', 'group_type',
                        'track_id', 'individual_type', 'auto_flagged',
-                       'n_frames_present', 'duration_s']
+                       'video_duration_s', 'n_frames_present', 'duration_s',
+                       'unclassified_s']
         behavior_fields = []
         for b in all_behaviors:
             behavior_fields += [f'behavior_{b}_s',
-                                f'behavior_{b}_n',
-                                f'behavior_{b}_pct']
+                                f'behavior_{b}_n']
         extra_fields = ['dominant_behavior_time', 'dominant_behavior_count']
         interaction_fields = _INTERACTION_FIELDS if has_interactions else []
         # NOTE: complex_* and dominant_interaction_type are NOT here. They are
@@ -830,12 +857,12 @@ def run_activity_budget(config_path, fps_default=30.0):
     if all_individual_rows and (all_complex_behaviours or has_interactions):
         out2 = os.path.join(output_dir, 'activity_budget_predicted.csv')
         pred_key_fields = ['video_filename', 'group_id', 'group_type',
-                           'track_id', 'individual_type', 'duration_s']
+                           'track_id', 'individual_type',
+                           'video_duration_s', 'duration_s']
         complex_fields = []
         for b in all_complex_behaviours:
             complex_fields += [f'complex_{b}_s',
-                               f'complex_{b}_n',
-                               f'complex_{b}_pct']
+                               f'complex_{b}_n']
         pred_fields = pred_key_fields + complex_fields + \
             (_PREDICTED_FIELDS if has_interactions else [])
         with open(out2, 'w', newline='', encoding='utf-8') as f:
