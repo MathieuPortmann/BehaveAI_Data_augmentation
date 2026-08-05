@@ -13,6 +13,7 @@ from behaveai_config import (
 from behaveai_render import (
 	load_render_style, draw_labeled_detection, draw_frame_number,
 )
+from behaveai_holdout import build_classification_split
 import time
 import shutil
 import gc
@@ -406,6 +407,10 @@ try:
 	# stops after `train_patience` epochs with no val improvement (Ultralytics
 	# default is 100, which effectively never triggers on short runs).
 	train_patience = int(config['DEFAULT'].get('train_patience', '30'))
+	# Share of whole videos held out. The annotation tool already routes frames
+	# to annot_<stream>/images/{train,val} with it; the crop classifiers below
+	# get the same partition through build_classification_split.
+	val_frequency = float(config['DEFAULT'].get('val_frequency', '0.1'))
 	# The motion stream is a false-colour encoding where COLOUR carries the motion
 	# signal, so YOLO's online HSV augmentation would corrupt it. When enabled
 	# (default), the motion detector and motion secondary classifier are trained
@@ -829,7 +834,11 @@ if __name__ == '__main__':
 		# Static stream (pooled over all static primaries)
 		_static_class_count = _count_class_subdirs(secondary_static_data_path)
 		if _static_class_count >= 2:
-			maybe_retrain('secondary_static', secondary_static_data_path, secondary_static_project_path,
+			# Whole-video train/val split, same partition as the detectors above.
+			# Without it Ultralytics splits the crop pool itself, per crop and
+			# unseeded (see behaveai_holdout.build_classification_split).
+			_static_crop_data = build_classification_split(secondary_static_data_path, val_frequency)
+			maybe_retrain('secondary_static', _static_crop_data, secondary_static_project_path,
 				secondary_static_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
 			if use_ncnn == 'true':
 				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
@@ -844,7 +853,8 @@ if __name__ == '__main__':
 		# Motion stream (pooled over all motion primaries)
 		_motion_class_count = _count_class_subdirs(secondary_motion_data_path)
 		if _motion_class_count >= 2:
-			maybe_retrain('secondary_motion', secondary_motion_data_path, secondary_motion_project_path,
+			_motion_crop_data = build_classification_split(secondary_motion_data_path, val_frequency)
+			maybe_retrain('secondary_motion', _motion_crop_data, secondary_motion_project_path,
 				secondary_motion_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience, train_overrides=motion_train_overrides)
 			if use_ncnn == 'true':
 				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
@@ -862,7 +872,8 @@ if __name__ == '__main__':
 	# actually annotated before it can do anything).
 	_species_class_count = _count_class_subdirs(species_cropped_base_dir)
 	if _species_class_count >= 2:
-		maybe_retrain('species', species_cropped_base_dir, 'model_species',
+		_species_crop_data = build_classification_split(species_cropped_base_dir, val_frequency)
+		maybe_retrain('species', _species_crop_data, 'model_species',
 			species_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
 		if use_ncnn == 'true':
 			model_species = load_model_with_ncnn_preference(species_model_path, "classify")
@@ -875,7 +886,8 @@ if __name__ == '__main__':
 
 	_age_class_count = _count_class_subdirs(age_cropped_base_dir)
 	if _age_class_count >= 2:
-		maybe_retrain('age', age_cropped_base_dir, 'model_age',
+		_age_crop_data = build_classification_split(age_cropped_base_dir, val_frequency)
+		maybe_retrain('age', _age_crop_data, 'model_age',
 			age_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
 		if use_ncnn == 'true':
 			model_age = load_model_with_ncnn_preference(age_model_path, "classify")
