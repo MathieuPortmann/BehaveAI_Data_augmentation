@@ -477,10 +477,10 @@ try:
 
 	# --- Tracker: BoT-SORT/ByteTrack (default) or the legacy Kalman tracker ---
 	# 'botsort' brings camera-motion compensation (GMC) inside the association
-	# loop and ByteTrack's two-tier matching; appearance/ReID is forced off (see
-	# plan: uninformative at this resolution). 'kalman' keeps the old homemade
-	# tracker for comparison. Long-gap identity recovery is deferred to the
-	# offline stitching pass, so track_buffer stays short here.
+	# loop and ByteTrack's two-tier matching; association is kinematic only.
+	# 'kalman' keeps the old homemade tracker for comparison. Long-gap identity
+	# recovery is deferred to the offline stitching pass, so track_buffer stays
+	# short here.
 	tracker_type = config['DEFAULT'].get('tracker_type', 'botsort').lower()
 	tracker_track_high_thresh = float(config['DEFAULT'].get('tracker_track_high_thresh', '0.5'))
 	tracker_track_low_thresh = float(config['DEFAULT'].get('tracker_track_low_thresh', '0.1'))
@@ -492,9 +492,6 @@ try:
 	match_distance_thresh = float(config['DEFAULT'].get('match_distance_thresh', '200'))
 	delete_after_missed = float(config['DEFAULT'].get('delete_after_missed', '5'))
 
-	# Intra-video appearance Re-ID was removed (uninformative at 15-50m altitude;
-	# long-gap recovery is now the offline stitching pass's job). The legacy Kalman
-	# tracker still accepts a reid_registry but it is always None now.
 	centroid_merge_thresh = float(config['DEFAULT'].get('centroid_merge_thresh', '50'))
 	iou_thresh = float(config['DEFAULT'].get('iou_thresh', '0.95'))
 	line_thickness = int(config['DEFAULT'].get('line_thickness', '1'))
@@ -928,17 +925,12 @@ if __name__ == '__main__':
 
 	# --- TRACKER CLASS -------------------------------------------------------
 	class KalmanTracker:
-		def __init__(self, dist_thresh, max_missed, reid_registry=None):
+		def __init__(self, dist_thresh, max_missed):
 			self.next_id = 1
 			self.tracks = {}  # tid -> {'kf': KalmanFilter, 'missed': int}
 			self.prev_positions = {}  # Track previous positions
 			self.dist_thresh = dist_thresh
 			self.max_missed = max_missed
-			# Optional intra-video Re-ID. When None, the tracker behaves exactly
-			# as before. last_known_crops keeps the most recent BGR crop per active
-			# id so a descriptor can be computed at deletion time only.
-			self.reid_registry = reid_registry
-			self.last_known_crops = {}
 
 		def _create_kf(self, initial_pt):
 
@@ -1000,24 +992,10 @@ if __name__ == '__main__':
 			for tid in to_drop:
 				del self.tracks[tid]
 
-		def update(self, detections, detection_crops=None, frame_number=None):
+		def update(self, detections):
 
 			#detections: list of (x, y) centroids
-			#detection_crops: optional list of BGR crops aligned with detections (Re-ID)
-			#frame_number: current frame index (required for Re-ID register/prune)
 			#Returns a dict: detection_index -> track_id
-
-			# Re-ID is only active when a registry, crops and a frame number are all
-			# provided; otherwise every block below is skipped and behaviour is unchanged.
-			reid_on = (self.reid_registry is not None
-					   and detection_crops is not None
-					   and frame_number is not None)
-
-			def _remember_crop(tid, det_index):
-				if detection_crops is not None and det_index < len(detection_crops):
-					crop = detection_crops[det_index]
-					if crop is not None:
-						self.last_known_crops[tid] = crop
 
 			# 1) Predict all tracks forward one step
 			preds = self.predict_all()  # list of (tid, (px, py))
@@ -1057,7 +1035,6 @@ if __name__ == '__main__':
 
 					# Update previous position
 					self.prev_positions[tid] = (dpt[0], dpt[1])
-					_remember_crop(tid, c)
 
 			# 4) Process unassigned detections
 			for i, dpt in enumerate(detections):
@@ -1080,40 +1057,16 @@ if __name__ == '__main__':
 					# Update previous position
 					self.prev_positions[best_tid] = (dpt[0], dpt[1])
 					matched_tracks.add(best_tid)  # Add to matched tracks
-					_remember_crop(best_tid, i)
 
 				else:
-					# Before creating a brand-new id, try to recover a lost track
-					# via intra-video Re-ID (spatio-temporal gate + appearance).
-					reid_id = None
-					crop = None
-					if reid_on and i < len(detection_crops):
-						crop = detection_crops[i]
-						descriptor = self.reid_registry.extract_descriptor(crop)
-						reid_id = self.reid_registry.find_match(descriptor, dpt, frame_number)
-
-					if reid_id is not None:
-						# Recover the old id (do NOT consume next_id).
-						tid = reid_id
-						kf = self._create_kf(dpt)
-						self.tracks[tid] = {'kf': kf, 'missed': 0}
-						assigned_detects[i] = tid
-						self.prev_positions[tid] = (dpt[0], dpt[1])
-						matched_tracks.add(tid)
-						if crop is not None:
-							self.last_known_crops[tid] = crop
-						print(f"Re-ID: track {tid} recovered at frame {frame_number} "
-							  f"(score={self.reid_registry.last_match_score:.3f})")
-					else:
-						# New track
-						tid = self.next_id
-						kf = self._create_kf(dpt)
-						self.tracks[tid] = {'kf': kf, 'missed': 0}
-						assigned_detects[i] = tid
-						self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
-						matched_tracks.add(tid)  # Add to matched tracks
-						_remember_crop(tid, i)
-						self.next_id += 1
+					# New track
+					tid = self.next_id
+					kf = self._create_kf(dpt)
+					self.tracks[tid] = {'kf': kf, 'missed': 0}
+					assigned_detects[i] = tid
+					self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
+					matched_tracks.add(tid)  # Add to matched tracks
+					self.next_id += 1
 
 			# 5) Handle unmatched tracks
 			for tid in list(self.tracks.keys()):
@@ -1130,24 +1083,9 @@ if __name__ == '__main__':
 
 					# Remove track if missed too many times
 					if self.tracks[tid]['missed'] > self.max_missed:
-						# Register the lost track for possible Re-ID before deleting it.
-						if reid_on:
-							pos = self.prev_positions.get(tid)
-							if pos is not None:
-								crop = self.last_known_crops.get(tid)
-								desc = (self.reid_registry.extract_descriptor(crop)
-										if crop is not None else None)
-								self.reid_registry.register_lost_track(
-									tid, desc, pos, frame_number)
 						del self.tracks[tid]
 						if tid in self.prev_positions:
 							del self.prev_positions[tid]
-						if tid in self.last_known_crops:
-							del self.last_known_crops[tid]
-
-			# Prune the Re-ID registry once per frame (pruning guard only).
-			if reid_on:
-				self.reid_registry.prune_old_entries(frame_number)
 
 			return assigned_detects
 
@@ -1206,20 +1144,15 @@ if __name__ == '__main__':
 			sahi_model_motion = build_sahi_model(model_motion, primary_conf_thresh)
 
 
-		# Appearance Re-ID was removed; the tracker runs without it.
-		reid_registry = None
-
 		# Tracker: BoT-SORT/ByteTrack (default) or the legacy Kalman tracker.
 		bot_tracker = None
 		if tracker_type in ('botsort', 'bytetrack'):
-			reid_registry = None   # appearance/ReID is not used by the new tracker
 			from ultralytics.trackers.bot_sort import BOTSORT
 			from ultralytics.trackers.byte_tracker import BYTETracker
 			from ultralytics.utils import IterableSimpleNamespace, YAML
 			from ultralytics.utils.checks import check_yaml
 			_tcfg = IterableSimpleNamespace(**YAML.load(check_yaml(
 				'botsort.yaml' if tracker_type == 'botsort' else 'bytetrack.yaml')))
-			_tcfg.with_reid = False
 			_tcfg.track_high_thresh = tracker_track_high_thresh
 			_tcfg.track_low_thresh = tracker_track_low_thresh
 			_tcfg.new_track_thresh = tracker_new_track_thresh
@@ -1231,10 +1164,9 @@ if __name__ == '__main__':
 			bot_tracker = (BOTSORT(args=_tcfg, frame_rate=_fps_int) if tracker_type == 'botsort'
 						   else BYTETracker(args=_tcfg, frame_rate=_fps_int))
 			tracker = None
-			print(f"Tracker: {tracker_type} (Ultralytics), ReID off.")
+			print(f"Tracker: {tracker_type} (Ultralytics).")
 		else:
-			tracker = KalmanTracker(match_distance_thresh, delete_after_missed,
-									reid_registry=reid_registry)
+			tracker = KalmanTracker(match_distance_thresh, delete_after_missed)
 
 		# Previous centroid per track id, for the tracker-agnostic motion vector.
 		prev_centroid = {}
@@ -1561,24 +1493,10 @@ if __name__ == '__main__':
 				# Prepare for tracking
 				cents = [d['centroid'] for d in processed_detections]
 
-				# Build BGR crops (from the static frame) aligned with the detections,
-				# used only for Re-ID descriptors. Skip crops smaller than 10x10 px.
-				det_crops = None
-				if reid_registry is not None:
-					det_crops = []
-					for d in processed_detections:
-						cx1, cy1, cx2, cy2 = d['coords']
-						cx1 = max(0, cx1); cy1 = max(0, cy1)
-						if (cx2 - cx1) >= 10 and (cy2 - cy1) >= 10:
-							crop = frame[cy1:cy2, cx1:cx2]
-							det_crops.append(crop.copy() if crop.size > 0 else None)
-						else:
-							det_crops.append(None)
-
 				if bot_tracker is not None:
 					assignment = bot_track_update(bot_tracker, processed_detections, frame)
 				else:
-					assignment = tracker.update(cents, detection_crops=det_crops, frame_number=frame_idx)
+					assignment = tracker.update(cents)
 
 				# ~ frame = motion_image ## enable this line ot save the motion video instead of static
 

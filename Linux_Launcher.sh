@@ -173,7 +173,7 @@ bootstrap() {
 
     # 1) Install the project dependencies from requirements.txt FIRST (the source of truth).
     #    Exclude opencv-python (provided by apt's python3-opencv via --system-site-packages)
-    #    and torch/torchvision (handled below). ultralytics/timm may pull a CPU torch here;
+    #    and torch/torchvision (handled below). ultralytics may pull a CPU torch here;
     #    that is fine because install_torch reinstalls the machine build LAST so it wins.
     #    NOTE: on ARM (Raspberry Pi) some packages (scipy, scikit-learn, matplotlib) may
     #    build from source and take a while.

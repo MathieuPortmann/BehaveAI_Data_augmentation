@@ -273,8 +273,8 @@ try {
         $hasNvidia = Detect-NvidiaGPU
         $torchChoice = Choose-Torch-Wheel -nvidiaPresent:$hasNvidia
 
-        # 1) Install the project dependencies from requirements.txt FIRST. ultralytics/timm
-        #    pull a default (CPU) torch here; that is fine because we (re)install the
+        # 1) Install the project dependencies from requirements.txt FIRST. ultralytics
+        #    pulls a default (CPU) torch here; that is fine because we (re)install the
         #    machine-specific torch build LAST so it always wins. (Installing torch before
         #    requirements lets pip's transitive re-resolution downgrade it back to CPU.)
         if (-not (Test-Path $ReqFile)) { throw "requirements.txt not found at $ReqFile" }

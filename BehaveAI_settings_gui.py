@@ -626,8 +626,7 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_window_var  = tk.IntVar(value=7)
 		self.drone_fallback_smoothing_var = tk.BooleanVar(value=True)
 
-		# Activity-budget membership gate (its Re-ID tab was removed; the control
-		# now lives on the Tracking tab).
+		# Activity-budget membership gate (the control lives on the Tracking tab).
 		self.ab_min_classified_var     = tk.IntVar(value=5)
 
 		# Interaction features / graph parameters
@@ -1399,7 +1398,7 @@ class SettingsEditorApp(tk.Tk):
 		self.tracker_type_var.trace_add('write', lambda *a: (_update_tracker_rows(), self._set_dirty()))
 		_update_tracker_rows()
 
-		# Activity-budget membership gate (relocated here from the removed Re-ID tab).
+		# Activity-budget membership gate.
 		_track_spin('Min classified frames (group member)', 'ab_min_classified',
 					self.ab_min_classified_var, 0, 100000)
 
@@ -1452,7 +1451,7 @@ class SettingsEditorApp(tk.Tk):
 		help_line(tab4, 'drone_fallback_smoothing').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
 		# TAB: Interaction features / graph (TASK 4 primary output)
-		_help_font = ('TkDefaultFont', 8, 'italic')   # (was defined in the removed Re-ID tab)
+		_help_font = ('TkDefaultFont', 8, 'italic')
 		tab_int = self._scroll_tab(notebook, 'Interaction')
 		ir = 0
 		ttk.Label(tab_int, text='Interaction features & graph',
@@ -1860,7 +1859,7 @@ class SettingsEditorApp(tk.Tk):
 		self.drone_smoothing_window_var.set(int(float(d.get('drone_correction_smoothing_window', fallback='7'))))
 		self.drone_fallback_smoothing_var.set(self._str_to_bool(d.get('drone_correction_fallback_smoothing', fallback='true')))
 
-		# activity-budget membership gate (Re-ID removed)
+		# activity-budget membership gate
 		self.ab_min_classified_var.set(int(float(d.get('ab_min_classified_frames', fallback='5'))))
 
 		# interaction features / graph
@@ -2374,7 +2373,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['drone_correction_smoothing_window'] = str(self.drone_smoothing_window_var.get())
 		new_default['drone_correction_fallback_smoothing'] = str(self.drone_fallback_smoothing_var.get()).lower()
 
-		# activity-budget membership gate (Re-ID removed)
+		# activity-budget membership gate
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
 
 		# interaction features / graph
