@@ -25,6 +25,18 @@ from pathlib import Path
 from collections import defaultdict
 
 
+# Explicit sentinels. These are REPORTED categories, not silent gaps: a frame the
+# detector never labelled becomes 'not_classified' and gets its own duration
+# column, so per-behaviour seconds always add up to the tracked presence and a
+# reader can tell measured absence from missing data.
+NOT_CLASSIFIED = 'not_classified'
+# A detection carrying a primary class but no secondary one — either because that
+# primary has no secondary step in secondary_map, or because none was predicted
+# (the reserved '__none__' class won, or the score stayed below the threshold).
+NO_SECONDARY = 'none'
+UNKNOWN_AGE = 'unknown'
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -310,30 +322,53 @@ def parse_tracking_csv(csv_path, max_frame_limit=None):
                     bx1 = bx2 = x
                     by1 = by2 = y
 
-                # Choose the best available class label
-                # primary_motion_class takes precedence over primary_static_class
+                # Choose the best available class label. The motion stream wins
+                # ties, matching the arbitration used everywhere else.
                 pm_class = row.get('primary_motion_class', '').strip()
                 ps_class = row.get('primary_static_class', '').strip()
                 pm_conf  = float(row.get('primary_motion_conf', 0) or 0)
                 ps_conf  = float(row.get('primary_static_conf', 0) or 0)
 
+                sm_class = row.get('secondary_motion_class', '').strip()
+                ss_class = row.get('secondary_static_class', '').strip()
+
                 if pm_class and pm_conf >= ps_conf:
-                    behavior = pm_class
-                    conf     = pm_conf
+                    behavior  = pm_class
+                    conf      = pm_conf
+                    # The secondary was classified on the crop of the winning
+                    # stream, so take that one first; the other stream is a
+                    # fallback for a box only one detector saw.
+                    secondary = sm_class or ss_class
                 elif ps_class:
-                    behavior = ps_class
-                    conf     = ps_conf
+                    behavior  = ps_class
+                    conf      = ps_conf
+                    secondary = ss_class or sm_class
                 else:
-                    behavior = 'unknown'
-                    conf     = 0.0
+                    behavior  = NOT_CLASSIFIED
+                    conf      = 0.0
+                    secondary = ''
+
+                # '__none__' is the reserved 'no secondary' answer of the
+                # classifier; it is not a behaviour.
+                if secondary in ('', '__none__'):
+                    secondary = NO_SECONDARY
+
+                age = (row.get('age_class', '') or '').strip() or UNKNOWN_AGE
+                try:
+                    age_conf = float(row.get('age_conf', 0) or 0)
+                except (TypeError, ValueError):
+                    age_conf = 0.0
 
                 tracks[tid].append({
-                    'frame':    frame,
-                    'x':        x,
-                    'y':        y,
-                    'box':      (bx1, by1, bx2, by2),
-                    'behavior': behavior,
-                    'conf':     conf,
+                    'frame':     frame,
+                    'x':         x,
+                    'y':         y,
+                    'box':       (bx1, by1, bx2, by2),
+                    'behavior':  behavior,
+                    'conf':      conf,
+                    'secondary': secondary,
+                    'age':       age,
+                    'age_conf':  age_conf,
                 })
                 frame_numbers.append(frame)
             except (ValueError, KeyError):
@@ -400,9 +435,9 @@ def flag_strangers(tracks, max_frame, video_width, video_height, fps,
         entry_side = ','.join(sides)
         entered_from_side = bool(sides)
 
-        # Count classified frames (behavior != 'unknown') for criterion 2.
+        # Count classified frames (a real behaviour label) for criterion 2.
         n_classified = sum(1 for r in rows
-                           if r.get('behavior') and r['behavior'] != 'unknown')
+                           if r.get('behavior') and r['behavior'] != NOT_CLASSIFIED)
         is_unclassified = (min_classified_frames > 0
                            and n_classified < min_classified_frames)
 
@@ -442,9 +477,17 @@ def flag_strangers(tracks, max_frame, video_width, video_height, fps,
 # Compute per-individual activity budget
 # ---------------------------------------------------------------------------
 
-def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
+def compute_individual_budget(tracks, flag_info, fps, all_behaviors,
+                              all_secondaries=()):
     """
-    For each track, count frames per behavior and derive durations.
+    For each track, count frames per behaviour and derive durations.
+
+    TWO PARALLEL decompositions of the same tracked time are written, never a
+    single merged list: a secondary behaviour qualifies a primary one
+    (Stand + alert is one frame, not two), so summing the two families together
+    would double-count. Each family therefore sums to duration_s on its own:
+        sum(behavior_*_s)  == duration_s   (includes not_classified)
+        sum(secondary_*_s) == duration_s   (includes 'none')
 
     Returns list of dicts, one per individual.
     """
@@ -455,20 +498,40 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
         n_frames_present = len(rows)
         duration_s = n_frames_present / fps if fps > 0 else 0.0
 
-        # Count frames per behavior
+        # Count frames per behaviour, per secondary behaviour
         behavior_frames = defaultdict(int)
+        secondary_frames = defaultdict(int)
         for r in rows:
             behavior_frames[r['behavior']] += 1
+            secondary_frames[r.get('secondary', NO_SECONDARY)] += 1
 
-        # Count transitions (behavior changes)
+        # Count transitions (label changes) for both families
         sorted_rows   = sorted(rows, key=lambda r: r['frame'])
         transitions   = defaultdict(int)
+        sec_transitions = defaultdict(int)
         prev_behavior = None
+        prev_secondary = None
         for r in sorted_rows:
             b = r['behavior']
             if prev_behavior is not None and b != prev_behavior:
                 transitions[b] += 1
             prev_behavior = b
+            s = r.get('secondary', NO_SECONDARY)
+            if prev_secondary is not None and s != prev_secondary:
+                sec_transitions[s] += 1
+            prev_secondary = s
+
+        # Age: confidence-weighted majority vote over the track. An individual the
+        # age model never labelled stays 'unknown' rather than being guessed.
+        age_votes = defaultdict(float)
+        age_confs = []
+        for r in rows:
+            lab = r.get('age', UNKNOWN_AGE)
+            if lab and lab != UNKNOWN_AGE:
+                age_votes[lab] += max(float(r.get('age_conf', 0.0)), 1e-6)
+                age_confs.append(float(r.get('age_conf', 0.0)))
+        age_class = max(age_votes, key=age_votes.get) if age_votes else UNKNOWN_AGE
+        age_conf_mean = (sum(age_confs) / len(age_confs)) if age_confs else 0.0
 
         # Build flat record
         rec = {
@@ -477,13 +540,9 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
             'auto_flagged':     info['auto_flagged'],
             'n_frames_present': n_frames_present,
             'duration_s':       round(duration_s, 2),   # = tracked presence in seconds
+            'age_class':        age_class,
+            'age_conf_mean':    round(age_conf_mean, 4),
         }
-
-        # Time the individual was tracked but carried no primary class. Reported
-        # explicitly: without it the per-behaviour seconds silently fail to add up
-        # to duration_s, and a reader cannot tell measured absence from missing data.
-        unclassified_frames = behavior_frames.get('unknown', 0)
-        rec['unclassified_s'] = round(unclassified_frames / fps, 2) if fps > 0 else 0.0
 
         dominant_time = None
         dominant_count = None
@@ -501,6 +560,10 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
             rec[f'behavior_{b}_s']   = round(s, 2)
             rec[f'behavior_{b}_n']   = tr
 
+            # 'not_classified' gets its own duration column but is never reported
+            # as the dominant behaviour: it is an absence of measurement, not one.
+            if b == NOT_CLASSIFIED:
+                continue
             if s > max_time:
                 max_time     = s
                 dominant_time = b
@@ -510,6 +573,12 @@ def compute_individual_budget(tracks, flag_info, fps, all_behaviors):
 
         rec['dominant_behavior_time']  = dominant_time  or ''
         rec['dominant_behavior_count'] = dominant_count or ''
+
+        # Secondary behaviours: the parallel decomposition (see the docstring).
+        for sb in all_secondaries:
+            n  = secondary_frames.get(sb, 0)
+            rec[f'secondary_{sb}_s'] = round(n / fps if fps > 0 else 0.0, 2)
+            rec[f'secondary_{sb}_n'] = sec_transitions.get(sb, 0)
 
         records.append(rec)
 
@@ -605,6 +674,7 @@ def run_activity_budget(config_path, fps_default=30.0):
 
     # Collect all behavior names across all files first
     all_behaviors_global = set()
+    all_secondaries_global = set()
     all_complex_global   = set()   # complex-behaviour labels across all videos
     tracks_cache      = {}
     complex_cache     = {}   # csv_path -> {track_id(str) -> {beh -> [s, n]}}
@@ -683,10 +753,14 @@ def run_activity_budget(config_path, fps_default=30.0):
         tracks_cache[csv_path] = (tracks, max_frame, fps, video_filename,
                                   video_full_path, video_duration_s)
 
+        # Collect every label that actually occurs, INCLUDING the explicit
+        # 'not_classified' sentinel, so unlabelled time gets its own column
+        # instead of vanishing from the report.
         for rows in tracks.values():
             for r in rows:
-                if r['behavior'] and r['behavior'] != 'unknown':
+                if r['behavior']:
                     all_behaviors_global.add(r['behavior'])
+                all_secondaries_global.add(r.get('secondary', NO_SECONDARY))
 
         # Optional: fold in the complex-behaviour predictions and interaction graph
         # for this video (read-if-present; absent files leave the extra columns empty).
@@ -695,7 +769,14 @@ def run_activity_budget(config_path, fps_default=30.0):
         all_complex_global |= complex_labels
         interaction_cache[csv_path] = load_interaction_metrics(output_dir, video_stem, fps)
 
-    all_behaviors = sorted(all_behaviors_global)
+    # Sort the real labels alphabetically, then pin the two sentinels last so the
+    # CSV always ends with the "no measurement" columns rather than hiding them
+    # in the middle of the behaviour block. Both are emitted UNCONDITIONALLY,
+    # even when they are zero everywhere: a column that appears only when the
+    # problem occurs is exactly the silent failure this is meant to remove, and
+    # a fixed schema lets budgets from different videos be concatenated.
+    all_behaviors = sorted(all_behaviors_global - {NOT_CLASSIFIED}) + [NOT_CLASSIFIED]
+    all_secondaries = sorted(all_secondaries_global - {NO_SECONDARY}) + [NO_SECONDARY]
     all_complex_behaviours = sorted(all_complex_global)
 
     # Fixed schema for the optional social-metric columns. Added only when at least
@@ -749,7 +830,7 @@ def run_activity_budget(config_path, fps_default=30.0):
 
         # Compute individual budgets
         individual_rows = compute_individual_budget(
-            tracks, flag_info, fps, all_behaviors)
+            tracks, flag_info, fps, all_behaviors, all_secondaries)
 
         # Per-video complex-behaviour + interaction lookups (empty if no such files).
         complex_by_track     = complex_cache.get(csv_path, {})
@@ -822,12 +903,17 @@ def run_activity_budget(config_path, fps_default=30.0):
         #   duration_s       -- how long this individual was tracked within it
         base_fields = ['video_filename', 'group_id', 'group_type',
                        'track_id', 'individual_type', 'auto_flagged',
-                       'video_duration_s', 'n_frames_present', 'duration_s',
-                       'unclassified_s']
+                       'age_class', 'age_conf_mean',
+                       'video_duration_s', 'n_frames_present', 'duration_s']
+        # Two parallel families, each summing to duration_s. behavior_* ends with
+        # not_classified; secondary_* ends with none.
         behavior_fields = []
         for b in all_behaviors:
             behavior_fields += [f'behavior_{b}_s',
                                 f'behavior_{b}_n']
+        for sb in all_secondaries:
+            behavior_fields += [f'secondary_{sb}_s',
+                                f'secondary_{sb}_n']
         extra_fields = ['dominant_behavior_time', 'dominant_behavior_count']
         interaction_fields = _INTERACTION_FIELDS if has_interactions else []
         # NOTE: complex_* and dominant_interaction_type are NOT here. They are
