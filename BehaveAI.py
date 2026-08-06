@@ -929,16 +929,38 @@ metric_scale_tolerance = 0.25
 # Re-links the causal tracker's short tracklets into longer identities over the
 # whole clip, on kinematics only. Off = no behaviour change. Runs after drone
 # correction (stitches on the stabilised x_corrected coordinates).
+# A link is taken only when the continuation hypothesis is MORE LIKELY than "a new
+# animal appeared here" -- a likelihood ratio, not a tuned threshold. The motion
+# model behind it is measured per clip, so the settings below are gates and
+# priors, never the model itself.
+# BEFORE ENABLING: run BehaveAI_stitch_oracle.py on the clips. It cuts real
+# trajectories at controlled gaps and reports recovery vs contamination, and it
+# shows that a tightly packed herd cannot be linked on kinematics at any setting.
 stitch_enabled = false
-# Physical speed gate in pixels/frame on the stabilised frame (an implied speed
-# above this can't be the same animal). On fixed-altitude clips this is a plain
-# px/frame cap; with a flight log it should track altitude (see resolve_speed_gate).
+# Hard speed gate. With a flight log the physical m/s bound below is converted to
+# pixels using the camera height; without one this pixel cap is used instead.
 stitch_max_speed_px_per_frame = 60
-# A link is kept only if its normalised gap cost (0..1) is below this -- i.e.
-# cheaper than leaving the tracklets unlinked.
-stitch_max_link_cost = 0.5
-# Minimum samples for a tracklet to carry a velocity estimate (shorter still link).
-stitch_min_tracklet_len = 2
+stitch_max_speed_m_per_s = 17
+# Safety factor on the converted gate, covering the bias of barometric rel_alt
+# (referenced to the take-off point, so sloped terrain inflates the height).
+stitch_speed_gate_margin = 1.5
+# Longest occlusion considered at all. 5 s is where the oracle benchmark kept
+# contamination under 2 % on the sparse HERDWISE clip; re-derive it per corpus.
+stitch_max_gap_seconds = 5
+# Time constant of the exponential prior on occlusion duration.
+stitch_gap_prior_seconds = 5
+# Constant-velocity extrapolation is damped past this horizon: beyond a second,
+# an animal's instantaneous velocity no longer predicts where it went.
+stitch_extrapolation_horizon_seconds = 1
+# Prior log-odds on linking, the one deliberate thumb on the scale. 0 = pure
+# likelihood ratio; NEGATIVE demands more evidence. -5 was chosen because a missed
+# link only costs statistical power while a wrong merge invents an animal and
+# corrupts two budgets: at -5 the oracle measured 70 % recovery with 1.7 %
+# contamination, against 90 % / 3.0 % at 0.
+stitch_link_prior_log_odds = -5
+# Tracklets shorter than this many samples are excluded from linking. Their rows
+# are kept and given their own identity -- never deleted.
+stitch_min_tracklet_len = 1
 # Refuse links whose endpoints have correction_quality 'none' (unreliable position).
 stitch_quality_gate = true
 # Field-recorded group size, if known. Purely a diagnostic in the stitch report;

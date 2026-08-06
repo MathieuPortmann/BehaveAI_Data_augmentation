@@ -227,10 +227,14 @@ PARAM_HELP = {
                      "Speeds up annotation; no effect on the model.",
     },
     "ignore_secondary": {
-        "short": "Primary classes that skip the secondary classification stage.",
-        "what": "Marks a primary class as exempt from secondary classification.",
-        "influence": "Detections of that class are never passed to the secondary model, saving "
-                     "compute and avoiding meaningless sub-labels.",
+        "short": "Legacy key. Superseded by the secondary map — not a setting any more.",
+        "what": "In the old flat schema it listed the primary classes exempt from secondary "
+                "classification. Under the shared-pool schema the exemption is DERIVED: a primary "
+                "with no secondary mapped to it on the 'Model structure' tab is skipped "
+                "automatically. The key is only still read when a project has no secondary pool at "
+                "all, i.e. when the legacy fallback in behaveai_config.py kicks in.",
+        "influence": "Editing it does nothing in a current project. To exempt a primary class, "
+                     "clear its secondaries in the secondary-map editor instead.",
     },
     "motion_blocks_static": {
         "short": "Grey out motion boxes when generating the static annotation images.",
@@ -439,9 +443,14 @@ PARAM_HELP = {
                      "miss faint subjects.",
     },
     "secondary_conf_thresh": {
-        "short": "Minimum confidence to accept a secondary classification (0–1).",
-        "what": "Secondary predictions below this score are treated as undecided.",
-        "influence": "Higher avoids wrong sub-labels at the cost of leaving some boxes unclassified.",
+        "short": "Minimum confidence to accept a secondary classification. 0 disables the floor.",
+        "what": "The secondary classifier first arbitrates against an explicit '__none__' class: if "
+                "'no secondary' wins, the box gets no sub-label. This threshold is a second, "
+                "stricter floor applied to the winner — a sub-label that beats '__none__' but scores "
+                "below it is still dropped as undecided. Set 0 to keep the '__none__' vote alone.",
+        "influence": "Higher avoids wrong sub-labels at the cost of leaving more boxes unclassified. "
+                     "Boxes left undecided keep their primary class; only the secondary column is "
+                     "empty.",
     },
 
     # ---------------- Tracking ----------------
@@ -903,6 +912,284 @@ PARAM_HELP = {
         "short": "Zero-based filename field index that encodes the group type.",
         "what": "Which separated field of the filename holds the group type.",
         "influence": "Wrong index reads the wrong token; align it with your filename convention.",
+    },
+
+    # --- Offline tracklet stitching -----------------------------------------
+    "stitch_enabled": {
+        "short": "Re-link the tracker's tracklets into longer identities, offline.",
+        "what": "Runs a non-causal pass over the whole clip after drone correction, joining "
+                "tracklets that the causal tracker cut. Kinematics only — no appearance. A link "
+                "is taken only when 'this is the same animal' is more likely than 'a new animal "
+                "appeared here'.",
+        "influence": "Fewer, longer identities, which is what per-individual budgets need. But a "
+                     "wrong merge invents an animal and corrupts two budgets at once, so run "
+                     "BehaveAI_stitch_oracle.py on your clips first: on a tightly packed herd the "
+                     "contamination rate is high at every setting.",
+    },
+    "stitch_max_speed_m_per_s": {
+        "short": "Physical speed an animal cannot exceed (m/s).",
+        "what": "Hard gate: a displacement implying more than this cannot be the same animal. Used "
+                "when a flight log gives the pixel scale; otherwise the pixel cap applies.",
+        "influence": "Generous on purpose — it only has to exclude the impossible. The likelihood "
+                     "ratio does the actual discrimination, so tightening this is not how you make "
+                     "linking stricter.",
+    },
+    "stitch_max_speed_px_per_frame": {
+        "short": "Fallback speed gate in pixels per frame, used without a flight log.",
+        "what": "Same hard gate expressed in stabilised-frame pixels, for clips with no telemetry.",
+        "influence": "Only valid at roughly constant altitude. Too low silently forbids real links.",
+    },
+    "stitch_speed_gate_margin": {
+        "short": "Safety factor on the m/s → pixel conversion.",
+        "what": "Covers the known bias of barometric rel_alt, which is referenced to the take-off "
+                "point, so sloped terrain or a raised take-off spot mis-states the camera height.",
+        "influence": "Larger is safer against wrongly rejecting real links; it does not make wrong "
+                     "links more likely, since the gate is not what selects them.",
+    },
+    "stitch_max_gap_seconds": {
+        "short": "Longest occlusion the stitcher will try to bridge.",
+        "what": "Pairs separated by more than this are not even considered.",
+        "influence": "The setting to derive from the oracle benchmark, not from taste: pick the "
+                     "largest gap where recovery is still useful and contamination still low. "
+                     "Longer gaps buy a few more links at a fast-rising error rate.",
+    },
+    "stitch_gap_prior_seconds": {
+        "short": "Time constant of the prior on occlusion duration.",
+        "what": "Sets how quickly a long gap is penalised: the cost carries a gap/tau term.",
+        "influence": "Shorter makes long-gap links progressively harder. It shapes the penalty "
+                     "smoothly, where max_gap_seconds cuts it off abruptly.",
+    },
+    "stitch_extrapolation_horizon_seconds": {
+        "short": "How far a tracklet's velocity is trusted to predict forward.",
+        "what": "Constant-velocity extrapolation is damped past this horizon, because beyond about "
+                "a second an animal's instantaneous velocity no longer says where it went.",
+        "influence": "Too long produces absurd predictions far outside the frame; too short throws "
+                     "away real information about a moving animal.",
+    },
+    "stitch_link_prior_log_odds": {
+        "short": "Deliberate bias on the link decision. Negative demands more evidence.",
+        "what": "Added to the log-likelihood ratio. 0 = pure likelihood ratio; negative values make "
+                "the stitcher conservative.",
+        "influence": "The main tuning knob, and it is asymmetric by design: a missed link only "
+                     "costs statistical power, a wrong merge costs validity. On the HERDWISE clips, "
+                     "0 gave 90 % recovery at 3.0 % contamination and -5 gave 70 % at 1.7 %.",
+    },
+    "stitch_min_tracklet_len": {
+        "short": "Tracklets shorter than this many samples are excluded from linking.",
+        "what": "Very short tracklets carry no usable velocity. They are excluded from the linking "
+                "problem but their rows are kept and given their own identity.",
+        "influence": "Raising it removes noise from the linking problem; it never deletes data.",
+    },
+    "stitch_quality_gate": {
+        "short": "Refuse links whose endpoint positions are flagged unreliable.",
+        "what": "Skips pairs where either endpoint has correction_quality 'none', i.e. the drone "
+                "correction could not place it in the stabilised frame.",
+        "influence": "On by default. Turning it off lets the stitcher link on positions that are "
+                     "known to be wrong.",
+    },
+    "expected_group_size": {
+        "short": "Field-recorded herd size. A diagnostic only, never a constraint.",
+        "what": "Written into the stitch report so you can compare it with the number of "
+                "simultaneously tracked animals.",
+        "influence": "Changes no decision anywhere in the pipeline. If the observed maximum exceeds "
+                     "it, that is evidence about the count, the herd or the detector — the "
+                     "stitcher will not force the result towards it.",
+    },
+
+    # ---------------- Training controls ----------------
+    "train_patience": {
+        "short": "Stop training after this many epochs with no validation improvement.",
+        "what": "Early stopping. 'Primary epochs' / 'Secondary epochs' are only the CAP: training "
+                "ends as soon as the validation metric has not improved for this many epochs. "
+                "Ultralytics' own default is 100, which effectively never triggers on short runs, "
+                "so BehaveAI sets 30.",
+        "influence": "Lower ends runs sooner and wastes less GPU time, but can cut a model off "
+                     "during a plateau it would have escaped. Higher trains longer for a possibly "
+                     "marginal gain. It never changes the best weights that are kept.",
+    },
+    "motion_disable_color_aug": {
+        "short": "Train the motion stream with YOLO's HSV colour augmentation switched off.",
+        "what": "The motion stream is a FALSE-COLOUR encoding: the hue/saturation of a pixel carries "
+                "the motion signal, not the animal's appearance. Ultralytics' online HSV jitter "
+                "would scramble exactly that signal.",
+        "influence": "Leave it on (the default) for any false-colour motion encoding. Turning it "
+                     "off re-enables HSV jitter and generally degrades the motion detector. The "
+                     "static stream is never affected.",
+    },
+    "save_empty_frames": {
+        "short": "Keep annotation frames that contain no box at all (background negatives).",
+        "what": "When a sampled frame ends up with zero boxes, this decides whether the image (plus "
+                "an empty label file) is still written to annot_static/annot_motion. Those frames "
+                "become pure-background negatives for the detector.",
+        "influence": "True gives the detector explicit background examples, which usually reduces "
+                     "false positives on empty terrain, at the cost of a larger dataset and a class "
+                     "balance dominated by empty images. False keeps the dataset compact and "
+                     "positive-only. Changing it only affects frames written from now on.",
+    },
+
+    # ---------------- End-of-pipeline auto-run switches ----------------
+    "interaction_graph_enabled": {
+        "short": "Build the interaction features + graph automatically after tracking.",
+        "what": "Runs the dyadic/group feature extraction and writes the edges/nodes CSVs at the end "
+                "of the pipeline, before the activity budget.",
+        "influence": "Requires metric geometry: videos without it are skipped. Off means no "
+                     "interaction outputs unless you run the step by hand; nothing else changes.",
+    },
+    "complex_classify_enabled": {
+        "short": "Run complex-behaviour classification automatically after the interaction graph.",
+        "what": "Applies the trained complex-behaviour model to the interaction features and writes "
+                "its predictions before the activity budget runs.",
+        "influence": "Off skips the step entirely (useful while no complex model is trained yet). "
+                     "It never affects the primary/secondary behaviour columns.",
+    },
+
+    # ---------------- Metric geometry ----------------
+    "metric_enabled": {
+        "short": "Convert tracked pixel positions into real ground-plane metres.",
+        "what": "Runs after drone correction and appends X_m, Y_m (camera-relative, per frame), "
+                "Xs_m, Ys_m (stabilised) and metric_quality to each tracking CSV. The chain is "
+                "metres/pixel = f(height, pitch, focal length, image row), with height and pitch "
+                "read from the clip's flight log.",
+        "influence": "Required by everything expressed in metres: interaction distances, speeds in "
+                     "m/s, the stitcher's metric speed gate. Clips with no flight log get "
+                     "metric_quality='none' and keep pixel coordinates only. Off changes nothing "
+                     "else in the pipeline.",
+    },
+    "metric_focal_len_mm": {
+        "short": "Camera focal length in mm, from the drone's spec sheet.",
+        "what": "Used with the sensor width and the frame width to derive the pixel focal length "
+                "f_px = focal_len_mm * frame_width / sensor_width_mm. A per-drone checkerboard "
+                "calibration (metric_fpx_<DroneToken> in the INI) overrides it when present.",
+        "influence": "Scales every distance linearly: a focal length 10 % too small makes all "
+                     "measured distances 10 % too large. Use the value for the drone that actually "
+                     "shot the clips, not a mixed-fleet average.",
+    },
+    "metric_sensor_width_mm": {
+        "short": "Physical sensor width in mm, from the drone's spec sheet.",
+        "what": "The other half of the pixel-focal-length formula. For a 1/1.3\" class drone sensor "
+                "this is a few mm, NOT the 36 mm of a full-frame camera.",
+        "influence": "Same linear effect as the focal length, in the opposite direction. Leaving "
+                     "the 36 mm placeholder with a real drone focal length gives distances that are "
+                     "wrong by roughly an order of magnitude.",
+    },
+    "metric_roll_max_deg": {
+        "short": "Frames rolled more than this are flagged as unreliable.",
+        "what": "The projection assumes zero roll. gb_roll is checked per frame against this limit "
+                "and offending frames get metric_quality='uncertain'.",
+        "influence": "Tighter flags more frames but keeps only geometry you can defend; looser "
+                     "keeps more rows at the cost of letting tilted frames through.",
+    },
+    "metric_horizon_margin_px": {
+        "short": "Reject detections closer than this many pixels to the horizon line.",
+        "what": "Near the horizon one pixel maps to a huge and rapidly growing ground distance, so "
+                "positions there are numerically meaningless.",
+        "influence": "Larger is safer and discards more far-field animals; smaller keeps distant "
+                     "animals whose metric positions may be wildly wrong. It flags rows, it does "
+                     "not delete them.",
+    },
+    "metric_assumed_body_length_m": {
+        "short": "Typical body length used to sanity-check the metric scale.",
+        "what": "The apparent size of the animals gives a second, independent estimate of the "
+                "camera height. It is compared against the flight-log height to catch a wrong "
+                "focal length or sensor width before the numbers reach the analysis.",
+        "influence": "Only affects the plausibility check and its warning, never the coordinates. "
+                     "Set it to the species you actually filmed (≈2.2 m for an adult horse).",
+    },
+    "metric_scale_tolerance": {
+        "short": "How far the two camera-height estimates may disagree before a warning.",
+        "what": "0.25 means the apparent-size estimate and the flight-log height must agree within "
+                "a factor 1.25 either way for the calibration to be called plausible.",
+        "influence": "Tighter catches calibration errors earlier but cries wolf on mixed-age herds; "
+                     "looser lets a genuinely wrong scale pass unnoticed.",
+    },
+
+    # ---------------- SAHI sliced inference ----------------
+    "sahi_enabled_static": {
+        "short": "Tile the static stream so small animals are seen at native resolution.",
+        "what": "Instead of shrinking the whole 4K frame to 640 px, the frame is diced into "
+                "native-resolution tiles and each is detected separately. A ~60 px horse reaches "
+                "the model at ~60 px instead of ~10 px. Training follows: the stream is retrained "
+                "on the sliced dataset into a separate *_tiled project, so the whole-frame model is "
+                "never overwritten.",
+        "influence": "Big recall gain on small/distant animals; 20-40x slower inference. Auto-skips "
+                     "when the frame is not meaningfully larger than a tile. Turning it back off "
+                     "instantly restores the whole-frame model.",
+    },
+    "sahi_enabled_motion": {
+        "short": "Same tiled inference for the motion stream.",
+        "what": "Independent of the static switch, because the two streams do not have the same "
+                "small-object problem: motion blobs are often already large.",
+        "influence": "Same recall/speed trade-off as the static switch, applied to the motion "
+                     "detector and its own tiled model.",
+    },
+    "sahi_slice_height": {
+        "short": "Tile height in pixels.",
+        "what": "Height of each slice fed to the detector. 640 matches the model's native input, so "
+                "no rescaling happens inside a tile.",
+        "influence": "Smaller tiles magnify small animals further but multiply the tile count (and "
+                     "the runtime) and cut more animals across tile borders.",
+    },
+    "sahi_slice_width": {
+        "short": "Tile width in pixels.",
+        "what": "Width of each slice. Keep it equal to the height unless the model was trained on "
+                "a non-square input.",
+        "influence": "Same trade-off as the tile height.",
+    },
+    "sahi_overlap_height_ratio": {
+        "short": "Vertical overlap between neighbouring tiles, as a fraction of tile height.",
+        "what": "Overlap is what stops an animal sitting exactly on a tile border from being cut in "
+                "two and detected as nothing.",
+        "influence": "Should exceed the apparent size of your animals relative to the tile. Higher "
+                     "is safer and slower; 0 will lose animals on the seams.",
+    },
+    "sahi_overlap_width_ratio": {
+        "short": "Horizontal overlap between neighbouring tiles.",
+        "what": "Same role as the vertical overlap, along the other axis.",
+        "influence": "Same trade-off: more overlap, more tiles, more runtime, fewer split animals.",
+    },
+    "sahi_postprocess_type": {
+        "short": "How duplicate detections from overlapping tiles are merged.",
+        "what": "NMS keeps the best box of a duplicate group; GREEDYNMM/NMM merge them into one box "
+                "instead of discarding.",
+        "influence": "NMS is the safe default for well-separated animals. The merging variants help "
+                     "when an animal is genuinely split across tiles, but can fuse two animals "
+                     "standing close together into one.",
+    },
+    "sahi_postprocess_match_metric": {
+        "short": "Overlap measure used to decide two boxes are the same animal.",
+        "what": "IOS (intersection over smaller) is designed for tiling: a box cut by a seam is a "
+                "small fragment of the full one, so IoU would score it low and keep both. IOU is "
+                "the classic measure.",
+        "influence": "IOS removes seam duplicates far more reliably; IOU leaves more duplicates but "
+                     "is less likely to merge two animals that genuinely overlap.",
+    },
+    "sahi_postprocess_match_threshold": {
+        "short": "Overlap above which two boxes are treated as duplicates.",
+        "what": "Applied to the match metric above.",
+        "influence": "Lower merges more aggressively (fewer duplicates, more risk of swallowing a "
+                     "neighbour); higher keeps more boxes, including duplicated ones.",
+    },
+    "sahi_perform_standard_pred": {
+        "short": "Also run one whole-frame pass alongside the tiles.",
+        "what": "Adds the ordinary resized full-frame detection to the tiled results before merging.",
+        "influence": "Catches animals too large to fit in a tile, at the cost of one extra pass and "
+                     "more duplicates for the merge step to resolve.",
+    },
+    "sahi_min_dim_factor": {
+        "short": "Skip tiling unless the frame is this many times larger than a tile.",
+        "what": "Guard against paying the 20-40x tiling cost on footage that gains nothing from it: "
+                "tiling is skipped when max(frame) <= max(tile) * this factor.",
+        "influence": "Higher makes the auto-skip more aggressive (tiling only on genuinely large "
+                     "frames); 1.0 tiles almost anything bigger than a tile.",
+    },
+
+    # ---------------- Launcher: training metrics ----------------
+    "show_metrics": {
+        "short": "Which training metrics the launcher prints after a run.",
+        "what": "Purely a display choice for the launcher's training report. (B) columns are the "
+                "detection boxes, (M) columns the segmentation masks — the latter only exist for "
+                "segmentation models. F1 is computed from precision and recall.",
+        "influence": "Changes nothing in training or inference; only what you are shown.",
     },
 }
 

@@ -71,7 +71,12 @@ def load_config(config_path):
 		params['motion_threshold'] = -1 * int(config['DEFAULT'].get('motion_threshold', '0'))
 		params['motion_blocks_static'] = config['DEFAULT'].get('motion_blocks_static', 'false').lower()
 		params['static_blocks_motion'] = config['DEFAULT'].get('static_blocks_motion', 'false').lower()
-		params['save_empty_frames'] = config['DEFAULT'].get('save_empty_frames', 'false').lower()
+		# 'true' matches what the settings GUI writes and what the annotation tool
+		# and the dataset inspector require: those two treat the key as mandatory
+		# (KeyError with a clear message when absent), so a divergent fallback here
+		# would silently regenerate under a different policy than the one that
+		# created the images in the first place.
+		params['save_empty_frames'] = config['DEFAULT'].get('save_empty_frames', 'true').lower()
 
 		# Compute base frame window size (number of sampled frames)
 		base_window = 4

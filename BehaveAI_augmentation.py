@@ -134,6 +134,7 @@ def load_augmentation_config(config_path):
     New INI keys
     ------------
     aug_target_classes : comma-separated class names to augment (empty = all)
+    motion_disable_color_aug : keep colour transforms off the motion stream
     All range keys now accept the multi-segment syntax described in _parse_segments.
     """
     config = configparser.ConfigParser()
@@ -144,6 +145,12 @@ def load_augmentation_config(config_path):
     global_prob = float(d.get('aug_global_probability', '0'))
     if global_prob == 0:
         return None
+
+    # Same key the online (Ultralytics) HSV augmentation honours in
+    # BehaveAI_classify_track.py, so the two paths cannot disagree about
+    # whether the false-colour motion encoding may be recoloured.
+    motion_disable_color_aug = str(
+        d.get('motion_disable_color_aug', 'true')).lower() == 'true'
 
     # --- target classes filter (NEW) ---
     raw_target = d.get('aug_target_classes', '').strip()
@@ -157,6 +164,7 @@ def load_augmentation_config(config_path):
     aug_config = {
         'global_probability': global_prob,
         'target_classes': target_classes,           # NEW
+        'motion_disable_color_aug': motion_disable_color_aug,
         'params': {
             'brightness': {
                 'segments': _segs('aug_brightness_range', '0.8,1.2'),
@@ -427,7 +435,7 @@ def transform_labels(label_path, param_name, value):
 # ---------------------------------------------------------------------------
 
 # Parameters EXCLUDED from motion images (colour augmentations that would
-# corrupt the false-colour motion encoding).
+# corrupt the false-colour motion encoding) when motion_disable_color_aug is on.
 # Everything NOT in this set is allowed on motion images.
 MOTION_EXCLUDED_PARAMS = {'brightness', 'contrast', 'saturation', 'hue', 'temperature'}
 
@@ -540,10 +548,12 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
 
         augmentation_list = sample_augmentation_list(aug_config)
 
-        if is_motion:
+        if is_motion and aug_config.get('motion_disable_color_aug', True):
             # Colour augmentations are excluded from motion images because the
             # false-colour encoding carries motion information — altering
-            # hue/brightness/etc. would corrupt that signal.
+            # hue/brightness/etc. would corrupt that signal. Gated on the same
+            # setting as the online HSV augmentation, so turning it off in the
+            # settings really does re-enable colour transforms here.
             augmentation_list = [
                 aug for aug in augmentation_list
                 if next(k for k in aug if k != '_seg_idx') not in MOTION_EXCLUDED_PARAMS

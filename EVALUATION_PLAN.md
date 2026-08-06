@@ -96,7 +96,19 @@ herd size, altitude, occlusion). TrackEval scores only the annotated frames.
 **Ablations.** `tracker_type` (botsort/bytetrack/kalman); stitching on/off (expect
 lower Frag/IDSW, higher AssA/IDF1); drone correction on/off. **Limits.** Track
 crossings, long occlusions (appearance is deliberately unused at 15–50 m), and K
-(herd size) is a reported diagnostic, never a constraint.
+(herd size) is a reported diagnostic, never a constraint. Stitching only rewrites
+the `id` column, so **DetA must be identical on and off** — a built-in check that
+the ablation was set up correctly.
+
+**Stitching without ground truth.** `BehaveAI_stitch_oracle.py` cuts real
+trajectories at controlled gaps and scores recovery / contamination / chain purity
+against the known cuts, which is how `stitch_max_gap_seconds` and
+`stitch_link_prior_log_odds` were set. Measured on the two processed clips: 0.70
+recovery at 1.7 % contamination on the clip whose animals sit 441 px apart, and
+29 % contamination at *every* setting on the clip at 198 px. Herd packing, not
+tuning, is the binding constraint. It isolates the association step (the tracker's
+own id swaps are inherited as truth) and is a calibration, not an accuracy claim —
+see the root EVALUATION_PLAN §C.1 for the full table and caveats.
 
 ## D. Layer 3 — behaviour classification and the activity budget
 

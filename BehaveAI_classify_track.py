@@ -1473,9 +1473,12 @@ if __name__ == '__main__':
 										if c > best_conf:
 											best_conf = c
 											best_name = nm
-									# The explicit __none__ class winning means "no secondary";
-									# otherwise report the winner. Replaces the threshold-only reject.
-									if best_name and best_name != NONE_LABEL:
+									# The explicit __none__ class winning means "no secondary".
+									# secondary_conf_thresh is then a second, stricter floor on
+									# the winner: a sub-label that beats __none__ but scores
+									# below it is left undecided. 0 keeps the __none__ vote alone.
+									if (best_name and best_name != NONE_LABEL
+											and best_conf >= secondary_conf_thresh):
 										secondary_class = best_name
 										secondary_conf = best_conf
 

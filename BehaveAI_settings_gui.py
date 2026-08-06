@@ -651,6 +651,88 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_synchrony_high_var       = tk.DoubleVar(value=0.7)
 		self.complex_candidate_topk_var       = tk.IntVar(value=50)
 
+		# Sequence-model (lstm/transformer) hyper-parameters. Only consulted when
+		# complex_model_type is not 'baseline'.
+		self.complex_seq_steps_var    = tk.IntVar(value=8)
+		self.complex_deep_epochs_var  = tk.IntVar(value=60)
+		self.complex_deep_hidden_var  = tk.IntVar(value=64)
+		self.complex_deep_layers_var  = tk.IntVar(value=1)
+		self.complex_deep_heads_var   = tk.IntVar(value=4)
+		self.complex_deep_dropout_var = tk.DoubleVar(value=0.2)
+		self.complex_deep_lr_var      = tk.DoubleVar(value=0.001)
+		self.complex_deep_batch_var   = tk.IntVar(value=16)
+
+		# End-of-pipeline auto-run switches
+		self.interaction_graph_enabled_var = tk.BooleanVar(value=True)
+		self.complex_classify_enabled_var  = tk.BooleanVar(value=True)
+
+		# Training controls
+		self.train_patience_var          = tk.IntVar(value=30)
+		self.motion_disable_color_aug_var = tk.BooleanVar(value=True)
+		self.save_empty_frames_var       = tk.BooleanVar(value=True)
+
+		# SAHI sliced inference (per-stream)
+		self.sahi_enabled_static_var     = tk.BooleanVar(value=False)
+		self.sahi_enabled_motion_var     = tk.BooleanVar(value=False)
+		self.sahi_slice_height_var       = tk.IntVar(value=640)
+		self.sahi_slice_width_var        = tk.IntVar(value=640)
+		self.sahi_overlap_height_var     = tk.DoubleVar(value=0.2)
+		self.sahi_overlap_width_var      = tk.DoubleVar(value=0.2)
+		self.sahi_postprocess_type_var   = tk.StringVar(value='NMS')
+		self.sahi_match_metric_var       = tk.StringVar(value='IOS')
+		self.sahi_match_threshold_var    = tk.DoubleVar(value=0.5)
+		self.sahi_standard_pred_var      = tk.BooleanVar(value=False)
+		self.sahi_min_dim_factor_var     = tk.DoubleVar(value=1.5)
+
+		# Metric geometry (pixels -> ground-plane metres)
+		self.metric_enabled_var          = tk.BooleanVar(value=False)
+		self.metric_focal_len_var        = tk.DoubleVar(value=24.0)
+		self.metric_sensor_width_var     = tk.DoubleVar(value=36.0)
+		self.metric_roll_max_var         = tk.DoubleVar(value=3.0)
+		self.metric_horizon_margin_var   = tk.DoubleVar(value=50.0)
+		self.metric_body_length_var      = tk.DoubleVar(value=2.2)
+		self.metric_scale_tolerance_var  = tk.DoubleVar(value=0.25)
+
+		# Offline tracklet stitching
+		self.stitch_enabled_var          = tk.BooleanVar(value=False)
+		self.stitch_max_speed_px_var     = tk.DoubleVar(value=60.0)
+		self.stitch_max_speed_ms_var     = tk.DoubleVar(value=17.0)
+		self.stitch_speed_margin_var     = tk.DoubleVar(value=1.5)
+		self.stitch_max_gap_var          = tk.DoubleVar(value=5.0)
+		self.stitch_gap_prior_var        = tk.DoubleVar(value=5.0)
+		self.stitch_extrap_horizon_var   = tk.DoubleVar(value=1.0)
+		self.stitch_prior_log_odds_var   = tk.DoubleVar(value=-5.0)
+		self.stitch_min_len_var          = tk.IntVar(value=1)
+		self.stitch_quality_gate_var     = tk.BooleanVar(value=True)
+		self.expected_group_size_var     = tk.IntVar(value=0)
+
+		# Launcher training-metric visibility (show_metric_* keys, display only).
+		# (ini key, checkbox label, default shown)
+		self.metric_display_specs = [
+			('show_metric_precision_b',   'Precision (B)',       True),
+			('show_metric_recall_b',      'Recall (B)',          True),
+			('show_metric_f1_b',          'F1-score (B)',        True),
+			('show_metric_map50_b',       'mAP@0.5 (B)',         True),
+			('show_metric_map5095_b',     'mAP@0.5:0.95 (B)',    True),
+			('show_metric_precision_m',   'Precision (M)',       False),
+			('show_metric_recall_m',      'Recall (M)',          False),
+			('show_metric_map50_m',       'mAP@0.5 (M)',         False),
+			('show_metric_map5095_m',     'mAP@0.5:0.95 (M)',    False),
+			('show_metric_box_loss_train','Box loss (train)',    False),
+			('show_metric_cls_loss_train','Cls loss (train)',    False),
+			('show_metric_dfl_loss_train','DFL loss (train)',    False),
+			('show_metric_box_loss_val',  'Box loss (val)',      False),
+			('show_metric_cls_loss_val',  'Cls loss (val)',      False),
+			('show_metric_dfl_loss_val',  'DFL loss (val)',      False),
+			('show_metric_lr_pg0',        'Learning rate pg0',   False),
+			('show_metric_lr_pg1',        'Learning rate pg1',   False),
+			('show_metric_lr_pg2',        'Learning rate pg2',   False),
+		]
+		self.metric_display_vars = {
+			key: tk.BooleanVar(value=default)
+			for key, _label, default in self.metric_display_specs
+		}
+
 		self.cfg = configparser.ConfigParser()
 		self.cfg.optionxform = str  # preserve case
 
@@ -1096,6 +1178,17 @@ class SettingsEditorApp(tk.Tk):
 			row=r+1, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 6))
 		r += 2
 
+		# --- Motion-stream colour protection ---
+		cb_mdca = ttk.Checkbutton(aug_inner,
+			text='Disable colour augmentation on the motion stream  ' + 'ⓘ',
+			variable=self.motion_disable_color_aug_var, command=self._set_dirty)
+		cb_mdca.grid(row=r, column=0, columnspan=4, sticky='w', padx=8, pady=(2, 0))
+		Tooltip(cb_mdca, tooltip_text('motion_disable_color_aug'))
+		r += 1
+		help_line(aug_inner, 'motion_disable_color_aug', wraplength=640).grid(
+			row=r, column=0, columnspan=4, sticky='w', padx=24, pady=(0, 4))
+		r += 1
+
 		# Separator
 		ttk.Separator(aug_inner, orient='horizontal').grid(
 			row=r, column=0, columnspan=4, sticky='ew', padx=8, pady=6)
@@ -1281,7 +1374,7 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.primary_conf_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'primary_conf_thresh').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
-		help_label(tab3, 'Secondary confidence thresh', 'secondary_conf_thresh').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		help_label(tab3, 'Secondary confidence thresh (0 = off)', 'secondary_conf_thresh').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.secondary_conf_var = tk.DoubleVar(value=0.5)
 		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.secondary_conf_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'secondary_conf_thresh').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
@@ -1291,6 +1384,95 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Combobox(tab3, values=['confidence', 'motion', 'static'], textvariable=self.dominant_source_var, state='readonly').grid(row=t, column=1, sticky='w', padx=8); t += 1
 		self.dominant_source_var.trace_add('write', lambda *a: self._set_dirty())
 		help_line(tab3, 'dominant_source').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		# --- Training controls -------------------------------------------------
+		def _t3_spin(label, key, var, lo, hi, inc=None, width=8):
+			nonlocal t
+			help_label(tab3, label, key).grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+			kw = {} if inc is None else {'increment': inc}
+			ttk.Spinbox(tab3, from_=lo, to=hi, textvariable=var, width=width,
+				command=self._set_dirty, **kw).grid(row=t, column=1, sticky='w', padx=8); t += 1
+			help_line(tab3, key).grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		def _t3_check(label, key, var):
+			nonlocal t
+			cb = ttk.Checkbutton(tab3, text=label + '  ' + 'ⓘ', variable=var, command=self._set_dirty)
+			cb.grid(row=t, column=0, columnspan=2, sticky='w', padx=8, pady=(6, 0)); t += 1
+			Tooltip(cb, tooltip_text(key))
+			help_line(tab3, key).grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		ttk.Separator(tab3, orient='horizontal').grid(row=t, column=0, columnspan=2, sticky='ew', padx=8, pady=(12, 6)); t += 1
+		ttk.Label(tab3, text='Training controls', style='Section.TLabel').grid(
+			row=t, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 4)); t += 1
+
+		_t3_spin('Early-stopping patience (epochs)', 'train_patience', self.train_patience_var, 1, 10000)
+		_t3_check('Keep annotation frames with no boxes (background negatives)', 'save_empty_frames',
+				  self.save_empty_frames_var)
+
+		# --- SAHI sliced inference --------------------------------------------
+		ttk.Separator(tab3, orient='horizontal').grid(row=t, column=0, columnspan=2, sticky='ew', padx=8, pady=(12, 6)); t += 1
+		ttk.Label(tab3, text='SAHI sliced inference (small-object detection)', style='Section.TLabel').grid(
+			row=t, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 2)); t += 1
+		ttk.Label(tab3,
+			text=('Dices each frame into native-resolution tiles instead of shrinking the whole frame '
+				  'to the model input. Per-stream because it is a coherent train+infer switch: an '
+				  'enabled stream is retrained into a separate *_tiled project, so the whole-frame '
+				  'model is never overwritten and turning the switch back off restores it instantly.'),
+			style='Help.TLabel', wraplength=640, justify='left').grid(
+			row=t, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 4)); t += 1
+
+		_t3_check('Enable tiling on the static stream', 'sahi_enabled_static', self.sahi_enabled_static_var)
+		_t3_check('Enable tiling on the motion stream', 'sahi_enabled_motion', self.sahi_enabled_motion_var)
+
+		# The parameters below only matter once a stream is tiled; hide them
+		# otherwise so the tab does not read as 11 knobs you must understand.
+		self.sahi_frame = ttk.Frame(tab3)
+		self.sahi_frame.grid(row=t, column=0, columnspan=2, sticky='ew'); t += 1
+		sf = self.sahi_frame
+		sr = 0
+		def _sf_spin(label, key, var, lo, hi, inc=None, width=8):
+			nonlocal sr
+			help_label(sf, label, key).grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+			kw = {} if inc is None else {'increment': inc}
+			ttk.Spinbox(sf, from_=lo, to=hi, textvariable=var, width=width,
+				command=self._set_dirty, **kw).grid(row=sr, column=1, sticky='w', padx=8); sr += 1
+			help_line(sf, key).grid(row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); sr += 1
+
+		_sf_spin('Tile height (px)', 'sahi_slice_height', self.sahi_slice_height_var, 64, 4096, 32)
+		_sf_spin('Tile width (px)', 'sahi_slice_width', self.sahi_slice_width_var, 64, 4096, 32)
+		_sf_spin('Vertical tile overlap (fraction)', 'sahi_overlap_height_ratio', self.sahi_overlap_height_var, 0.0, 0.9, 0.05, width=6)
+		_sf_spin('Horizontal tile overlap (fraction)', 'sahi_overlap_width_ratio', self.sahi_overlap_width_var, 0.0, 0.9, 0.05, width=6)
+
+		help_label(sf, 'Duplicate merging', 'sahi_postprocess_type').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(sf, values=['NMS', 'GREEDYNMM', 'NMM'], textvariable=self.sahi_postprocess_type_var,
+			state='readonly', width=14).grid(row=sr, column=1, sticky='w', padx=8); sr += 1
+		self.sahi_postprocess_type_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(sf, 'sahi_postprocess_type').grid(row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); sr += 1
+
+		help_label(sf, 'Overlap measure', 'sahi_postprocess_match_metric').grid(row=sr, column=0, sticky='w', padx=8, pady=(6, 0))
+		ttk.Combobox(sf, values=['IOS', 'IOU'], textvariable=self.sahi_match_metric_var,
+			state='readonly', width=14).grid(row=sr, column=1, sticky='w', padx=8); sr += 1
+		self.sahi_match_metric_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(sf, 'sahi_postprocess_match_metric').grid(row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); sr += 1
+
+		_sf_spin('Duplicate overlap threshold', 'sahi_postprocess_match_threshold', self.sahi_match_threshold_var, 0.0, 1.0, 0.05, width=6)
+
+		cb_sahi_std = ttk.Checkbutton(sf, text='Also run one whole-frame pass  ' + 'ⓘ',
+			variable=self.sahi_standard_pred_var, command=self._set_dirty)
+		cb_sahi_std.grid(row=sr, column=0, columnspan=2, sticky='w', padx=8, pady=(6, 0)); sr += 1
+		Tooltip(cb_sahi_std, tooltip_text('sahi_perform_standard_pred'))
+		help_line(sf, 'sahi_perform_standard_pred').grid(row=sr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); sr += 1
+
+		_sf_spin('Auto-skip below frame/tile ratio', 'sahi_min_dim_factor', self.sahi_min_dim_factor_var, 1.0, 20.0, 0.1, width=6)
+
+		def _update_sahi_rows(*_):
+			if self.sahi_enabled_static_var.get() or self.sahi_enabled_motion_var.get():
+				self.sahi_frame.grid()
+			else:
+				self.sahi_frame.grid_remove()
+		self.sahi_enabled_static_var.trace_add('write', lambda *a: _update_sahi_rows())
+		self.sahi_enabled_motion_var.trace_add('write', lambda *a: _update_sahi_rows())
+		_update_sahi_rows()
 
 		# Activity budget parameters
 		self.ab_min_presence_seconds_var = tk.DoubleVar(value=30.0)
@@ -1450,6 +1632,100 @@ class SettingsEditorApp(tk.Tk):
 		Tooltip(cb_fb, tooltip_text('drone_fallback_smoothing'))
 		help_line(tab4, 'drone_fallback_smoothing').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
 
+		# Offline tracklet stitching (runs last, on the drone-corrected CSV)
+		ttk.Separator(tab4, orient='horizontal').grid(row=k, column=0, columnspan=2, sticky='ew', padx=8, pady=(10, 6)); k += 1
+		ttk.Label(tab4, text='Offline tracklet stitching', style='Section.TLabel').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8); k += 1
+		ttk.Label(tab4,
+			text=('Re-links tracklets the online tracker broke apart at an occlusion, so one animal '
+				  'keeps one identity across the clip. Runs at the very end of the pipeline, after '
+				  'drone correction, on the stabilised coordinates. The link decision is a likelihood '
+				  'ratio against "this is simply a new animal", so the threshold is fixed at 0 and the '
+				  'prior below is what you tune.'),
+			style='Help.TLabel', wraplength=640, justify='left').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 4)); k += 1
+
+		cb_stitch = ttk.Checkbutton(tab4, text='Enable tracklet stitching  ' + 'ⓘ',
+			variable=self.stitch_enabled_var, command=self._set_dirty)
+		cb_stitch.grid(row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0)); k += 1
+		Tooltip(cb_stitch, tooltip_text('stitch_enabled'))
+		help_line(tab4, 'stitch_enabled').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+
+		ttk.Label(tab4, text='Link decision', style='Section.TLabel').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(8, 0)); k += 1
+		_track_spin('Link prior (log-odds)', 'stitch_link_prior_log_odds', self.stitch_prior_log_odds_var, -20.0, 20.0, 0.5, width=6)
+		_track_spin('Max gap (s)', 'stitch_max_gap_seconds', self.stitch_max_gap_var, 0.0, 600.0, 0.5, width=6)
+		_track_spin('Gap prior time constant (s)', 'stitch_gap_prior_seconds', self.stitch_gap_prior_var, 0.1, 600.0, 0.5, width=6)
+		_track_spin('Extrapolation horizon (s)', 'stitch_extrapolation_horizon_seconds', self.stitch_extrap_horizon_var, 0.0, 60.0, 0.1, width=6)
+
+		ttk.Label(tab4, text='Speed gates', style='Section.TLabel').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(8, 0)); k += 1
+		_track_spin('Max speed (m/s) — needs metric geometry', 'stitch_max_speed_m_per_s', self.stitch_max_speed_ms_var, 0.0, 100.0, 0.5, width=6)
+		_track_spin('Speed gate margin', 'stitch_speed_gate_margin', self.stitch_speed_margin_var, 1.0, 10.0, 0.1, width=6)
+		_track_spin('Max speed (px/frame) — fallback', 'stitch_max_speed_px_per_frame', self.stitch_max_speed_px_var, 0.0, 5000.0, 5.0)
+
+		ttk.Label(tab4, text='Filtering & reporting', style='Section.TLabel').grid(
+			row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(8, 0)); k += 1
+		_track_spin('Min tracklet length (samples)', 'stitch_min_tracklet_len', self.stitch_min_len_var, 1, 100000)
+
+		cb_qg = ttk.Checkbutton(tab4, text='Refuse links on unreliable positions  ' + 'ⓘ',
+			variable=self.stitch_quality_gate_var, command=self._set_dirty)
+		cb_qg.grid(row=k, column=0, columnspan=2, sticky='w', padx=8, pady=(6, 0)); k += 1
+		Tooltip(cb_qg, tooltip_text('stitch_quality_gate'))
+		help_line(tab4, 'stitch_quality_gate').grid(row=k, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); k += 1
+
+		_track_spin('Expected group size (0 = unknown)', 'expected_group_size', self.expected_group_size_var, 0, 10000)
+
+		# TAB: Metric geometry (pixels -> ground-plane metres)
+		tab_metric = self._scroll_tab(notebook, 'Metric')
+		mr = 0
+		ttk.Label(tab_metric, text='Metric geometry', style='Section.TLabel').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 2)); mr += 1
+		ttk.Label(tab_metric,
+			text=('Turns tracked pixel positions into real ground coordinates in metres, using the '
+				  'clip\'s flight log for camera height and pitch. Runs after drone correction and '
+				  'appends X_m, Y_m, Xs_m, Ys_m and metric_quality to each tracking CSV. Clips with '
+				  'no flight log keep pixels only. Everything expressed in metres downstream — '
+				  'interaction distances, speeds in m/s, the stitcher\'s metric speed gate — depends '
+				  'on this.'),
+			style='Help.TLabel', wraplength=660, justify='left').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); mr += 1
+
+		cb_metric = ttk.Checkbutton(tab_metric, text='Enable metric geometry  ' + 'ⓘ',
+			variable=self.metric_enabled_var, command=self._set_dirty)
+		cb_metric.grid(row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0)); mr += 1
+		Tooltip(cb_metric, tooltip_text('metric_enabled'))
+		help_line(tab_metric, 'metric_enabled').grid(row=mr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); mr += 1
+
+		def _mt_spin(label, key, var, lo, hi, inc, width=8):
+			nonlocal mr
+			help_label(tab_metric, label, key).grid(row=mr, column=0, sticky='w', padx=8, pady=(6, 0))
+			ttk.Spinbox(tab_metric, from_=lo, to=hi, increment=inc, textvariable=var, width=width,
+				command=self._set_dirty).grid(row=mr, column=1, sticky='w', padx=8); mr += 1
+			help_line(tab_metric, key).grid(row=mr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); mr += 1
+
+		ttk.Label(tab_metric, text='Camera', style='Section.TLabel').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); mr += 1
+		_mt_spin('Focal length (mm)', 'metric_focal_len_mm', self.metric_focal_len_var, 1.0, 500.0, 0.1)
+		_mt_spin('Sensor width (mm)', 'metric_sensor_width_mm', self.metric_sensor_width_var, 1.0, 100.0, 0.1)
+		ttk.Label(tab_metric,
+			text=('Both come from the drone\'s spec sheet and must describe the drone that actually '
+				  'shot the clips. A per-drone checkerboard calibration can override them with a '
+				  'metric_fpx_<DroneToken> key in the INI; those keys are kept as-is and are not '
+				  'edited here.'),
+			style='Help.TLabel', wraplength=660, justify='left').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); mr += 1
+
+		ttk.Label(tab_metric, text='Reliability flags', style='Section.TLabel').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); mr += 1
+		_mt_spin('Max camera roll (deg)', 'metric_roll_max_deg', self.metric_roll_max_var, 0.0, 45.0, 0.5, width=6)
+		_mt_spin('Horizon margin (px)', 'metric_horizon_margin_px', self.metric_horizon_margin_var, 0.0, 2000.0, 5.0)
+
+		ttk.Label(tab_metric, text='Scale cross-check', style='Section.TLabel').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); mr += 1
+		_mt_spin('Assumed body length (m)', 'metric_assumed_body_length_m', self.metric_body_length_var, 0.1, 20.0, 0.1, width=6)
+		_mt_spin('Scale tolerance', 'metric_scale_tolerance', self.metric_scale_tolerance_var, 0.0, 2.0, 0.05, width=6)
+
 		# TAB: Interaction features / graph (TASK 4 primary output)
 		_help_font = ('TkDefaultFont', 8, 'italic')
 		tab_int = self._scroll_tab(notebook, 'Interaction')
@@ -1463,6 +1739,12 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Label(tab_int, text='Requires metric geometry (Metric tab) — everything below is in real metres, and videos without it are skipped. Foal/adult comes from the age classifier, not from apparent size.',
 			font=_help_font, foreground='#a05000').grid(
 			row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6)); ir += 1
+
+		cb_int_graph = ttk.Checkbutton(tab_int, text='Build the interaction graph automatically after tracking  ' + 'ⓘ',
+			variable=self.interaction_graph_enabled_var, command=self._set_dirty)
+		cb_int_graph.grid(row=ir, column=0, columnspan=2, sticky='w', padx=8, pady=(4, 0)); ir += 1
+		Tooltip(cb_int_graph, tooltip_text('interaction_graph_enabled'))
+		help_line(tab_int, 'interaction_graph_enabled').grid(row=ir, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); ir += 1
 
 		help_label(tab_int, 'Max interaction distance (m)', 'complex_max_dist').grid(row=ir, column=0, sticky='w', padx=8, pady=(6, 0))
 		ttk.Spinbox(tab_int, from_=0.5, to=500.0, increment=1.0,
@@ -1513,6 +1795,12 @@ class SettingsEditorApp(tk.Tk):
 		# TAB: Complex Behaviours (label list + model selectors)
 		tab_cb = self._scroll_tab(notebook, 'Complex Behaviours')
 
+		cb_cx_run = ttk.Checkbutton(tab_cb, text='Classify complex behaviours automatically after the interaction graph  ' + 'ⓘ',
+			variable=self.complex_classify_enabled_var, command=self._set_dirty)
+		cb_cx_run.pack(anchor='w', padx=8, pady=(10, 0))
+		Tooltip(cb_cx_run, tooltip_text('complex_classify_enabled'))
+		help_line(tab_cb, 'complex_classify_enabled', wraplength=640).pack(anchor='w', padx=24, pady=(0, 6))
+
 		self.complex_editor = ComplexLabelEditor(tab_cb, on_change=self._set_dirty)
 		self.complex_editor.pack(fill='x', padx=8, pady=(10, 4), anchor='w')
 		ttk.Label(tab_cb,
@@ -1559,6 +1847,37 @@ class SettingsEditorApp(tk.Tk):
 				 'Behavioural synchrony above this suggests synchronised rest/graze.', 'complex_synchrony_high')
 		_thr_row(6, 'Active-learning top-K', self.complex_candidate_topk_var, 1, 100000, 1,
 				 'Number of most-uncertain windows surfaced as candidates.', 'complex_candidate_topk')
+
+		# Sequence-model hyper-parameters. Only consulted when the model type is
+		# lstm or transformer, so the frame follows that choice instead of
+		# presenting eight irrelevant knobs to a baseline project.
+		self.complex_deep_frame = ttk.LabelFrame(tab_cb, text='Sequence model (lstm / transformer)')
+		self.complex_deep_frame.pack(fill='x', padx=8, pady=(10, 4))
+		df = self.complex_deep_frame
+		dr = 0
+		def _deep_row(label, key, var, lo, hi, inc, width=8):
+			nonlocal dr
+			help_label(df, label, key).grid(row=dr, column=0, sticky='w', padx=6, pady=(4, 0))
+			ttk.Spinbox(df, from_=lo, to=hi, increment=inc, textvariable=var, width=width,
+				command=self._set_dirty).grid(row=dr, column=1, sticky='w', padx=6); dr += 1
+			help_line(df, key, wraplength=520).grid(row=dr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 2)); dr += 1
+
+		_deep_row('Sequence steps', 'complex_seq_steps', self.complex_seq_steps_var, 1, 1000, 1)
+		_deep_row('Epochs', 'complex_deep_epochs', self.complex_deep_epochs_var, 1, 10000, 1)
+		_deep_row('Hidden units', 'complex_deep_hidden', self.complex_deep_hidden_var, 1, 4096, 8)
+		_deep_row('Layers', 'complex_deep_layers', self.complex_deep_layers_var, 1, 32, 1)
+		_deep_row('Attention heads (transformer)', 'complex_deep_heads', self.complex_deep_heads_var, 1, 64, 1)
+		_deep_row('Dropout', 'complex_deep_dropout', self.complex_deep_dropout_var, 0.0, 0.95, 0.05, width=6)
+		_deep_row('Learning rate', 'complex_deep_lr', self.complex_deep_lr_var, 0.00001, 1.0, 0.0005, width=10)
+		_deep_row('Batch size', 'complex_deep_batch', self.complex_deep_batch_var, 1, 4096, 1)
+
+		def _update_complex_deep_rows(*_):
+			if self.complex_model_type_var.get() in ('lstm', 'transformer'):
+				self.complex_deep_frame.pack(fill='x', padx=8, pady=(10, 4))
+			else:
+				self.complex_deep_frame.pack_forget()
+		self.complex_model_type_var.trace_add('write', lambda *a: _update_complex_deep_rows())
+		_update_complex_deep_rows()
 
 		# TAB 6: Display
 		# Scrollable: the box & label style section makes this tab taller than the window.
@@ -1669,6 +1988,19 @@ class SettingsEditorApp(tk.Tk):
 		cb_ag.pack(anchor='w', padx=8)
 		Tooltip(cb_ag, tooltip_text('show_age'))
 		ttk.Label(tab5, text=PARAM_HELP['show_age']['short'], style='Help.TLabel').pack(anchor='w', padx=24, pady=(0, 4))
+
+		# Training metrics printed by the launcher after a training run.
+		# Display-only: these change nothing in training or inference.
+		ttk.Label(tab5, text='Training metrics shown in the launcher', style='Section.TLabel').pack(
+			anchor='w', padx=8, pady=(14, 2))
+		ttk.Label(tab5,
+			text=PARAM_HELP['show_metrics']['what'],
+			style='Help.TLabel', wraplength=660, justify='left').pack(anchor='w', padx=8, pady=(0, 4))
+		metric_grid = ttk.Frame(tab5)
+		metric_grid.pack(anchor='w', fill='x', padx=8, pady=(0, 8))
+		for i, (mkey, mlabel, _default) in enumerate(self.metric_display_specs):
+			ttk.Checkbutton(metric_grid, text=mlabel, variable=self.metric_display_vars[mkey],
+				command=self._set_dirty).grid(row=i // 3, column=i % 3, sticky='w', padx=(0, 18), pady=1)
 
 		# TAB 7: Activity Budget
 		tab_ab = ttk.Frame(notebook)
@@ -1887,6 +2219,65 @@ class SettingsEditorApp(tk.Tk):
 		self.complex_polarisation_high_var.set(float(d.get('complex_polarisation_high', fallback='0.7')))
 		self.complex_synchrony_high_var.set(float(d.get('complex_synchrony_high', fallback='0.7')))
 		self.complex_candidate_topk_var.set(int(float(d.get('complex_candidate_topk', fallback='50'))))
+
+		# sequence-model hyper-parameters (lstm / transformer)
+		self.complex_seq_steps_var.set(int(float(d.get('complex_seq_steps', fallback='8'))))
+		self.complex_deep_epochs_var.set(int(float(d.get('complex_deep_epochs', fallback='60'))))
+		self.complex_deep_hidden_var.set(int(float(d.get('complex_deep_hidden', fallback='64'))))
+		self.complex_deep_layers_var.set(int(float(d.get('complex_deep_layers', fallback='1'))))
+		self.complex_deep_heads_var.set(int(float(d.get('complex_deep_heads', fallback='4'))))
+		self.complex_deep_dropout_var.set(float(d.get('complex_deep_dropout', fallback='0.2')))
+		self.complex_deep_lr_var.set(float(d.get('complex_deep_lr', fallback='0.001')))
+		self.complex_deep_batch_var.set(int(float(d.get('complex_deep_batch', fallback='16'))))
+
+		# end-of-pipeline auto-run switches
+		self.interaction_graph_enabled_var.set(self._str_to_bool(d.get('interaction_graph_enabled', fallback='true')))
+		self.complex_classify_enabled_var.set(self._str_to_bool(d.get('complex_classify_enabled', fallback='true')))
+
+		# training controls
+		self.train_patience_var.set(int(float(d.get('train_patience', fallback='30'))))
+		self.motion_disable_color_aug_var.set(self._str_to_bool(d.get('motion_disable_color_aug', fallback='true')))
+		self.save_empty_frames_var.set(self._str_to_bool(d.get('save_empty_frames', fallback='true')))
+
+		# SAHI sliced inference
+		self.sahi_enabled_static_var.set(self._str_to_bool(d.get('sahi_enabled_static', fallback='false')))
+		self.sahi_enabled_motion_var.set(self._str_to_bool(d.get('sahi_enabled_motion', fallback='false')))
+		self.sahi_slice_height_var.set(int(float(d.get('sahi_slice_height', fallback='640'))))
+		self.sahi_slice_width_var.set(int(float(d.get('sahi_slice_width', fallback='640'))))
+		self.sahi_overlap_height_var.set(float(d.get('sahi_overlap_height_ratio', fallback='0.2')))
+		self.sahi_overlap_width_var.set(float(d.get('sahi_overlap_width_ratio', fallback='0.2')))
+		self.sahi_postprocess_type_var.set(d.get('sahi_postprocess_type', fallback='NMS'))
+		self.sahi_match_metric_var.set(d.get('sahi_postprocess_match_metric', fallback='IOS'))
+		self.sahi_match_threshold_var.set(float(d.get('sahi_postprocess_match_threshold', fallback='0.5')))
+		self.sahi_standard_pred_var.set(self._str_to_bool(d.get('sahi_perform_standard_pred', fallback='false')))
+		self.sahi_min_dim_factor_var.set(float(d.get('sahi_min_dim_factor', fallback='1.5')))
+
+		# metric geometry
+		self.metric_enabled_var.set(self._str_to_bool(d.get('metric_enabled', fallback='false')))
+		self.metric_focal_len_var.set(float(d.get('metric_focal_len_mm', fallback='24.0')))
+		self.metric_sensor_width_var.set(float(d.get('metric_sensor_width_mm', fallback='36.0')))
+		self.metric_roll_max_var.set(float(d.get('metric_roll_max_deg', fallback='3.0')))
+		self.metric_horizon_margin_var.set(float(d.get('metric_horizon_margin_px', fallback='50')))
+		self.metric_body_length_var.set(float(d.get('metric_assumed_body_length_m', fallback='2.2')))
+		self.metric_scale_tolerance_var.set(float(d.get('metric_scale_tolerance', fallback='0.25')))
+
+		# offline tracklet stitching
+		self.stitch_enabled_var.set(self._str_to_bool(d.get('stitch_enabled', fallback='false')))
+		self.stitch_max_speed_px_var.set(float(d.get('stitch_max_speed_px_per_frame', fallback='60')))
+		self.stitch_max_speed_ms_var.set(float(d.get('stitch_max_speed_m_per_s', fallback='17.0')))
+		self.stitch_speed_margin_var.set(float(d.get('stitch_speed_gate_margin', fallback='1.5')))
+		self.stitch_max_gap_var.set(float(d.get('stitch_max_gap_seconds', fallback='5')))
+		self.stitch_gap_prior_var.set(float(d.get('stitch_gap_prior_seconds', fallback='5')))
+		self.stitch_extrap_horizon_var.set(float(d.get('stitch_extrapolation_horizon_seconds', fallback='1')))
+		self.stitch_prior_log_odds_var.set(float(d.get('stitch_link_prior_log_odds', fallback='-5')))
+		self.stitch_min_len_var.set(int(float(d.get('stitch_min_tracklet_len', fallback='1'))))
+		self.stitch_quality_gate_var.set(self._str_to_bool(d.get('stitch_quality_gate', fallback='true')))
+		self.expected_group_size_var.set(int(float(d.get('expected_group_size', fallback='0') or '0')))
+
+		# launcher training-metric visibility
+		for _mkey, _mlabel, _mdefault in self.metric_display_specs:
+			self.metric_display_vars[_mkey].set(
+				self._str_to_bool(d.get(_mkey, fallback=str(_mdefault).lower())))
 
 		if 'kalman' in self.cfg:
 			ksec = self.cfg['kalman']
@@ -2269,8 +2660,13 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		new_default['motion_blocks_static'] = str(self.motion_blocks_static_var.get()).lower()
 		new_default['static_blocks_motion'] = str(self.static_blocks_motion_var.get()).lower()
-		new_default['ignore_secondary'] = ''  # preserve empty default unless you expose it in GUI
-		new_default['save_empty_frames'] = 'true'  # preserve default unless exposed
+		# ignore_secondary is a LEGACY key: under the shared-pool schema the set of
+		# primaries without secondaries is derived from secondary_map, and this key
+		# is only consulted by behaveai_config's legacy fallback (no secondary pool
+		# at all). Written empty so a current project never has two sources of
+		# truth; edit the secondary map instead.
+		new_default['ignore_secondary'] = ''
+		new_default['save_empty_frames'] = str(self.save_empty_frames_var.get()).lower()
 		new_default['dominant_source'] = self.dominant_source_var.get()
 		new_default['scale_factor'] = '1.0'
 		new_default['line_thickness'] = str(self.line_thickness_var.get())
@@ -2294,6 +2690,10 @@ class SettingsEditorApp(tk.Tk):
 		new_default['halo_color'] = self.halo_color_var.get()
 		new_default['show_species'] = str(self.show_species_var.get()).lower()
 		new_default['show_age'] = str(self.show_age_var.get()).lower()
+
+		# launcher training-metric visibility (display only)
+		for _mkey, _mlabel, _mdefault in self.metric_display_specs:
+			new_default[_mkey] = str(self.metric_display_vars[_mkey].get()).lower()
 
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
 
@@ -2350,6 +2750,23 @@ class SettingsEditorApp(tk.Tk):
 		new_default['primary_conf_thresh'] = str(self.primary_conf_var.get())
 		new_default['secondary_conf_thresh'] = str(self.secondary_conf_var.get())
 
+		# training controls
+		new_default['train_patience'] = str(self.train_patience_var.get())
+		new_default['motion_disable_color_aug'] = str(self.motion_disable_color_aug_var.get()).lower()
+
+		# SAHI sliced inference
+		new_default['sahi_enabled_static'] = str(self.sahi_enabled_static_var.get()).lower()
+		new_default['sahi_enabled_motion'] = str(self.sahi_enabled_motion_var.get()).lower()
+		new_default['sahi_slice_height'] = str(self.sahi_slice_height_var.get())
+		new_default['sahi_slice_width'] = str(self.sahi_slice_width_var.get())
+		new_default['sahi_overlap_height_ratio'] = str(self.sahi_overlap_height_var.get())
+		new_default['sahi_overlap_width_ratio'] = str(self.sahi_overlap_width_var.get())
+		new_default['sahi_postprocess_type'] = self.sahi_postprocess_type_var.get()
+		new_default['sahi_postprocess_match_metric'] = self.sahi_match_metric_var.get()
+		new_default['sahi_postprocess_match_threshold'] = str(self.sahi_match_threshold_var.get())
+		new_default['sahi_perform_standard_pred'] = str(self.sahi_standard_pred_var.get()).lower()
+		new_default['sahi_min_dim_factor'] = str(self.sahi_min_dim_factor_var.get())
+
 		# tracking
 		new_default['tracker_type'] = self.tracker_type_var.get()
 		new_default['tracker_track_high_thresh'] = str(self.tracker_high_var.get())
@@ -2377,6 +2794,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['ab_min_classified_frames'] = str(self.ab_min_classified_var.get())
 
 		# interaction features / graph
+		new_default['interaction_graph_enabled'] = str(self.interaction_graph_enabled_var.get()).lower()
 		new_default['complex_max_interaction_distance_m'] = str(self.complex_max_dist_var.get())
 		new_default['complex_min_duration_frames'] = str(self.complex_min_duration_var.get())
 		new_default['complex_contact_iou_thresh'] = str(self.complex_contact_iou_var.get())
@@ -2386,6 +2804,7 @@ class SettingsEditorApp(tk.Tk):
 		new_default['interaction_weight_metric'] = self.interaction_weight_var.get()
 
 		# complex behaviours list + model selectors
+		new_default['complex_classify_enabled'] = str(self.complex_classify_enabled_var.get()).lower()
 		cb_items = self.complex_editor.get()
 		new_default['complex_behaviours'] = list_to_field([n for n, _ in cb_items])
 		new_default['complex_behaviours_hotkeys'] = list_to_field([h for _, h in cb_items])
@@ -2398,51 +2817,52 @@ class SettingsEditorApp(tk.Tk):
 		new_default['complex_polarisation_high'] = str(self.complex_polarisation_high_var.get())
 		new_default['complex_synchrony_high'] = str(self.complex_synchrony_high_var.get())
 		new_default['complex_candidate_topk'] = str(self.complex_candidate_topk_var.get())
+		new_default['complex_seq_steps'] = str(self.complex_seq_steps_var.get())
+		new_default['complex_deep_epochs'] = str(self.complex_deep_epochs_var.get())
+		new_default['complex_deep_hidden'] = str(self.complex_deep_hidden_var.get())
+		new_default['complex_deep_layers'] = str(self.complex_deep_layers_var.get())
+		new_default['complex_deep_heads'] = str(self.complex_deep_heads_var.get())
+		new_default['complex_deep_dropout'] = str(self.complex_deep_dropout_var.get())
+		new_default['complex_deep_lr'] = str(self.complex_deep_lr_var.get())
+		new_default['complex_deep_batch'] = str(self.complex_deep_batch_var.get())
 
-		# ---- preserve metric-geometry keys (not yet exposed as widgets) ----
-		# on_save rebuilds DEFAULT from scratch, so carry forward any metric_*
-		# keys already on disk (incl. per-drone metric_fpx_* checkerboard
-		# overrides) so a settings save never silently drops them.
+		# metric geometry
+		new_default['metric_enabled'] = str(self.metric_enabled_var.get()).lower()
+		new_default['metric_focal_len_mm'] = str(self.metric_focal_len_var.get())
+		new_default['metric_sensor_width_mm'] = str(self.metric_sensor_width_var.get())
+		new_default['metric_roll_max_deg'] = str(self.metric_roll_max_var.get())
+		new_default['metric_horizon_margin_px'] = str(self.metric_horizon_margin_var.get())
+		new_default['metric_assumed_body_length_m'] = str(self.metric_body_length_var.get())
+		new_default['metric_scale_tolerance'] = str(self.metric_scale_tolerance_var.get())
+
+		# offline tracklet stitching
+		new_default['stitch_enabled'] = str(self.stitch_enabled_var.get()).lower()
+		new_default['stitch_max_speed_px_per_frame'] = str(self.stitch_max_speed_px_var.get())
+		new_default['stitch_max_speed_m_per_s'] = str(self.stitch_max_speed_ms_var.get())
+		new_default['stitch_speed_gate_margin'] = str(self.stitch_speed_margin_var.get())
+		new_default['stitch_max_gap_seconds'] = str(self.stitch_max_gap_var.get())
+		new_default['stitch_gap_prior_seconds'] = str(self.stitch_gap_prior_var.get())
+		new_default['stitch_extrapolation_horizon_seconds'] = str(self.stitch_extrap_horizon_var.get())
+		new_default['stitch_link_prior_log_odds'] = str(self.stitch_prior_log_odds_var.get())
+		new_default['stitch_min_tracklet_len'] = str(self.stitch_min_len_var.get())
+		new_default['stitch_quality_gate'] = str(self.stitch_quality_gate_var.get()).lower()
+		new_default['expected_group_size'] = str(self.expected_group_size_var.get())
+
+		# ---- carry forward keys that have no widget by design ----
+		# Everything the GUI edits is rebuilt from scratch above, so anything not
+		# rebuilt would be dropped. Two families must survive a save:
+		#   metric_fpx_<DroneToken> : per-drone checkerboard focal lengths, one key
+		#       per drone in the fleet — a list, not a fixed field, so it is edited
+		#       in the INI and only preserved here.
+		#   <species>_* class/hotkey/colour keys for species the user never opened
+		#       this session are already handled by _all_species_states() above.
 		try:
 			prev_default = dict(self.cfg['DEFAULT']) if 'DEFAULT' in self.cfg else {}
 		except Exception:
 			prev_default = {}
-		_metric_defaults = {
-			'metric_enabled': 'false',
-			'metric_focal_len_mm': '24.0',
-			'metric_sensor_width_mm': '36.0',
-			'metric_roll_max_deg': '3.0',
-			'metric_horizon_margin_px': '50',
-		}
-		for mk, mv in _metric_defaults.items():
-			new_default[mk] = prev_default.get(mk, mv)
 		for mk, mv in prev_default.items():
 			if mk.startswith('metric_fpx_'):
 				new_default[mk] = mv
-
-		# ---- preserve training-control keys (no GUI widget yet) ----
-		# train_patience = early-stopping patience (epochs is the cap);
-		# motion_disable_color_aug = train the motion false-colour stream with HSV
-		# augmentation off (see BehaveAI_train_worker.py). Preserved so a GUI save
-		# never drops them.
-		_train_ctrl_defaults = {
-			'train_patience': '30',
-			'motion_disable_color_aug': 'true',
-		}
-		for _tck, _tcv in _train_ctrl_defaults.items():
-			new_default[_tck] = prev_default.get(_tck, _tcv)
-
-		# ---- preserve end-of-pipeline auto-run switches (no GUI widget yet) ----
-		# interaction_graph_enabled / complex_classify_enabled gate the interaction
-		# graph and complex-behaviour classification that run before the activity
-		# budget. on_save rebuilds DEFAULT from scratch, so carry a user's on-disk
-		# choice forward instead of silently reverting it to the default.
-		_pipeline_switch_defaults = {
-			'interaction_graph_enabled': 'true',
-			'complex_classify_enabled': 'true',
-		}
-		for _pk, _pv in _pipeline_switch_defaults.items():
-			new_default[_pk] = prev_default.get(_pk, _pv)
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
