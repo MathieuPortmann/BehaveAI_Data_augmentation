@@ -416,8 +416,14 @@ try:
 	# (default), the motion detector and motion secondary classifier are trained
 	# with hsv_h/hsv_s/hsv_v = 0; geometric/occlusion augs (mosaic, erasing, flip,
 	# translate, scale) stay on. The static stream keeps the Ultralytics defaults.
+	# auto_augment=None matters for the CLASSIFICATION task only (the secondary
+	# crop classifiers): Ultralytics defaults it to 'randaugment', whose op pool
+	# includes Color/Brightness/Contrast/Sharpness/Posterize/Solarize — i.e. it
+	# re-introduces through the back door exactly the colour jitter hsv_*=0 just
+	# removed. Detection training ignores the key.
 	motion_disable_color_aug = config['DEFAULT'].get('motion_disable_color_aug', 'true').lower() == 'true'
-	motion_train_overrides = {'hsv_h': 0.0, 'hsv_s': 0.0, 'hsv_v': 0.0} if motion_disable_color_aug else None
+	motion_train_overrides = {'hsv_h': 0.0, 'hsv_s': 0.0, 'hsv_v': 0.0,
+		'auto_augment': None} if motion_disable_color_aug else None
 
 	if hierarchical_mode:
 		secondary_static_project_path = species_folder('model_secondary_static', species_list[0], species_list)
