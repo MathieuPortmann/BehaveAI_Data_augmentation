@@ -922,6 +922,14 @@ metric_horizon_margin_px = 50
 # by more than metric_scale_tolerance, the clip is flagged 'uncertain'.
 metric_assumed_body_length_m = 2.2
 metric_scale_tolerance = 0.25
+# Ground-plane stability check (REPORT-ONLY: it warns in the run log, it does not
+# change metric_quality). The scale cross-check above fits the clip as a whole and
+# the flight log only describes the drone, so sloped ground under a steady gimbal
+# passes both. Fitting the ground plane in sliding windows catches it: y_horizon
+# moves when the ground plane does. Flags the clip when y_horizon travels more than
+# this fraction of the frame height between windows.
+metric_geometry_drift_frac = 0.25
+metric_geometry_window_s = 10.0
 # Optional per-drone pixel-focal overrides from a checkerboard calibration, e.g.:
 # metric_fpx_Mini4Pro = 2560.0
 

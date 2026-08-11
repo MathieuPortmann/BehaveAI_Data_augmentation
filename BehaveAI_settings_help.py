@@ -1109,6 +1109,28 @@ PARAM_HELP = {
         "influence": "Tighter catches calibration errors earlier but cries wolf on mixed-age herds; "
                      "looser lets a genuinely wrong scale pass unnoticed.",
     },
+    "metric_geometry_drift_frac": {
+        "short": "How far the ground plane may move across the clip before a warning.",
+        "what": "The scale cross-check above fits the whole clip at once, and the flight log only "
+                "describes the drone — so ground that SLOPES under a perfectly steady gimbal passes "
+                "both. This check refits the ground plane in sliding windows: the horizon row moves "
+                "when the ground plane does. It compares how far that row travels between windows "
+                "against this fraction of the frame height, and reports alongside it a robust spread "
+                "that says whether the travel is a steady drift or a few bad windows. It only warns "
+                "in the run log; it never changes metric_quality.",
+        "influence": "Tighter flags more clips as non-flat. Herd scenes where the animals bunch at "
+                     "one depth can trip it even when the geometry is fine, which is why it warns "
+                     "rather than downgrades — confirm a flagged clip by hand with "
+                     "horizon_geometry.py --check-drift before discarding its metres.",
+    },
+    "metric_geometry_window_s": {
+        "short": "Length of each sliding window used by that stability check, in seconds.",
+        "what": "Each window is fitted on its own. Short windows react to a fast pitch change but "
+                "hold fewer animals and less depth range, so they are more easily ill-conditioned; "
+                "long windows are steadier but blur a drift that happens inside one.",
+        "influence": "Raise it on sparse herds where 10 s does not contain enough animals; lower it "
+                     "when hunting a short, sharp geometry change.",
+    },
 
     # ---------------- SAHI sliced inference ----------------
     "sahi_enabled_static": {

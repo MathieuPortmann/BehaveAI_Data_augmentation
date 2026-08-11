@@ -692,6 +692,8 @@ class SettingsEditorApp(tk.Tk):
 		self.metric_horizon_margin_var   = tk.DoubleVar(value=50.0)
 		self.metric_body_length_var      = tk.DoubleVar(value=2.2)
 		self.metric_scale_tolerance_var  = tk.DoubleVar(value=0.25)
+		self.metric_geom_drift_var       = tk.DoubleVar(value=0.25)
+		self.metric_geom_window_var      = tk.DoubleVar(value=10.0)
 
 		# Offline tracklet stitching
 		self.stitch_enabled_var          = tk.BooleanVar(value=False)
@@ -1729,6 +1731,20 @@ class SettingsEditorApp(tk.Tk):
 		_mt_spin('Assumed body length (m)', 'metric_assumed_body_length_m', self.metric_body_length_var, 0.1, 20.0, 0.1, width=6)
 		_mt_spin('Scale tolerance', 'metric_scale_tolerance', self.metric_scale_tolerance_var, 0.0, 2.0, 0.05, width=6)
 
+		ttk.Label(tab_metric, text='Ground-plane stability (warning only)', style='Section.TLabel').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); mr += 1
+		_mt_spin('Horizon drift tolerance', 'metric_geometry_drift_frac', self.metric_geom_drift_var, 0.0, 2.0, 0.05, width=6)
+		_mt_spin('Window length (s)', 'metric_geometry_window_s', self.metric_geom_window_var, 1.0, 300.0, 1.0, width=6)
+		ttk.Label(tab_metric,
+			text=('The two checks above cannot see sloped ground under a steady gimbal: the flight log '
+				  'describes only the drone, and the scale cross-check fits the clip as a whole. This one '
+				  'refits the ground plane in sliding windows and watches the horizon row move. It writes '
+				  'a warning in the run log and nothing else — no row is downgraded — because herd scenes '
+				  'with the animals bunched at one depth can trip it while the geometry is fine. Confirm a '
+				  'flagged clip with `horizon_geometry.py <csv> --check-drift` before discarding its metres.'),
+			style='Help.TLabel', wraplength=660, justify='left').grid(
+			row=mr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); mr += 1
+
 		# TAB: Interaction features / graph (TASK 4 primary output)
 		_help_font = ('TkDefaultFont', 8, 'italic')
 		tab_int = self._scroll_tab(notebook, 'Interaction')
@@ -2269,6 +2285,8 @@ class SettingsEditorApp(tk.Tk):
 		self.metric_horizon_margin_var.set(float(d.get('metric_horizon_margin_px', fallback='50')))
 		self.metric_body_length_var.set(float(d.get('metric_assumed_body_length_m', fallback='2.2')))
 		self.metric_scale_tolerance_var.set(float(d.get('metric_scale_tolerance', fallback='0.25')))
+		self.metric_geom_drift_var.set(float(d.get('metric_geometry_drift_frac', fallback='0.25')))
+		self.metric_geom_window_var.set(float(d.get('metric_geometry_window_s', fallback='10.0')))
 
 		# offline tracklet stitching
 		self.stitch_enabled_var.set(self._str_to_bool(d.get('stitch_enabled', fallback='false')))
@@ -2843,6 +2861,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['metric_horizon_margin_px'] = str(self.metric_horizon_margin_var.get())
 		new_default['metric_assumed_body_length_m'] = str(self.metric_body_length_var.get())
 		new_default['metric_scale_tolerance'] = str(self.metric_scale_tolerance_var.get())
+		new_default['metric_geometry_drift_frac'] = str(self.metric_geom_drift_var.get())
+		new_default['metric_geometry_window_s'] = str(self.metric_geom_window_var.get())
 
 		# offline tracklet stitching
 		new_default['stitch_enabled'] = str(self.stitch_enabled_var.get()).lower()

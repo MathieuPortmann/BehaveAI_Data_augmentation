@@ -99,6 +99,11 @@ def load_metric_config(config_path):
 		# always used to call a calibration plausible.
 		'assumed_body_length_m': float(d.get('metric_assumed_body_length_m', '2.2')),
 		'scale_tolerance':  float(d.get('metric_scale_tolerance', '0.25')),
+		# Ground-plane stability check (report-only, see geometry_drift): how far
+		# y_horizon may move between sliding windows, as a fraction of frame
+		# height, before the clip is called non-flat; and the window length.
+		'geometry_drift_frac': float(d.get('metric_geometry_drift_frac', '0.25')),
+		'geometry_window_s': float(d.get('metric_geometry_window_s', '10.0')),
 		'fpx_overrides':    fpx_overrides,
 	}
 
@@ -263,6 +268,75 @@ def scale_disagreement(tracking_csv_path, flightlog, f_px, width, height,
 			f"{assumed_body_length_m:.2f} m)"), float(ratio)
 
 
+def geometry_drift(tracking_csv_path, frame_height, fps, window_seconds=10.0,
+				   drift_thresh_frac=0.25, ill_spread_frac=0.25):
+	"""Is ONE ground-plane fit valid for the whole clip? Asks the ANIMALS, not the log.
+
+	This is the third guard, and the only one that can see the case the other two
+	miss: sloped terrain under a perfectly steady gimbal. telemetry_drift() reads
+	the flight log, which reports a rock-steady drone; scale_disagreement() fits
+	the whole clip at once, so a geometry that changes over the clip can average
+	back into the tolerance band. Fitting the size-vs-image-row relation in
+	sliding windows exposes it: y_horizon moves when the ground plane does.
+
+	REPORT-ONLY by design — it prints and returns a reason, but the caller does
+	NOT downgrade metric_quality on it. Known false-alarm mode: on herd scenes
+	('Multi-Harems') the animals cluster at one depth inside a 10 s window, which
+	destabilises the LOCAL fit while the global geometry is fine — one such clip
+	scored 97.3% inliers and a coherent metric calibration while this check called
+	it 69% UNSTABLE.
+
+	It therefore reports TWO numbers and thresholds on the first:
+	  - the peak-to-peak RANGE of y_horizon across windows, which is what decides;
+	  - the robust IQR, which says whether that range is a steady drift (IQR large
+	    too) or a handful of bad windows (IQR small).
+	Thresholding the IQR instead was tried and rejected: on the one clip known to
+	be genuinely sloped (Dovns Klint, user-confirmed cliff site) the range is 47%
+	of frame height while the IQR is only 14%, so an IQR gate at any plausible
+	tolerance MISSES the very case this guard exists for. The range keeps the
+	sensitivity; the IQR qualifies the alarm instead of replacing it.
+
+	Windows below ill_spread_frac of the frame height are dropped first — a window
+	can clear the degeneracy floor and still be too ill-conditioned to vote.
+
+	Returns (reason_or_None, range_frac_or_None); reason is set when it FAILS.
+	"""
+	try:
+		from .horizon_geometry import (load_boxes_csv, foal_flags,
+									   estimate_ground_plane_windowed, summarize_drift)
+	except ImportError:
+		from horizon_geometry import (load_boxes_csv, foal_flags,
+									  estimate_ground_plane_windowed, summarize_drift)
+	if not frame_height or not fps or fps <= 0:
+		return None, None
+	try:
+		td = load_boxes_csv(tracking_csv_path)
+		if not td['has_bbox']:
+			return None, None
+		windows = estimate_ground_plane_windowed(
+			td, foal_flags(td), frame_height,
+			window_frames=max(60, int(round(window_seconds * fps))))
+	except (ValueError, OSError, KeyError):
+		return None, None
+
+	drift = summarize_drift(windows, min_spread_rows=ill_spread_frac * frame_height)
+	if drift is None:
+		# Too few well-conditioned windows to have an opinion, which is not itself
+		# evidence of a problem (short clip, sparse herd, or animals at one depth).
+		return None, None
+	range_frac = drift['y_horizon_range'] / float(frame_height)
+	iqr_frac = drift['y_horizon_iqr'] / float(frame_height)
+	if range_frac <= drift_thresh_frac:
+		return None, range_frac
+	shape = ("a steady drift" if iqr_frac > drift_thresh_frac / 2.0
+			 else f"a few outlying windows (robust IQR only {iqr_frac:.0%})")
+	return (f"the ground-plane fit is not constant across the clip: y_horizon moves by "
+			f"{range_frac:.0%} of frame height across {drift['n_windows']} window(s) "
+			f"({drift['n_skipped']} skipped, {drift['n_degenerate']} degenerate, "
+			f"{drift['n_ill_conditioned']} ill-conditioned), and the shape of it is "
+			f"{shape}"), range_frac
+
+
 def telemetry_drift(flightlog, alt_frac_max=0.15, pitch_deg_max=2.0, yaw_deg_max=5.0):
 	"""Reasons why ONE fixed camera geometry cannot represent the whole clip.
 
@@ -319,7 +393,8 @@ def _anchor_frame(rows):
 def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_csv_path,
 						  focal_len_mm=24.0, sensor_width_mm=36.0,
 						  roll_max_deg=3.0, horizon_margin_px=50.0, fpx_overrides=None,
-						  assumed_body_length_m=2.2, scale_tolerance=0.25):
+						  assumed_body_length_m=2.2, scale_tolerance=0.25,
+						  geometry_drift_frac=0.25, geometry_window_s=10.0):
 	"""Project every tracked detection to ground-plane metres using the flight
 	log, and write <video>_tracking_metric.csv. Rows without usable telemetry
 	keep empty X_m/Y_m and metric_quality='none'."""
@@ -389,6 +464,23 @@ def metric_video_tracking(video_path, tracking_csv_path, flightlog_path, output_
 	elif scale_ratio is not None:
 		print(f"  {stem}: scale cross-check OK (independent height estimates agree "
 			  f"within {abs(scale_ratio - 1.0):.0%}).")
+
+	# --- Ground-plane stability: the only guard that can see terrain slope ----
+	# REPORT-ONLY (see geometry_drift's docstring): it prints, it does not feed
+	# the quality downgrade below, because its false-alarm rate on herd scenes is
+	# not yet measured. To promote it, add `or geom_reason` to the quality test.
+	geom_reason, geom_frac = geometry_drift(
+		tracking_csv_path, height, fps,
+		window_seconds=geometry_window_s, drift_thresh_frac=geometry_drift_frac)
+	if geom_reason:
+		print(f"  {stem}: WARNING — {geom_reason}. Neither the flight log nor the scale "
+			  f"cross-check can see this: both are consistent with a steady drone over "
+			  f"SLOPED ground. Distances stay in the CSV at their current quality, but "
+			  f"treat this clip's metres as indicative until you check it by hand with "
+			  f"`horizon_geometry.py <csv> --check-drift`.")
+	elif geom_frac is not None:
+		print(f"  {stem}: ground-plane stability OK (y_horizon moves {geom_frac:.0%} of frame height "
+			  f"across windows).")
 
 	n_ok = n_unc = n_none = n_stab = 0
 	for r in rows:
@@ -589,7 +681,9 @@ def run_metric_geometry(config_path):
 				horizon_margin_px=params['horizon_margin_px'],
 				fpx_overrides=params['fpx_overrides'],
 				assumed_body_length_m=params['assumed_body_length_m'],
-				scale_tolerance=params['scale_tolerance'])
+				scale_tolerance=params['scale_tolerance'],
+				geometry_drift_frac=params['geometry_drift_frac'],
+				geometry_window_s=params['geometry_window_s'])
 		except Exception as e:
 			import traceback
 			print(f"  ERROR on {os.path.basename(csv_path)}: {e}")

@@ -235,29 +235,56 @@ def estimate_ground_plane_windowed(track_data, is_foal, frame_height, window_fra
 	return windows
 
 
-def summarize_drift(windows):
+def summarize_drift(windows, min_spread_rows=None):
 	"""Summarise pitch stability from estimate_ground_plane_windowed() output.
 
 	Returns None if fewer than 2 valid (non-skipped, non-degenerate)
 	windows (can't say anything about drift), else a dict with the
-	window-to-window y_horizon range. Whether that range is "too much"
+	window-to-window y_horizon spread. Whether that spread is "too much"
 	depends on scene depth (frame_height is a reasonable yardstick) — left
 	to the caller/CLI to threshold.
+
+	Two statistics are reported, and they answer different questions:
+	  - y_horizon_range (max-min) is what the CLI has always printed. It is
+	    maximally outlier-sensitive: ONE ill-conditioned window condemns the
+	    whole clip.
+	  - y_horizon_iqr (75th-25th percentile) is the robust version, and says
+	    whether the range is a steady drift or a few bad fits.
+	Report both; threshold the RANGE. Gating on the IQR alone was tried and
+	rejected: on a clip over known sloped ground the range reaches 47% of frame
+	height while the IQR stays at 14%, so an IQR gate misses genuine non-flat
+	terrain — the case the check exists for. The IQR qualifies the alarm, it
+	does not replace it.
+
+	min_spread_rows, when given, additionally drops valid windows whose depth
+	spread is below it (counted as n_ill_conditioned). The degeneracy floor
+	inside estimate_ground_plane_windowed (min_spread_frac, default 0.15) only
+	rejects the unfittable; a window can clear it and still be poorly
+	conditioned — which is the known false-alarm mode on herd scenes where the
+	animals cluster at one depth.
 	"""
 	valid = [w for w in windows if not w.get('skipped') and not w.get('degenerate')]
 	n_skipped = sum(1 for w in windows if w.get('skipped'))
 	n_degenerate = sum(1 for w in windows if w.get('degenerate'))
+	n_ill = 0
+	if min_spread_rows is not None:
+		kept = [w for w in valid if w.get('spread_rows', 0.0) >= min_spread_rows]
+		n_ill = len(valid) - len(kept)
+		valid = kept
 	if len(valid) < 2:
 		return None
 	horizons = np.array([w['y_horizon'] for w in valid])
+	q75, q25 = np.percentile(horizons, [75, 25])
 	return {
 		'n_windows': len(valid),
 		'n_skipped': n_skipped,
 		'n_degenerate': n_degenerate,
+		'n_ill_conditioned': n_ill,
 		'y_horizon_min': float(horizons.min()),
 		'y_horizon_max': float(horizons.max()),
 		'y_horizon_median': float(np.median(horizons)),
 		'y_horizon_range': float(horizons.max() - horizons.min()),
+		'y_horizon_iqr': float(q75 - q25),
 	}
 
 
@@ -470,12 +497,19 @@ def _main():
 			return
 		print(f"\ny_horizon across {drift['n_windows']} window(s) ({drift['n_skipped']} skipped, "
 			  f"{drift['n_degenerate']} degenerate): "
-			  f"median={drift['y_horizon_median']:.0f}, range={drift['y_horizon_range']:.0f} rows")
+			  f"median={drift['y_horizon_median']:.0f}, range={drift['y_horizon_range']:.0f} rows, "
+			  f"IQR={drift['y_horizon_iqr']:.0f} rows")
 		range_frac = drift['y_horizon_range'] / args.frame_height
+		iqr_frac = drift['y_horizon_iqr'] / args.frame_height
 		if range_frac > args.drift_thresh_frac:
 			print(f"-> UNSTABLE: y_horizon drifts by {range_frac:.0%} of frame height across windows. "
 				  f"Camera pitch is not constant — do NOT trust a single global fit for this clip; "
 				  f"segment it first or use the per-window geometry.")
+			if iqr_frac <= args.drift_thresh_frac:
+				print(f"   NOTE: the robust spread (IQR {iqr_frac:.0%}) is within tolerance, so the "
+					  f"range is driven by a few outlying windows rather than a steady drift. On herd "
+					  f"scenes this usually means those windows had the animals clustered at one depth, "
+					  f"not that the geometry moved. Check the table above before discarding the clip.")
 		else:
 			print(f"-> STABLE: y_horizon drift ({range_frac:.0%} of frame height) is small. "
 				  f"A single global fit is a reasonable approximation for this clip.")
