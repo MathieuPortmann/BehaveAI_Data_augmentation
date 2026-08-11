@@ -1706,13 +1706,16 @@ class SettingsEditorApp(tk.Tk):
 
 		ttk.Label(tab_metric, text='Camera', style='Section.TLabel').grid(
 			row=mr, column=0, columnspan=2, sticky='w', padx=8, pady=(10, 0)); mr += 1
-		_mt_spin('Focal length (mm)', 'metric_focal_len_mm', self.metric_focal_len_var, 1.0, 500.0, 0.1)
-		_mt_spin('Sensor width (mm)', 'metric_sensor_width_mm', self.metric_sensor_width_var, 1.0, 100.0, 0.1)
+		_mt_spin('Focal length (mm, 35mm-equivalent)', 'metric_focal_len_mm', self.metric_focal_len_var, 1.0, 500.0, 0.1)
+		_mt_spin('Reference sensor width (mm)', 'metric_sensor_width_mm', self.metric_sensor_width_var, 1.0, 100.0, 0.1)
 		ttk.Label(tab_metric,
-			text=('Both come from the drone\'s spec sheet and must describe the drone that actually '
-				  'shot the clips. A per-drone checkerboard calibration can override them with a '
-				  'metric_fpx_<DroneToken> key in the INI; those keys are kept as-is and are not '
-				  'edited here.'),
+			text=('These two go together as a PAIR: the focal length is the 35mm-equivalent your '
+				  'SRT reports (focal_len — 24.0 on a Mini 3/4 Pro at 1x zoom, written as "240" by '
+				  'some firmwares), and 36 mm is the full-frame reference that convention is defined '
+				  'against. Do not replace 36 with your drone\'s physical sensor width while keeping '
+				  'the equivalent focal length — that inflates the scale several-fold. A per-drone '
+				  'checkerboard calibration can bypass both with a metric_fpx_<DroneToken> key in '
+				  'the INI; those keys are kept as-is and are not edited here.'),
 			style='Help.TLabel', wraplength=660, justify='left').grid(
 			row=mr, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 6)); mr += 1
 
@@ -2128,7 +2131,13 @@ class SettingsEditorApp(tk.Tk):
 		self.show_species_var.set(self._str_to_bool(d.get('show_species', fallback='true')))
 		self.show_age_var.set(self._str_to_bool(d.get('show_age', fallback='true')))
 
-		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='true')))
+		# Both default to 'false' — the documented default (§11), the widget's own
+		# initial value, the fallback used by Regenerate_annotations.py, and the
+		# baseline captured in _loaded_motion_settings just below. They must agree:
+		# loading 'true' here against a 'false' baseline made an INI without the key
+		# look like a changed motion setting, so saving it offered a full dataset
+		# regeneration (with model backups) that nothing had actually asked for.
+		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='false')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
 		# motion tab

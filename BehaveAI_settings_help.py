@@ -1056,21 +1056,28 @@ PARAM_HELP = {
                      "else in the pipeline.",
     },
     "metric_focal_len_mm": {
-        "short": "Camera focal length in mm, from the drone's spec sheet.",
-        "what": "Used with the sensor width and the frame width to derive the pixel focal length "
-                "f_px = focal_len_mm * frame_width / sensor_width_mm. A per-drone checkerboard "
-                "calibration (metric_fpx_<DroneToken> in the INI) overrides it when present.",
-        "influence": "Scales every distance linearly: a focal length 10 % too small makes all "
-                     "measured distances 10 % too large. Use the value for the drone that actually "
-                     "shot the clips, not a mixed-fleet average.",
+        "short": "35mm-EQUIVALENT focal length in mm — the value DJI writes in the SRT.",
+        "what": "Used with the reference sensor width and the frame width to derive the pixel focal "
+                "length f_px = focal_len_mm * frame_width / sensor_width_mm. This is NOT the "
+                "physical focal length of the lens: it is the 35mm-equivalent, which is exactly "
+                "what the SRT's focal_len field reports (24.0 on a Mini 3/4 Pro at 1x zoom; some "
+                "firmwares write it as the integer 240). A per-drone checkerboard calibration "
+                "(metric_fpx_<DroneToken> in the INI) overrides the whole computation when present.",
+        "influence": "Scales every distance linearly: 10 % too small makes all measured distances "
+                     "10 % too large. Check it against your own SRT files rather than a spec sheet, "
+                     "and re-check it if any clip was shot with digital zoom (dzoom_ratio != 10000), "
+                     "which changes the reported focal length.",
     },
     "metric_sensor_width_mm": {
-        "short": "Physical sensor width in mm, from the drone's spec sheet.",
-        "what": "The other half of the pixel-focal-length formula. For a 1/1.3\" class drone sensor "
-                "this is a few mm, NOT the 36 mm of a full-frame camera.",
-        "influence": "Same linear effect as the focal length, in the opposite direction. Leaving "
-                     "the 36 mm placeholder with a real drone focal length gives distances that are "
-                     "wrong by roughly an order of magnitude.",
+        "short": "REFERENCE sensor width of the 35mm-equivalent convention. Leave at 36.",
+        "what": "Not the physical sensor of your drone. The focal length above is a 35mm-equivalent, "
+                "i.e. the focal that would give this field of view on a 36 mm-wide full-frame "
+                "sensor, so the formula must be fed that same 36 mm reference. Change it only if "
+                "you supply a true physical focal length instead of the equivalent one.",
+        "influence": "Replacing 36 with your drone's physical sensor width (a few mm) while keeping "
+                     "the equivalent focal length inflates f_px several-fold and makes every "
+                     "distance wrong by that factor. The pairing is what matters, not either "
+                     "number alone.",
     },
     "metric_roll_max_deg": {
         "short": "Frames rolled more than this are flagged as unreliable.",
