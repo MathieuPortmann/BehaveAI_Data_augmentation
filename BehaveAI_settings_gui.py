@@ -2392,16 +2392,23 @@ class SettingsEditorApp(tk.Tk):
 				primary_static_classes = []
 				primary_motion_classes = []
 
-			# YAML dicts (train/val paths are absolute)
+			# YAML dicts. train/val are RELATIVE to the YAML's own directory (the
+			# project dir), and no 'path' key is written: Ultralytics falls back to
+			# the yaml file's parent as the dataset root, and the pipeline's own
+			# readers join against dirname(yaml). Absolute paths were baked in here
+			# before, which broke every project copied to another machine -- the
+			# dataset then pointed at the annotation folders of the machine the
+			# settings were last saved on ("images not found, missing path
+			# C:\...\annot_static\images\val" while training on the server).
 			static_yaml_dict = {
-				'train': os.path.abspath(static_train_images_dir),
-				'val':   os.path.abspath(static_val_images_dir),
+				'train': 'annot_static/images/train',
+				'val':   'annot_static/images/val',
 				'nc':	len(primary_static_classes),
 				'names': primary_static_classes,
 			}
 			motion_yaml_dict = {
-				'train': os.path.abspath(motion_train_images_dir),
-				'val':   os.path.abspath(motion_val_images_dir),
+				'train': 'annot_motion/images/train',
+				'val':   'annot_motion/images/val',
 				'nc':	len(primary_motion_classes),
 				'names': primary_motion_classes,
 			}

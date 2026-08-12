@@ -718,6 +718,96 @@ def _assert_weights(model_type, project_path, model_path):
 	)
 
 
+def repair_dataset_yaml(yaml_path):
+	"""Point a project's dataset yaml back at its own annotation folders.
+
+	The yaml used to carry ABSOLUTE train/val paths, so a project copied to
+	another machine (or a renamed project folder) still pointed at the annotation
+	folders of the machine where the settings were last saved, and training died
+	with "Dataset 'static_annotations.yaml' images not found, missing path
+	C:\\...\\annot_static\\images\\val". Three cases: an absolute entry that does
+	point into this project is rewritten relative (so the next copy works), a
+	broken entry is redirected to the matching folder inside this project, and an
+	entry resolving outside the project is only redirected when the in-project
+	folder actually holds images. Re-saving the settings in the GUI rewrites the
+	yaml too, but nothing forces the user to do that after copying a project over.
+	"""
+	if not str(yaml_path).endswith('.yaml') or not os.path.exists(yaml_path):
+		return
+	import yaml as _yaml
+	base_dir = os.path.dirname(os.path.abspath(yaml_path))
+	try:
+		with open(yaml_path, 'r') as f:
+			data = _yaml.safe_load(f) or {}
+	except Exception as e:
+		print(f"Warning: could not read {yaml_path}: {e}")
+		return
+
+	def _has_images(d):
+		exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+		try:
+			return any(f.lower().endswith(exts) for f in os.listdir(d))
+		except OSError:
+			return False
+
+	fixed = {}
+	# A stale dataset root would be used ahead of the yaml's own directory, so
+	# drop it and let Ultralytics fall back to that directory.
+	root = data.get('path')
+	if isinstance(root, str) and not os.path.isdir(os.path.join(base_dir, root)):
+		data.pop('path')
+		fixed['path'] = ('(removed)', 'stale dataset root')
+
+	for key in ('train', 'val'):
+		entry = data.get(key)
+		if not isinstance(entry, str):
+			continue
+		resolved = os.path.abspath(os.path.join(base_dir, entry))
+		exists = os.path.isdir(resolved)
+		# normcase: on Windows the same folder is often spelled with a different
+		# case (BehaveAI_Herdwise vs BehaveAI_HERDWISE) in these yaml files.
+		inside = os.path.normcase(resolved).startswith(os.path.normcase(base_dir) + os.sep)
+		if exists and inside and not os.path.isabs(entry):
+			continue
+		if exists and inside:
+			# Right folder, absolute spelling: rewriting it relative is what makes
+			# this project survive being copied to another machine.
+			data[key] = os.path.relpath(resolved, base_dir).replace('\\', '/')
+			fixed[key] = (data[key], 'was an absolute path')
+			continue
+		# Keep the tail of the recorded path ('annot_static/images/val'): that
+		# part survives moving the project, the drive and parents do not.
+		parts = entry.replace('\\', '/').strip('/').split('/')
+		for n in (3, 2, 1):
+			if len(parts) < n:
+				continue
+			candidate = '/'.join(parts[-n:])
+			cand_dir = os.path.join(base_dir, candidate)
+			if not os.path.isdir(cand_dir):
+				continue
+			# An entry that resolves but points outside the project is only
+			# redirected when the in-project folder actually holds images: the
+			# empty placeholders created on every settings save must not silently
+			# replace a dataset someone deliberately kept elsewhere.
+			if exists and not _has_images(cand_dir):
+				break
+			data[key] = candidate
+			fixed[key] = (candidate, 'pointed outside this project' if exists
+						  else 'pointed at a folder that does not exist here')
+			break
+	if not fixed:
+		return
+
+	try:
+		with open(yaml_path, 'w') as f:
+			_yaml.safe_dump(data, f, sort_keys=False)
+	except Exception as e:
+		print(f"Warning: could not rewrite {yaml_path}: {e}")
+		return
+	for key, (val, why) in fixed.items():
+		print(f"Repaired {os.path.basename(yaml_path)}: '{key}' -> '{val}' ({why})")
+
+
 def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz, patience=None, train_overrides=None):
 	"""
 	Decide whether to (re)train a model based on existence and image counts.
@@ -871,6 +961,7 @@ def _classify_pooled(model, class_names, crop):
 if __name__ == '__main__':
 	#-------CHECK PRIMARY MODEL EXISTS----------
 	if primary_static_classes:
+		repair_dataset_yaml(primary_static_yaml_path)
 		_static_train_yaml = primary_static_yaml_path
 		if sahi_enabled_static:
 			# Tile the annotated dataset so training sees horses at the same
@@ -886,6 +977,7 @@ if __name__ == '__main__':
 
 
 	if primary_motion_classes:
+		repair_dataset_yaml(primary_motion_yaml_path)
 		_motion_train_yaml = primary_motion_yaml_path
 		if sahi_enabled_motion:
 			from BehaveAI_tiling import tile_dataset

@@ -165,8 +165,17 @@ def tile_dataset(src_yaml, out_dir=None, slice_h=640, slice_w=640,
 	out_dir = os.path.abspath(out_dir)
 	out_yaml = os.path.join(out_dir, 'data.yaml')
 
+	# Split entries in the source yaml are relative to the yaml's own directory
+	# (an absolute entry is returned unchanged by os.path.join), so a project
+	# copied to another machine still tiles.
+	src_root = os.path.dirname(src_yaml)
+
+	def _split_dir(split):
+		d = spec.get(split)
+		return os.path.join(src_root, d) if d else None
+
 	# Freshness: only re-tile when the source train image count changed.
-	train_dir = spec.get('train')
+	train_dir = _split_dir('train')
 	src_count = 0
 	if train_dir and os.path.isdir(train_dir):
 		for ext in _IMG_EXTS:
@@ -185,7 +194,7 @@ def tile_dataset(src_yaml, out_dir=None, slice_h=640, slice_w=640,
 		  f"min_vis {min_visibility})")
 	tiled = {'nc': spec.get('nc'), 'names': spec.get('names')}
 	for split in ('train', 'val'):
-		img_dir = spec.get(split)
+		img_dir = _split_dir(split)
 		if not img_dir or not os.path.isdir(img_dir):
 			continue
 		out_img_dir = os.path.join(out_dir, 'images', split)
@@ -202,7 +211,9 @@ def tile_dataset(src_yaml, out_dir=None, slice_h=640, slice_w=640,
 		n_img, n_tiles, n_kept = _tile_one_split(
 			img_dir, out_img_dir, out_lbl_dir, slice_h, slice_w,
 			overlap_h, overlap_w, min_visibility, keep_empty, limit)
-		tiled[split] = out_img_dir
+		# Relative to out_dir, where data.yaml is written -- same portability rule
+		# as the source yaml.
+		tiled[split] = f'images/{split}'
 		print(f"  {split}: {n_img} images -> {n_tiles} tiles, kept {n_kept} "
 			  f"(with {'>=1 box' if not keep_empty else 'all'})")
 
