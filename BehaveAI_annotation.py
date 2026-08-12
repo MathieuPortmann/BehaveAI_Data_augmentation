@@ -15,7 +15,7 @@ import threading
 import copy
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
 from behaveai_config import (
@@ -652,12 +652,17 @@ fr = None
 motion_image = None
 
 # Frame-source navigation state.
-#   nav_mode    : 'random' (default behaviour) or 'csv' (walk through CSV time-codes)
+#   nav_mode    : 'random' (default), 'csv' (walk through CSV time-codes) or
+#                 'sequential' (step through the current video frame by frame)
 #   csv_targets : ordered list of (video_path, frame_number) parsed from a CSV
 #   csv_cursor  : index of the next CSV target to present
+#   seq_step    : frames to advance per save in 'sequential' mode.  1 = every
+#                 frame; fps//2 gives the ~2 fps cadence a MOT ground truth
+#                 wants without annotating 30 near-identical frames a second.
 nav_mode = 'random'
 csv_targets = []
 csv_cursor = 0
+seq_step = 1
 
 video_label = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -1644,8 +1649,37 @@ def load_next_target(app_instance):
 		go_to_frame(app_instance, vpath, fnum)
 		# Update the button label so progress (i/N) stays in sync
 		app_instance.update_source_button()
+	elif nav_mode == 'sequential':
+		load_next_sequential_frame(app_instance)
 	else:
 		load_next_random_frame(app_instance)
+
+
+def load_next_sequential_frame(app_instance):
+	"""
+	Advance by `seq_step` frames inside the current video.
+
+	Unlike random mode this deliberately ignores whether the target is already
+	annotated: walking a continuous stretch is the point, and landing on an
+	annotated frame simply reloads its boxes for review (see the loop()
+	load_labels_for_basename call).  At the end of the video the mode stays
+	active but stops advancing, so a stray Enter cannot silently jump the
+	annotator into a different clip mid-sequence.
+	"""
+	target = frame_number + max(1, seq_step)
+	last = total_frames - 3  # same safety margin as build_frame_pool
+
+	if target > last:
+		messagebox.showinfo(
+			"End of video",
+			f"{os.path.basename(video_path)} ends here (frame {frame_number} of "
+			f"{total_frames}).\n\nUse the Source button to pick another video or "
+			f"switch back to Random.")
+		app_instance.update_source_button()
+		return
+
+	go_to_frame(app_instance, video_path, target)
+	app_instance.update_source_button()
 
 
 def load_next_random_frame(app_instance):
@@ -2168,6 +2202,8 @@ class AnnotatorTk:
 			if nav_mode == 'csv' and csv_targets:
 				self.source_btn.config(
 					text=f"Source: CSV ({min(csv_cursor, len(csv_targets))}/{len(csv_targets)})")
+			elif nav_mode == 'sequential':
+				self.source_btn.config(text=f"Source: Frame+{seq_step}")
 			else:
 				self.source_btn.config(text="Source: Random")
 		except Exception:
@@ -2175,8 +2211,35 @@ class AnnotatorTk:
 
 	def set_nav_mode(self, mode):
 		global nav_mode
-		nav_mode = mode if mode in ('random', 'csv') else 'random'
+		nav_mode = mode if mode in ('random', 'csv', 'sequential') else 'random'
 		self.update_source_button()
+
+	def _enter_sequential_mode(self):
+		"""
+		Switch to frame-by-frame navigation, asking for the step first.
+
+		The step is offered in frames but the dialog states the equivalent
+		cadence at the current video's fps, because the useful choices are
+		driven by seconds (1-2 fps for a tracking ground truth), not by frames.
+		"""
+		global seq_step
+		fps = 0.0
+		try:
+			fps = float(capture.get(cv2.CAP_PROP_FPS)) or 0.0
+		except Exception:
+			pass
+		hint = (f"\n\nAt {fps:.2f} fps:  1 = every frame,  "
+				f"{max(1, int(round(fps / 2)))} = 2 fps,  "
+				f"{max(1, int(round(fps)))} = 1 fps.") if fps > 0 else ""
+		step = simpledialog.askinteger(
+			"Frame-by-frame",
+			"Advance by how many frames after each save?" + hint,
+			parent=self.root, initialvalue=seq_step, minvalue=1,
+			maxvalue=max(1, total_frames - 1))
+		if step is None:
+			return
+		seq_step = int(step)
+		self.set_nav_mode('sequential')
 
 	def _project_timecodes_dir(self):
 		"""
@@ -2211,6 +2274,8 @@ class AnnotatorTk:
 		menu = tk.Menu(self.root, tearoff=0)
 		menu.add_command(label="Random frames",
 						 command=lambda: self.set_nav_mode('random'))
+		menu.add_command(label="Frame per frame (this video)…",
+						 command=self._enter_sequential_mode)
 		menu.add_command(label="Load a time-code CSV…",
 						 command=self._load_csv_source)
 		try:
