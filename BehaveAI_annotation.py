@@ -483,7 +483,7 @@ def _parse_frame_value(raw, fps):
 	return None
 
 
-def parse_timecode_csv(csv_path, full_pool, frame_window):
+def parse_timecode_csv(csv_path, full_pool, frame_window, report=None):
 	"""
 	Parse a CSV listing frames / time-codes to annotate and return an ordered
 	list of (video_path, frame_number) targets.
@@ -497,7 +497,17 @@ def parse_timecode_csv(csv_path, full_pool, frame_window):
 	pool on their stem (filename without extension), case-insensitively.
 	Out-of-range frames are clamped; duplicates are removed while preserving
 	CSV order.  Returns [] on any structural problem.
+
+	report : dict | None
+		Filled in with why rows were dropped ('rows', 'unknown_video',
+		'bad_time', 'header', 'error', 'columns') so the caller can show the
+		user something more useful than "nothing was loaded".
 	"""
+	if report is None:
+		report = {}
+	report.update(rows=0, unknown_video={}, bad_time=[], header=None,
+				  error=None, columns=None)
+
 	# Map  stem(lower) -> video_path  from the known pool
 	stem_to_path = {}
 	for vpath, _fn in full_pool:
@@ -531,6 +541,7 @@ def parse_timecode_csv(csv_path, full_pool, frame_window):
 		if not reader.fieldnames:
 			print("CSV time-codes: no header row found.")
 			return []
+		report['header'] = [n for n in reader.fieldnames if n and n.strip()]
 
 		# Resolve column names (case-insensitive)
 		lower_map = {name.lower().strip(): name for name in reader.fieldnames}
@@ -548,16 +559,19 @@ def parse_timecode_csv(csv_path, full_pool, frame_window):
 			print("CSV time-codes: could not find a video column "
 				  "(video_filename/video/filename) and a time column "
 				  "(frame/timecode/time/start_frame).")
+			report['columns'] = (video_col, time_col)
 			return []
 
 		for row in reader:
 			vname = (row.get(video_col) or '').strip()
 			if not vname:
 				continue
+			report['rows'] += 1
 			stem = os.path.splitext(os.path.basename(vname))[0].lower()
 			vpath = stem_to_path.get(stem)
 			if vpath is None:
 				print(f"CSV time-codes: video '{vname}' not found in project, skipping.")
+				report['unknown_video'][vname] = report['unknown_video'].get(vname, 0) + 1
 				continue
 
 			fps, total = _meta(vpath)
@@ -565,6 +579,8 @@ def parse_timecode_csv(csv_path, full_pool, frame_window):
 			if fnum is None:
 				print(f"CSV time-codes: unreadable time value "
 					  f"'{row.get(time_col)}' for {vname}, skipping.")
+				if len(report['bad_time']) < 5:
+					report['bad_time'].append(str(row.get(time_col)))
 				continue
 
 			# Clamp into the annotatable range for this video
@@ -580,6 +596,7 @@ def parse_timecode_csv(csv_path, full_pool, frame_window):
 
 	except Exception as e:
 		print(f"CSV time-codes: failed to parse '{csv_path}': {e}")
+		report['error'] = str(e)
 		return []
 
 	print(f"CSV time-codes: loaded {len(targets)} target frame(s) from {os.path.basename(csv_path)}.")
@@ -2244,10 +2261,14 @@ class AnnotatorTk:
 	def _project_timecodes_dir(self):
 		"""
 		Return the project's timecodes/ directory (creating it and a starter
-		example CSV on first use), derived from clips_dir's parent.
+		example CSV on first use).
+
+		This lives next to the settings INI, not next to clips_dir: clips_dir
+		is routinely an absolute path on another drive (a shared video server),
+		and deriving the folder from it scatters a timecodes/ folder there
+		instead of in the project.
 		"""
 		try:
-			project_dir = os.path.dirname(os.path.normpath(clips_dir))
 			tc_dir = os.path.join(project_dir, 'timecodes')
 			os.makedirs(tc_dir, exist_ok=True)
 			example = os.path.join(tc_dir, 'example_timecodes.csv')
@@ -2287,26 +2308,65 @@ class AnnotatorTk:
 
 	def _load_csv_source(self):
 		global csv_targets, csv_cursor
-		initial = self._project_timecodes_dir() or os.path.dirname(os.path.normpath(clips_dir))
+		initial = self._project_timecodes_dir() or project_dir
 		path = filedialog.askopenfilename(
 			title="Choose a time-code CSV",
 			initialdir=initial,
 			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
 		if not path:
 			return
-		targets = parse_timecode_csv(path, full_frame_pool, frameWindow)
+		report = {}
+		targets = parse_timecode_csv(path, full_frame_pool, frameWindow, report)
 		if not targets:
-			messagebox.showerror(
-				"Invalid CSV",
-				"No usable time-code was found in this CSV.\n"
-				"Check the columns (video_filename + frame/timecode) and that the "
-				"video names match the project's files.")
+			messagebox.showerror("Invalid CSV", self._csv_failure_message(path, report))
 			return
 		csv_targets = targets
 		csv_cursor = 0
 		self.set_nav_mode('csv')
 		# Jump straight to the first target
 		load_next_target(self)
+
+	@staticmethod
+	def _csv_failure_message(path, report):
+		"""
+		Turn the parser's report into a message that names the actual problem.
+
+		The three failure modes look identical from the outside (zero targets)
+		but need three different fixes: wrong file, wrong columns, or video
+		names that do not match the files under clips_dir.
+		"""
+		head = f"No usable time-code was found in:\n{os.path.basename(path)}\n"
+
+		if report.get('error'):
+			return head + f"\nThe file could not be read: {report['error']}"
+
+		if report.get('columns'):
+			found = ', '.join(report.get('header') or []) or '(none)'
+			return (head +
+					"\nThe header needs a video column (video_filename / video / "
+					"filename) and a time column (frame / timecode / time / "
+					f"start_frame).\n\nColumns found: {found}")
+
+		unknown = report.get('unknown_video') or {}
+		if unknown and not report.get('bad_time'):
+			sample = sorted(unknown.items(), key=lambda kv: -kv[1])[:4]
+			listed = '\n'.join(f"  - {name}  ({n} row{'s' if n > 1 else ''})"
+							   for name, n in sample)
+			more = (f"\n  ... and {len(unknown) - len(sample)} other name(s)"
+					if len(unknown) > len(sample) else '')
+			return (head +
+					f"\nAll {report.get('rows', 0)} row(s) name a video that is not in "
+					f"the project:\n{listed}{more}\n\n"
+					f"Videos are searched recursively under:\n{clips_dir}\n"
+					"The name must match the video file (the extension is ignored).")
+
+		if report.get('bad_time'):
+			listed = ', '.join(repr(v) for v in report['bad_time'])
+			return (head +
+					f"\nThe time values could not be read: {listed}\n\n"
+					"Use a frame index (1530) or a time-code (02:15 / 01:02:03).")
+
+		return head + "\nThe file has a header but no data row."
 
 	def update_button_states(self):
 		for btn, col, cls in self.species_buttons:
