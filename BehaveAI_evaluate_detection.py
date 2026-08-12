@@ -35,6 +35,10 @@ Outputs (under <project>/evaluation/):
   detection_report.txt          -- human-readable summary
   detection_stream_ablation.csv -- static/motion/merged P/R/F1/AP (the headline)
   detection_by_class.csv        -- per-stream, per-class classification metrics
+
+With --models tiled (or an INI where sahi_enabled_* is on) it instead scores
+model_primary_*_tiled with SAHI sliced inference and writes the same three files
+suffixed _tiled, so a SAHI/no-SAHI ablation keeps both sides side by side.
 """
 
 import os
@@ -92,6 +96,63 @@ def predict_stream(model, img_path, conf, class_names):
 			'primary_class': name,
 		})
 	return dets, (w, h)
+
+
+def predict_stream_sahi(sahi_model, img_path, class_names, sahi_cfg):
+	"""SAHI sliced counterpart of predict_stream, mirroring
+	BehaveAI_classify_track.sahi_detect so the two agree box for box.
+
+	The tiled detector is trained on 640px tiles at native resolution and has
+	never seen a whole 4K frame resized to 640, so scoring it with plain
+	whole-frame .predict() measures the train/inference scale mismatch rather
+	than the model. Evaluating it therefore has to slice exactly as inference
+	does."""
+	from sahi.predict import get_sliced_prediction
+	import cv2
+	img = cv2.imread(img_path)
+	if img is None:
+		return [], (None, None)
+	h, w = img.shape[:2]
+	result = get_sliced_prediction(
+		img[:, :, ::-1], sahi_model,
+		slice_height=sahi_cfg['slice_h'], slice_width=sahi_cfg['slice_w'],
+		overlap_height_ratio=sahi_cfg['overlap_h'],
+		overlap_width_ratio=sahi_cfg['overlap_w'],
+		postprocess_type=sahi_cfg['pp_type'],
+		postprocess_match_metric=sahi_cfg['pp_metric'],
+		postprocess_match_threshold=sahi_cfg['pp_thresh'],
+		perform_standard_pred=sahi_cfg['standard_pred'], verbose=0)
+	dets = []
+	for op in result.object_prediction_list:
+		x1, y1, x2, y2 = op.bbox.to_xyxy()
+		ci = int(op.category.id)
+		dets.append({
+			'coords': (x1 / w, y1 / h, x2 / w, y2 / h),
+			'primary_conf': float(op.score.value),
+			'primary_class': class_names[ci] if 0 <= ci < len(class_names) else str(ci),
+		})
+	return dets, (w, h)
+
+
+def build_sahi_model(yolo_model, conf):
+	"""Wrap a loaded YOLO in a SAHI detection model (same dual model_type probe
+	as BehaveAI_classify_track.build_sahi_model). Returns None on failure."""
+	from sahi import AutoDetectionModel
+	try:
+		import torch
+		device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+	except Exception:
+		device = 'cpu'
+	last_err = None
+	for model_type in ('ultralytics', 'yolov8'):
+		try:
+			return AutoDetectionModel.from_pretrained(
+				model_type=model_type, model=yolo_model,
+				confidence_threshold=conf, device=device, image_size=640)
+		except Exception as e:
+			last_err = e
+	print(f"SAHI wrap failed ({last_err}).")
+	return None
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +243,10 @@ def main():
 					help="which videos to score (default: holdout = the frozen test set)")
 	ap.add_argument('--conf', type=float, default=None, help="override primary_conf_thresh")
 	ap.add_argument('--iou', type=float, default=0.5, help="IoU threshold for GT matching (default 0.5)")
+	ap.add_argument('--models', default='auto', choices=('auto', 'plain', 'tiled'),
+					help="which detectors to score: 'plain' = model_primary_*, "
+						 "'tiled' = model_primary_*_tiled with SAHI sliced inference, "
+						 "'auto' (default) = tiled when the INI has sahi_enabled_*, else plain")
 	a = ap.parse_args()
 
 	config_path = ec.resolve_config_path(a.project)
@@ -218,19 +283,51 @@ def main():
 		print(f"No frames for split '{a.split}'. Nothing to evaluate.")
 		return
 
+	# Which detectors to score. SAHI mode is a coherent train+infer switch in the
+	# pipeline (the tiled detector lives in its own model_primary_*_tiled dir), so
+	# the evaluation has to pick the matching pair -- weights AND inference mode.
+	sahi_on = (d.get('sahi_enabled_static', 'false').lower() == 'true'
+			   or d.get('sahi_enabled_motion', 'false').lower() == 'true')
+	use_tiled = (a.models == 'tiled') or (a.models == 'auto' and sahi_on)
+	suffix = '_tiled' if use_tiled else ''
+	sahi_cfg = {
+		'slice_h': int(d.get('sahi_slice_height', '640')),
+		'slice_w': int(d.get('sahi_slice_width', '640')),
+		'overlap_h': float(d.get('sahi_overlap_height_ratio', '0.2')),
+		'overlap_w': float(d.get('sahi_overlap_width_ratio', '0.2')),
+		'pp_type': d.get('sahi_postprocess_type', 'NMS'),
+		'pp_metric': d.get('sahi_postprocess_match_metric', 'IOS'),
+		'pp_thresh': float(d.get('sahi_postprocess_match_threshold', '0.5')),
+		'standard_pred': d.get('sahi_perform_standard_pred', 'false').lower() == 'true',
+	}
+
 	# Models (lazy import so the module stays importable without torch).
 	from ultralytics import YOLO
 	model_static = model_motion = None
-	sp = os.path.join(project_dir, 'model_primary_static', 'train', 'weights', 'best.pt')
-	mp = os.path.join(project_dir, 'model_primary_motion', 'train', 'weights', 'best.pt')
+	sahi_static = sahi_motion = None
+	sp = os.path.join(project_dir, 'model_primary_static' + suffix, 'train', 'weights', 'best.pt')
+	mp = os.path.join(project_dir, 'model_primary_motion' + suffix, 'train', 'weights', 'best.pt')
 	if static_classes and os.path.exists(sp):
 		model_static = YOLO(sp)
 	if motion_classes and os.path.exists(mp):
 		model_motion = YOLO(mp)
 	if model_static is None and model_motion is None:
-		print("No trained primary detector found (model_primary_static/motion). "
+		print(f"No trained primary detector found (model_primary_static{suffix}/motion{suffix}). "
 			  "Train the detectors first.")
 		return
+	print(f"Scoring {'TILED (SAHI sliced inference)' if use_tiled else 'whole-frame'} detectors: "
+		  f"model_primary_*{suffix}")
+	if use_tiled:
+		if model_static is not None:
+			sahi_static = build_sahi_model(model_static, conf_thresh)
+		if model_motion is not None:
+			sahi_motion = build_sahi_model(model_motion, conf_thresh)
+		if (model_static is not None and sahi_static is None) or \
+		   (model_motion is not None and sahi_motion is None):
+			print("Refusing to score a tiled detector with whole-frame inference: "
+				  "it has never seen a 4K frame resized to 640 and the numbers "
+				  "would be meaningless. Install sahi, or pass --models plain.")
+			return
 
 	# Accumulators
 	variants = ('static', 'motion', 'merged')
@@ -252,10 +349,20 @@ def main():
 		static_dets = []
 		ref_w = None
 		if model_static is not None and s_entry:
-			static_dets, (ref_w, _) = predict_stream(model_static, s_entry['image'], conf_thresh, static_classes)
+			if sahi_static is not None:
+				static_dets, (ref_w, _) = predict_stream_sahi(
+					sahi_static, s_entry['image'], static_classes, sahi_cfg)
+			else:
+				static_dets, (ref_w, _) = predict_stream(
+					model_static, s_entry['image'], conf_thresh, static_classes)
 		motion_dets = []
 		if model_motion is not None and m_entry:
-			motion_dets, (mw, _) = predict_stream(model_motion, m_entry['image'], conf_thresh, motion_classes)
+			if sahi_motion is not None:
+				motion_dets, (mw, _) = predict_stream_sahi(
+					sahi_motion, m_entry['image'], motion_classes, sahi_cfg)
+			else:
+				motion_dets, (mw, _) = predict_stream(
+					model_motion, m_entry['image'], conf_thresh, motion_classes)
 			if ref_w is None:
 				ref_w = mw
 		for de in static_dets:
@@ -285,7 +392,8 @@ def main():
 
 	_write_outputs(project_dir, config_path, a, conf_thresh, centroid_merge_thresh, iou_thresh,
 				   dominant_source, val_frequency, n_frames, n_gt_union, det,
-				   cls_conf, cls_gt_support, static_classes, motion_classes)
+				   cls_conf, cls_gt_support, static_classes, motion_classes,
+				   variant='tiled' if use_tiled else 'plain')
 
 
 def _accumulate_classification(gt, preds, iou_thr, conf_dict, support):
@@ -318,12 +426,18 @@ def _class_metrics(conf_dict, classes):
 
 def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_thresh, iou_thresh,
 				   dominant_source, val_frequency, n_frames, n_gt_union, det,
-				   cls_conf, cls_gt_support, static_classes, motion_classes):
+				   cls_conf, cls_gt_support, static_classes, motion_classes,
+				   variant='plain'):
 	eval_dir = ec.ensure_eval_dir(project_dir)
+	# Tag the tiled run's files so a SAHI/no-SAHI ablation keeps both sides
+	# instead of the second run silently overwriting the first.
+	tag = '' if variant == 'plain' else '_' + variant
 	lines = []
 	lines.append("BehaveAI detection evaluation")
 	lines.append("=" * 60)
 	lines.append(f"project            : {project_dir}")
+	lines.append(f"detectors          : model_primary_*{'_tiled' if variant == 'tiled' else ''}"
+				 f"  ({'SAHI sliced inference' if variant == 'tiled' else 'whole-frame inference'})")
 	lines.append(f"split              : {args.split}  (val_frequency = {val_frequency})")
 	lines.append(f"frames scored      : {n_frames}")
 	lines.append(f"GT animals (union) : {n_gt_union}")
@@ -366,19 +480,22 @@ def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_t
 		lines.append("")
 
 	report = "\n".join(lines) + "\n"
-	with open(os.path.join(eval_dir, 'detection_report.txt'), 'w', encoding='utf-8') as f:
+	names = (f'detection_report{tag}.txt',
+			 f'detection_stream_ablation{tag}.csv',
+			 f'detection_by_class{tag}.csv')
+	with open(os.path.join(eval_dir, names[0]), 'w', encoding='utf-8') as f:
 		f.write(report)
-	with open(os.path.join(eval_dir, 'detection_stream_ablation.csv'), 'w', newline='', encoding='utf-8') as f:
+	with open(os.path.join(eval_dir, names[1]), 'w', newline='', encoding='utf-8') as f:
 		w = csv.DictWriter(f, fieldnames=['variant', 'tp', 'fp', 'fn', 'precision', 'recall', 'f1', 'ap'])
 		w.writeheader()
 		w.writerows(ablation_rows)
-	with open(os.path.join(eval_dir, 'detection_by_class.csv'), 'w', newline='', encoding='utf-8') as f:
+	with open(os.path.join(eval_dir, names[2]), 'w', newline='', encoding='utf-8') as f:
 		w = csv.DictWriter(f, fieldnames=['stream', 'class', 'support', 'tp', 'precision', 'recall', 'f1'])
 		w.writeheader()
 		w.writerows(by_class_rows)
 
 	print(report)
-	print(f"Wrote detection_report.txt, detection_stream_ablation.csv, detection_by_class.csv -> {eval_dir}")
+	print(f"Wrote {', '.join(names)} -> {eval_dir}")
 
 
 def _confusion_block(conf_dict, classes):
