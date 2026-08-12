@@ -6,9 +6,15 @@ and BehaveAI_complex_model.py (see behaveai_holdout.is_holdout_video).
 
 Annotations saved before that change were split per-frame at random, so
 frames from the same video can currently sit on both sides of train/val. This
-script regroups every already-annotated frame (and its augmented copies +
-label file) by source video and moves it to the correct side, so
+script regroups every already-annotated frame (and its augmented copies, label
+file and grey-region mask) by source video and moves it to the correct side, so
 val_frequency is honoured at the video level going forward.
+
+Also run it after anything that changes a video's *name*: the side is a hash of
+the filename stem, so a rename reassigns videos between train and holdout, and
+leaving the files where they were would train the detector on frames that
+BehaveAI_evaluate_detection.py (which filters by the hash, not by the folder)
+then scores as holdout.
 
 An annotation image follows the convention <video_label>_<frame_number>.jpg,
 with augmented copies as <video_label>_<frame_number>_aug_<param>[_<idx>].jpg
@@ -32,16 +38,23 @@ IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 def _rebalance_stream(stream_dir, fraction, apply):
     train_img = os.path.join(stream_dir, 'images', 'train')
     val_img = os.path.join(stream_dir, 'images', 'val')
-    train_lbl = os.path.join(stream_dir, 'labels', 'train')
-    val_lbl = os.path.join(stream_dir, 'labels', 'val')
     if not os.path.isdir(train_img) and not os.path.isdir(val_img):
         return 0, 0
 
+    # The grey-region sidecar travels with its frame: BehaveAI_inspect_dataset.py
+    # looks for it beside the label (lbl_dir.replace('labels', 'masks')), so a
+    # mask left on the other side is silently invisible and re-editing the frame
+    # drops its grey boxes.
+    subs = (('images', lambda b, f: f),
+            ('labels', lambda b, f: b + '.txt'),
+            ('masks', lambda b, f: b + '.mask.txt'))
+
     moved = kept = 0
-    for side_img, side_lbl in ((train_img, train_lbl), (val_img, val_lbl)):
+    for side in ('train', 'val'):
+        side_img = os.path.join(stream_dir, 'images', side)
         if not os.path.isdir(side_img):
             continue
-        currently_holdout = (side_img == val_img)
+        currently_holdout = (side == 'val')
         for fname in sorted(os.listdir(side_img)):
             if not fname.lower().endswith(IMAGE_EXTS):
                 continue
@@ -52,21 +65,17 @@ def _rebalance_stream(stream_dir, fraction, apply):
                 kept += 1
                 continue
 
-            dest_img_dir = val_img if wants_holdout else train_img
-            dest_lbl_dir = val_lbl if wants_holdout else train_lbl
-            src_img = os.path.join(side_img, fname)
-            dst_img = os.path.join(dest_img_dir, fname)
-            src_lbl = os.path.join(side_lbl, basename + '.txt')
-            dst_lbl = os.path.join(dest_lbl_dir, basename + '.txt')
-
+            dest = 'val' if wants_holdout else 'train'
             direction = 'train->holdout' if wants_holdout else 'holdout->train'
             print(f"  {'MOVE' if apply else 'would move'}: {fname} ({direction}, video={stem})")
             if apply:
-                os.makedirs(dest_img_dir, exist_ok=True)
-                os.makedirs(dest_lbl_dir, exist_ok=True)
-                os.replace(src_img, dst_img)
-                if os.path.exists(src_lbl):
-                    os.replace(src_lbl, dst_lbl)
+                for sub, name_of in subs:
+                    src = os.path.join(stream_dir, sub, side, name_of(basename, fname))
+                    if not os.path.exists(src):
+                        continue
+                    dst_dir = os.path.join(stream_dir, sub, dest)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    os.replace(src, os.path.join(dst_dir, os.path.basename(src)))
             moved += 1
     return moved, kept
 
