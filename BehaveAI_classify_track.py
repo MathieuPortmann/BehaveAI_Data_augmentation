@@ -233,21 +233,42 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
     If a YOLOv2x-style run was just created under runs/.../<run_name>,
     move that run/<run_name> directory into project_path/<run_name>.
     Returns the destination path on success, or None on failure / nothing found.
+
+    This is a FALLBACK. BehaveAI_train_worker.py passes project=project_path and
+    name=run_name, so Ultralytics normally writes straight to the destination and
+    there is nothing under runs/ to rescue. It only earns its keep when a run
+    lands elsewhere.
+
+    Both guards below exist because this function used to destroy the model it
+    was meant to install: it deleted the destination up front and then moved in
+    whatever the glob found, so a single stale runs/**/train left by an earlier
+    interrupted run wiped the weights Ultralytics had just written. The move
+    failure is caught and only warned about, so the pipeline carried on and blew
+    up much later on YOLO(<model>/train/weights/best.pt) with a bare
+    FileNotFoundError -- a long way from the cause.
     """
+    dst_train = os.path.join(project_path, run_name)  # e.g. model_primary_motion/train
+
+    # Guard 1: the training already landed where it belongs. Importing a stray
+    # run over it would replace a fresh model with an older, unrelated one.
+    if os.path.exists(os.path.join(dst_train, "weights", "best.pt")):
+        return dst_train
+
     # look first in runs/detect/**/train then in runs/**/train
     candidates = glob.glob(os.path.join(runs_root, "detect", "**", run_name), recursive=True)
     if not candidates:
         candidates = glob.glob(os.path.join(runs_root, "**", run_name), recursive=True)
 
-    # keep only directories
-    candidates = [p for p in candidates if os.path.isdir(p)]
+    # Guard 2: keep only directories that actually hold trained weights. An
+    # empty or half-written run folder is not worth deleting the destination for.
+    candidates = [p for p in candidates
+                  if os.path.isdir(p) and os.path.exists(os.path.join(p, "weights", "best.pt"))]
     if not candidates:
         return None
 
     # pick most recently modified candidate
     candidates = sorted(candidates, key=os.path.getmtime, reverse=True)
     src_train = candidates[0]                     # e.g. runs/detect/2026-02-24_train
-    dst_train = os.path.join(project_path, run_name)  # e.g. model_primary_motion/train
 
     try:
         # remove existing destination so the move yields the expected layout
@@ -657,6 +678,32 @@ def train_in_subprocess(weights, data, epochs, imgsz, project, workers=4, patien
 			pass
 
 
+def _assert_weights(model_type, project_path, model_path):
+	"""Fail here, with the context, when a training run left no weights behind.
+
+	The caller loads model_path with YOLO() a few lines later. Without this the
+	only symptom is a bare FileNotFoundError from inside torch.serialization,
+	which says nothing about which model failed or why, and arrives after the
+	training log has scrolled away.
+	"""
+	if os.path.exists(model_path):
+		return
+	found = []
+	if os.path.isdir(project_path):
+		for root, _dirs, files in os.walk(project_path):
+			for f in files:
+				if f.endswith('.pt'):
+					found.append(os.path.relpath(os.path.join(root, f), project_path))
+	raise RuntimeError(
+		f"Training reported success for '{model_type}' but produced no weights at "
+		f"{model_path}.\n"
+		f"  .pt files under {project_path}: {found or 'none'}\n"
+		f"  Check the training log above for an Ultralytics error, and for a stray "
+		f"'runs/' directory next to the project -- a leftover run there used to be "
+		f"moved over the freshly trained model."
+	)
+
+
 def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz, patience=None, train_overrides=None):
 	"""
 	Decide whether to (re)train a model based on existence and image counts.
@@ -710,6 +757,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 		print(f'Training new {model_type} model using existing weights...')
 		train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path, patience=patience, train_overrides=train_overrides)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
+		_assert_weights(model_type, project_path, model_path)
 		print(f'Done training {model_type} model')
 		# Update saved train count
 		with open(os.path.join(project_path, 'train_count.txt'), 'w') as f:
@@ -730,6 +778,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 		print(f'{model_type} model not found, building it...')
 		train_in_subprocess(classifier, yaml_path, epochs, imgsz, project_path, patience=patience, train_overrides=train_overrides)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
+		_assert_weights(model_type, project_path, model_path)
 		print(f'Done training {model_type} model')
 
 		current_count = count_images_in_dataset(yaml_path)
