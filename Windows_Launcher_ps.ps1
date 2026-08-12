@@ -79,9 +79,10 @@ try {
         return $false
     }
 
-    # Map a CUDA version string (e.g. "12.8") reported by nvidia-smi to the closest
-    # PyTorch wheel tag that actually ships a torch 2.10.0 build. Only cu126/cu128/cu130
-    # exist for torch 2.10.0; older toolkits (cu118/cu121/cu124) have no 2.10.0 wheel.
+    # Map a CUDA version string (e.g. "12.8") reported by nvidia-smi to the newest PyTorch
+    # wheel tag that the driver can run. Only cu126/cu128/cu130 are still published; older
+    # toolkits (cu118/cu121/cu124) get no builds of current torch releases. Note the CUDA
+    # index usually trails PyPI by a release or two - that is expected, not an error.
     function Map-CudaVersionToWheel {
         param([string]$ver)
         if (-not $ver) { return $null }
@@ -90,7 +91,7 @@ try {
         if ($v -ge 13.0) { return @{ indexUrl = "https://download.pytorch.org/whl/cu130"; label="cu130" } }
         elseif ($v -ge 12.8) { return @{ indexUrl = "https://download.pytorch.org/whl/cu128"; label="cu128" } }
         elseif ($v -ge 12.6) { return @{ indexUrl = "https://download.pytorch.org/whl/cu126"; label="cu126" } }
-        else { return $null }  # < 12.6: no compatible torch 2.10 CUDA wheel -> custom flow
+        else { return $null }  # < 12.6: no currently published CUDA wheel -> custom flow
     }
 
     # Open the PyTorch "get started" page and let the user paste the exact install
@@ -120,6 +121,13 @@ try {
         # through the venv's interpreter.
         $argLine = $pasted.Trim()
         $argLine = [regex]::Replace($argLine, '^(python3?\s+-m\s+pip|pip3?)\s+', '', 'IgnoreCase')
+
+        # The command pytorch.org generates is a plain "install torch torchvision --index-url
+        # ...", which pip skips outright when a CPU torch of the same or a higher version is
+        # already in the venv. Add the same two flags the automatic path uses so the pasted
+        # command really does replace it. The full command is shown for confirmation below.
+        if ($argLine -notmatch '(?i)--force-reinstall') { $argLine = "$argLine --force-reinstall" }
+        if ($argLine -notmatch '(?i)--no-deps')         { $argLine = "$argLine --no-deps" }
 
         Write-Host ""
         Write-Host "The following command will run inside the venv:" -ForegroundColor Cyan
@@ -183,13 +191,13 @@ try {
                     Write-Host "Auto-selected wheel: $($wheel.label)"
                     return @{ mode="index"; indexUrl = $wheel.indexUrl; label = $wheel.label }
                 } else {
-                    Write-Warning "No torch 2.10 CUDA wheel matches your driver (CUDA '$ver'). Switching to custom install."
+                    Write-Warning "No published CUDA wheel matches your driver (CUDA '$ver'). Switching to custom install."
                     return @{ mode="custom" }
                 }
             }
             "3" {
                 Write-Host ""
-                Write-Host "Manual CUDA wheel choices (only tags with a torch 2.10.0 build):"
+                Write-Host "Manual CUDA wheel choices (the tags PyTorch still publishes):"
                 Write-Host "  a) cu126 (CUDA 12.6)"
                 Write-Host "  b) cu128 (CUDA 12.8)"
                 Write-Host "  c) cu130 (CUDA 13.0)"
@@ -294,10 +302,15 @@ try {
                 [void](Invoke-CustomTorchInstall -venvPython $venvPython)
             } else {
                 Write-Host "Installing PyTorch ($($torchChoice.label)) - version chosen by your machine/CUDA, not requirements.txt..."
-                # --upgrade so it replaces any CPU torch pulled above; --no-deps so it cannot
-                # disturb the pinned requirements packages (numpy, etc.) - torch's runtime
-                # deps are already provided by requirements.txt. torchaudio omitted (unused).
-                & $venvPython -m pip install --upgrade --no-deps --index-url $torchChoice.indexUrl torch torchvision
+                # --force-reinstall, NOT --upgrade: the CPU torch that PyPI pulled above often
+                # carries the same or an even HIGHER version than the newest build on the CUDA
+                # index (seen in the wild: PyPI 2.13.0 vs cu128 2.11.0), so pip answers
+                # "Requirement already satisfied", changes nothing, and leaves the machine on
+                # CPU. --force-reinstall installs whatever the chosen index serves, downgrade
+                # included. --no-deps so it cannot disturb the pinned requirements packages
+                # (numpy, etc.) - torch's runtime deps are already provided by
+                # requirements.txt. torchaudio omitted (unused).
+                & $venvPython -m pip install --force-reinstall --no-deps --index-url $torchChoice.indexUrl torch torchvision
             }
             if ($LASTEXITCODE -ne 0) { Write-Warning "PyTorch install returned non-zero exit code; you may need to retry manually." }
         } catch {
@@ -315,10 +328,24 @@ try {
             Write-Warning "ultralytics import: FAILED - check the log for details."
         }
 
-        # torch
+        # torch - importing is not enough: a CUDA request that silently lands on a CPU build
+        # still imports fine and only shows up much later, as training running orders of
+        # magnitude too slow. Check the build actually matches what was asked for.
         try {
-            & $venvPython -c "import torch; print('torch OK', torch.__version__)" | Out-Host
+            & $venvPython -c "import torch; print('torch OK', torch.__version__, 'cuda_available=' + str(torch.cuda.is_available()))" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "torch import returned exit code $LASTEXITCODE" }
             Write-Host "torch import: SUCCESS"
+
+            if ($torchChoice.label -and $torchChoice.label -ne "cpu") {
+                $cudaOk = & $venvPython -c "import torch; print(1 if torch.cuda.is_available() else 0)"
+                if ("$cudaOk".Trim() -eq "1") {
+                    & $venvPython -c "import torch; print('CUDA device:', torch.cuda.get_device_name(0))" | Out-Host
+                } else {
+                    Write-Warning "You selected $($torchChoice.label) but torch reports NO usable CUDA device - this build will run on CPU."
+                    Write-Warning "Retry manually with:"
+                    Write-Warning "  `"$venvPython`" -m pip install --force-reinstall --no-deps --index-url $($torchChoice.indexUrl) torch torchvision"
+                }
+            }
         } catch {
             Write-Warning "torch import: FAILED - if you requested CUDA, confirm your NVIDIA driver and chosen CUDA wheel."
         }
