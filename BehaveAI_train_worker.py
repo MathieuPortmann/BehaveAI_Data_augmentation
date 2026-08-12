@@ -44,6 +44,21 @@ def main():
 	if cfg.get("cwd"):
 		os.chdir(cfg["cwd"])
 
+	# Anchor the output project (and the dataset, when it is a local path) to
+	# absolute paths now that the cwd is the project dir. Ultralytics only writes
+	# where it is told when `project` is absolute: cfg/__init__.get_save_dir()
+	# turns a RELATIVE project into `<runs_dir>/<task>/<project>/<name>`, and
+	# runs_dir comes from the machine-global Ultralytics settings.json. A machine
+	# whose runs_dir is absolute (e.g. D:\...\BehaveAI_HERDWISE\runs) therefore
+	# wrote the weights outside the project, where the pipeline never found them
+	# and training "succeeded" with no best.pt. An absolute dataset path likewise
+	# makes the yaml's train/val entries resolve against the yaml's own directory
+	# instead of the datasets_dir setting.
+	project = os.path.abspath(cfg["project"])
+	data = cfg["data"]
+	if os.path.exists(data):
+		data = os.path.abspath(data)
+
 	from ultralytics import YOLO
 
 	# Disable the pinned-memory dataloader thread. That thread is what raised
@@ -77,10 +92,10 @@ def main():
 
 	model = YOLO(cfg["weights"])
 	train_kwargs = dict(
-		data=cfg["data"],
+		data=data,
 		epochs=cfg["epochs"],
 		imgsz=cfg["imgsz"],
-		project=cfg["project"],
+		project=project,
 		name="train",
 		exist_ok=True,
 		workers=cfg.get("workers", 4),

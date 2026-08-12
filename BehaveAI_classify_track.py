@@ -694,6 +694,19 @@ def _assert_weights(model_type, project_path, model_path):
 			for f in files:
 				if f.endswith('.pt'):
 					found.append(os.path.relpath(os.path.join(root, f), project_path))
+	# Where Ultralytics would have written the run had it ignored our absolute
+	# project path (machine-global runs_dir + task + project). Naming it turns a
+	# "no weights" dead end into a one-line fix for whoever reads the traceback.
+	elsewhere = ''
+	try:
+		from ultralytics.utils import SETTINGS as _ULTRA_SETTINGS
+		_runs = str(_ULTRA_SETTINGS.get('runs_dir', ''))
+		if _runs:
+			_stray = os.path.join(_runs, 'detect', os.path.basename(project_path), 'train')
+			_hit = ' <-- weights are here' if os.path.exists(os.path.join(_stray, 'weights', 'best.pt')) else ''
+			elsewhere = f"\n  Ultralytics runs_dir is '{_runs}'; check {_stray}{_hit}"
+	except Exception:
+		pass
 	raise RuntimeError(
 		f"Training reported success for '{model_type}' but produced no weights at "
 		f"{model_path}.\n"
@@ -701,6 +714,7 @@ def _assert_weights(model_type, project_path, model_path):
 		f"  Check the training log above for an Ultralytics error, and for a stray "
 		f"'runs/' directory next to the project -- a leftover run there used to be "
 		f"moved over the freshly trained model."
+		f"{elsewhere}"
 	)
 
 
