@@ -420,6 +420,34 @@ PARAM_HELP = {
         "what": "How many passes over the training set when training a primary model.",
         "influence": "More epochs can improve accuracy up to a point, then overfit and waste time.",
     },
+    "primary_imgsz": {
+        "short": "Resolution the primary detectors are trained and run at (default 640).",
+        "what": (
+            "The frame is resized so its long side is this many pixels, for BOTH training "
+            "and inference -- the value is stored in the checkpoint, so predict() inherits it "
+            "automatically and the two can never disagree."
+        ),
+        "influence": (
+            "This is the single strongest control over small-animal recall. A drone frame is "
+            "3840 px wide, so at 640 everything shrinks by a factor of 6: a horse 50 px across "
+            "becomes 8 px, below what the detector can resolve. Doubling to 1280 doubles every "
+            "animal's apparent size but costs roughly 4x the GPU memory and time. Raise it when "
+            "the animals are small in frame and recall on the smallest ones is poor; leave it at "
+            "640 when they are already large or the GPU is limited. Must be a multiple of 32."
+        ),
+    },
+    "secondary_imgsz": {
+        "short": "Resolution the crop classifiers are trained and run at (default 224).",
+        "what": (
+            "Each detected animal is cut out and resized to this square before the secondary, "
+            "species and age classifiers see it."
+        ),
+        "influence": (
+            "Crops are already small (a horse is often well under 224 px across), so raising "
+            "this mostly upsamples blur and buys little; it matters only if the crops are "
+            "routinely larger than 224. Must be a multiple of 32."
+        ),
+    },
     "secondary_classifier": {
         "short": "Base YOLO classifier for the secondary (sub-class) models.",
         "what": "Pretrained classification weights for the secondary stage.",

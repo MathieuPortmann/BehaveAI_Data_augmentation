@@ -52,6 +52,13 @@ CLASSIFIER_OPTIONS = [
 	'yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt',
 ]
 
+# Training/inference resolutions offered in the dropdowns. YOLO needs a multiple
+# of 32; these are the usual rungs, and cost scales with the square, so each step
+# up is roughly (new/old)^2 times the GPU memory and time.
+PRIMARY_IMGSZ_OPTIONS = ['320', '416', '512', '640', '768', '896',
+						 '1024', '1280', '1536', '1920']
+SECONDARY_IMGSZ_OPTIONS = ['96', '128', '160', '192', '224', '256', '320', '384', '448']
+
 RESERVED_HOTKEYS = {'u', 'g'}
 
 DEFAULT_CLASS_COLORS = [
@@ -1353,6 +1360,18 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.primary_epochs_var, width=8, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'primary_epochs').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
+		help_label(tab3, 'Primary image size', 'primary_imgsz').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		# String-backed: a readonly Combobox hands back its text, and keeping the
+		# variable a string lets a hand-edited INI value survive round-tripping
+		# instead of being snapped to the nearest offered rung.
+		self.primary_imgsz_var = tk.StringVar(value='640')
+		self.primary_imgsz_combo = ttk.Combobox(
+			tab3, values=PRIMARY_IMGSZ_OPTIONS, textvariable=self.primary_imgsz_var,
+			state='readonly', width=8)
+		self.primary_imgsz_combo.grid(row=t, column=1, sticky='w', padx=8); t += 1
+		self.primary_imgsz_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'primary_imgsz').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
 		help_label(tab3, 'Secondary classifier', 'secondary_classifier').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.secondary_classifier_var = tk.StringVar(value='yolo26n-cls.pt')
 		secondary_opts = [mm.replace('.pt','-cls.pt') for mm in CLASSIFIER_OPTIONS if mm.startswith('yolo')]
@@ -1364,6 +1383,15 @@ class SettingsEditorApp(tk.Tk):
 		self.secondary_epochs_var = tk.IntVar(value=100)
 		ttk.Spinbox(tab3, from_=1, to=10000, textvariable=self.secondary_epochs_var, width=8, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'secondary_epochs').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		help_label(tab3, 'Secondary image size', 'secondary_imgsz').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.secondary_imgsz_var = tk.StringVar(value='224')
+		self.secondary_imgsz_combo = ttk.Combobox(
+			tab3, values=SECONDARY_IMGSZ_OPTIONS, textvariable=self.secondary_imgsz_var,
+			state='readonly', width=8)
+		self.secondary_imgsz_combo.grid(row=t, column=1, sticky='w', padx=8); t += 1
+		self.secondary_imgsz_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'secondary_imgsz').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
 		self.use_ncnn_var = tk.BooleanVar(value=False)
 		cb_ncnn = ttk.Checkbutton(tab3, text='use_ncnn  ' + 'ⓘ', variable=self.use_ncnn_var, command=self._set_dirty)
@@ -2199,8 +2227,12 @@ class SettingsEditorApp(tk.Tk):
 		self.val_frequency_var.set(float(d.get('val_frequency', fallback='0.2')))
 		self.primary_classifier_var.set(d.get('primary_classifier', fallback='yolo26n.pt'))
 		self.primary_epochs_var.set(int(d.get('primary_epochs', fallback='100')))
+		self._load_imgsz(self.primary_imgsz_combo, self.primary_imgsz_var,
+						 PRIMARY_IMGSZ_OPTIONS, d.get('primary_imgsz', fallback='640'), 640)
 		self.secondary_classifier_var.set(d.get('secondary_classifier', fallback='yolo26n-cls.pt'))
 		self.secondary_epochs_var.set(int(d.get('secondary_epochs', fallback='100')))
+		self._load_imgsz(self.secondary_imgsz_combo, self.secondary_imgsz_var,
+						 SECONDARY_IMGSZ_OPTIONS, d.get('secondary_imgsz', fallback='224'), 224)
 		self.use_ncnn_var.set(self._str_to_bool(d.get('use_ncnn', fallback='false')))
 		self.primary_conf_var.set(float(d.get('primary_conf_thresh', fallback='0.5')))
 		self.secondary_conf_var.set(float(d.get('secondary_conf_thresh', fallback='0.5')))
@@ -2372,6 +2404,37 @@ class SettingsEditorApp(tk.Tk):
 		if s is None:
 			return False
 		return str(s).lower() in ('1', 'true', 'yes', 'on')
+
+	def _imgsz_text(self, var, fallback):
+		"""The dropdown's value as a clean integer string for the INI."""
+		try:
+			value = int(float(str(var.get()).strip()))
+		except (TypeError, ValueError):
+			value = fallback
+		return str(value if value >= 32 else fallback)
+
+	def _load_imgsz(self, combo, var, options, raw, fallback):
+		"""Select an image size in a readonly dropdown without losing a value the
+		INI holds but the list does not offer.
+
+		The dropdowns list the usual rungs, yet the INI is a plain text file: a
+		hand-written 1152 is perfectly valid for YOLO (multiple of 32) and must
+		survive a visit to the settings window. Snapping it to the nearest rung
+		would silently retrain at a resolution nobody asked for, so an unlisted
+		value is added to this combobox's own list and selected instead.
+
+		The list is reconfigured on every load, so a custom rung carried by one
+		project does not linger after switching to another."""
+		try:
+			value = int(float(str(raw).strip()))
+		except (TypeError, ValueError):
+			value = fallback
+		if value < 32:
+			value = fallback
+		text = str(value)
+		combo.configure(values=(list(options) if text in options
+								else sorted(set(options) | {text}, key=int)))
+		var.set(text)
 
 	# ----------------------- YAML writer -----------------------
 
@@ -2796,8 +2859,10 @@ class SettingsEditorApp(tk.Tk):
 		# model type
 		new_default['primary_classifier'] = self.primary_classifier_var.get()
 		new_default['primary_epochs'] = str(self.primary_epochs_var.get())
+		new_default['primary_imgsz'] = self._imgsz_text(self.primary_imgsz_var, 640)
 		new_default['secondary_classifier'] = self.secondary_classifier_var.get()
 		new_default['secondary_epochs'] = str(self.secondary_epochs_var.get())
+		new_default['secondary_imgsz'] = self._imgsz_text(self.secondary_imgsz_var, 224)
 		new_default['use_ncnn'] = str(self.use_ncnn_var.get()).lower()
 		new_default['primary_conf_thresh'] = str(self.primary_conf_var.get())
 		new_default['secondary_conf_thresh'] = str(self.secondary_conf_var.get())

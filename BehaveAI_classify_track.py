@@ -415,6 +415,19 @@ try:
 	# stops after `train_patience` epochs with no val improvement (Ultralytics
 	# default is 100, which effectively never triggers on short runs).
 	train_patience = int(config['DEFAULT'].get('train_patience', '30'))
+	# Training/inference resolution. Ultralytics stores imgsz in the checkpoint and
+	# predict() reads it back, so a single value governs both ends and they cannot
+	# drift apart. 640 on a 3840px drone frame shrinks every animal by 6x, which is
+	# what limits recall on the small ones -- see the primary_imgsz help entry.
+	# YOLO requires a multiple of 32; round rather than fail deep inside training.
+	def _imgsz(key, default):
+		v = int(config['DEFAULT'].get(key, default))
+		snapped = max(32, int(round(v / 32.0)) * 32)
+		if snapped != v:
+			print(f"{key}={v} is not a multiple of 32; using {snapped}.")
+		return snapped
+	primary_imgsz = _imgsz('primary_imgsz', '640')
+	secondary_imgsz = _imgsz('secondary_imgsz', '224')
 	# Share of whole videos held out. The annotation tool already routes frames
 	# to annot_<stream>/images/{train,val} with it; the crop classifiers below
 	# get the same partition through build_classification_split.
@@ -964,7 +977,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary static', _static_train_yaml, primary_static_project_path,
-			primary_static_model_path, primary_classifier, primary_epochs, 640, patience=train_patience)
+			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience)
 
 
 	if primary_motion_classes:
@@ -977,7 +990,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary motion', _motion_train_yaml, primary_motion_project_path,
-			primary_motion_model_path, primary_classifier, primary_epochs, 640, patience=train_patience, train_overrides=motion_train_overrides)
+			primary_motion_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=motion_train_overrides)
 
 	if hierarchical_mode:
 		# Static stream (pooled over all static primaries)
@@ -988,7 +1001,7 @@ if __name__ == '__main__':
 			# unseeded (see behaveai_holdout.build_classification_split).
 			_static_crop_data = build_classification_split(secondary_static_data_path, val_frequency)
 			maybe_retrain('secondary_static', _static_crop_data, secondary_static_project_path,
-				secondary_static_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
+				secondary_static_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
 			if use_ncnn == 'true':
 				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
 			else:
@@ -1004,7 +1017,7 @@ if __name__ == '__main__':
 		if _motion_class_count >= 2:
 			_motion_crop_data = build_classification_split(secondary_motion_data_path, val_frequency)
 			maybe_retrain('secondary_motion', _motion_crop_data, secondary_motion_project_path,
-				secondary_motion_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience, train_overrides=motion_train_overrides)
+				secondary_motion_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=motion_train_overrides)
 			if use_ncnn == 'true':
 				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
 			else:
@@ -1023,7 +1036,7 @@ if __name__ == '__main__':
 	if _species_class_count >= 2:
 		_species_crop_data = build_classification_split(species_cropped_base_dir, val_frequency)
 		maybe_retrain('species', _species_crop_data, 'model_species',
-			species_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
+			species_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
 		if use_ncnn == 'true':
 			model_species = load_model_with_ncnn_preference(species_model_path, "classify")
 		else:
@@ -1037,7 +1050,7 @@ if __name__ == '__main__':
 	if _age_class_count >= 2:
 		_age_crop_data = build_classification_split(age_cropped_base_dir, val_frequency)
 		maybe_retrain('age', _age_crop_data, 'model_age',
-			age_model_path, secondary_classifier, secondary_epochs, 224, patience=train_patience)
+			age_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
 		if use_ncnn == 'true':
 			model_age = load_model_with_ncnn_preference(age_model_path, "classify")
 		else:
