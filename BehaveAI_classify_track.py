@@ -512,6 +512,10 @@ try:
 	font_size = float(config['DEFAULT'].get('font_size', '0.5'))
 	# Box/label styling shared with the annotation tool (see behaveai_render.py).
 	render_style = load_render_style(config)
+	# Whether to write <video>_detected.mp4 alongside the tracking CSV. Off by
+	# default: the CSVs are the result of a run, the annotated copy is a visual
+	# check that costs roughly the size of the source clip per video.
+	detection_video_enabled = config['DEFAULT'].get('detection_video_enabled', 'false').lower() == 'true'
 	frame_skip = int(config['DEFAULT'].get('frame_skip', '0'))
 	ab_analysis_duration_s = float(config['DEFAULT'].get('ab_analysis_duration_s', '0'))
 
@@ -1271,10 +1275,12 @@ if __name__ == '__main__':
 		else:
 			max_frame_limit = None
 
-		writer = cv2.VideoWriter(
-			os.path.join(output_folder, base + "_detected.mp4"),
-			cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h)
-		)
+		writer = None
+		if detection_video_enabled:
+			writer = cv2.VideoWriter(
+				os.path.join(output_folder, base + "_detected.mp4"),
+				cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h)
+			)
 
 		if primary_static_classes:
 			if use_ncnn == 'true':
@@ -1792,7 +1798,8 @@ if __name__ == '__main__':
 				# ~ # print frame number
 				draw_frame_number(frame, str(current_frame), render_style)
 
-				writer.write(frame)
+				if writer is not None:
+					writer.write(frame)
 
 				if print_tick > progress_update:
 					elapsed = time.time() - start_time
@@ -1810,7 +1817,8 @@ if __name__ == '__main__':
 				frame_count = 0
 
 		cap.release()
-		writer.release()
+		if writer is not None:
+			writer.release()
 		csv_file.close()
 		print(f"Done processing {base} | {current_fps:.1f} FPS")
 

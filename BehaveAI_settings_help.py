@@ -788,6 +788,17 @@ PARAM_HELP = {
                      "narrower; fewer columns give wider buttons but a taller panel.",
     },
 
+    # ---------------- Output video ----------------
+    "detection_video_enabled": {
+        "short": "Write a copy of each video with the boxes drawn on it.",
+        "what": "Saves <video>_detected.mp4 next to the tracking CSV, showing every box, label "
+                "and track ID the pipeline produced. Off by default: the CSVs are the actual "
+                "result, the video is a visual check.",
+        "influence": "Off, a batch runs faster and writes far less to disk — an annotated 4K clip "
+                     "is roughly the size of the source. On, you get something you can watch to "
+                     "judge detection and tracking quality, which no CSV will show you.",
+    },
+
     # ---------------- Box & label style (shared: output videos + annotation) ----------------
     "adaptive_box_scaling": {
         "short": "Scale label text and box lines to each animal's box size.",

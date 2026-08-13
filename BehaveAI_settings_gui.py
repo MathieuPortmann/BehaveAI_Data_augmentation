@@ -1902,6 +1902,17 @@ class SettingsEditorApp(tk.Tk):
 		# Scrollable: the box & label style section makes this tab taller than the window.
 		tab5 = self._scroll_tab(notebook, 'Display Settings')
 
+		# Output video - whether the pipeline writes <video>_detected.mp4 at all.
+		# Off by default: the tracking CSVs are the result, the annotated video is
+		# a visual check that costs roughly the size of the source clip.
+		ttk.Label(tab5, text='Output video', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 4))
+		self.detection_video_enabled_var = tk.BooleanVar(value=False)
+		cb_detvid = ttk.Checkbutton(tab5, text='Save video copy with bounding boxes  ' + 'ⓘ',
+			variable=self.detection_video_enabled_var, command=self._set_dirty)
+		cb_detvid.pack(anchor='w', padx=8, pady=(6, 0))
+		Tooltip(cb_detvid, tooltip_text('detection_video_enabled'))
+		help_line(tab5, 'detection_video_enabled').pack(anchor='w', padx=24, pady=(0, 4))
+
 		# viewing options
 		ttk.Label(tab5, text='Viewing options', style='Section.TLabel').pack(anchor='w', padx=8, pady=(10, 4))
 		self.line_thickness_var = tk.IntVar(value=1)
@@ -2130,6 +2141,10 @@ class SettingsEditorApp(tk.Tk):
 		self.box_line_scale_var.set(float(d.get('box_line_scale', fallback='0.5')))
 		self.box_font_scale_var.set(float(d.get('box_font_scale', fallback='0.35')))
 		self.buttons_per_row_var.set(int(d.get('buttons_per_row', fallback='8')))
+
+		# output video (default off: the CSVs are the result, the video is a check)
+		self.detection_video_enabled_var.set(
+			self._str_to_bool(d.get('detection_video_enabled', fallback='false')))
 
 		# box & label style (see behaveai_render.py)
 		self.adaptive_box_scaling_var.set(self._str_to_bool(d.get('adaptive_box_scaling', fallback='true')))
@@ -2708,6 +2723,9 @@ class SettingsEditorApp(tk.Tk):
 		new_default['box_line_scale'] = str(self.box_line_scale_var.get())
 		new_default['box_font_scale'] = str(self.box_font_scale_var.get())
 		new_default['buttons_per_row'] = str(self.buttons_per_row_var.get())
+
+		# output video (default off: the CSVs are the result, the video is a check)
+		new_default['detection_video_enabled'] = str(self.detection_video_enabled_var.get()).lower()
 
 		# box & label style (see behaveai_render.py)
 		new_default['adaptive_box_scaling'] = str(self.adaptive_box_scaling_var.get()).lower()
