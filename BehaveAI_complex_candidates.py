@@ -263,16 +263,21 @@ def _active_learning_candidates(cache, params, bundle):
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def _video_metadata(output_dir, stem):
-	"""Return (fps, width, height) by reading the source video if found, else ('', '', '')."""
+def _video_metadata(output_dir, stem, config_path=None):
+	"""Return (fps, width, height) by reading the source video if found, else ('', '', '').
+
+	Needs the INI to know where the videos are: input/clips used to be guessed
+	as siblings of the output directory, which found nothing as soon as a
+	project pointed either key elsewhere. Without a config_path there is nothing
+	to consult, so the metadata columns are simply left empty.
+	"""
+	if not config_path:
+		return ('', '', '')
 	try:
 		import cv2
-		from BehaveAI_annotation_complex import find_annotatable_videos
-		# input/clips are resolved relative to the project (output_dir parent).
-		project_dir = os.path.dirname(os.path.abspath(output_dir))
-		vids = find_annotatable_videos(output_dir,
-									   os.path.join(project_dir, 'input'),
-									   os.path.join(project_dir, 'clips'))
+		from BehaveAI_annotation_complex import find_annotatable_videos, resolve_dirs
+		_pdir, _odir, input_dir, clips_dir = resolve_dirs(config_path)
+		vids = find_annotatable_videos(output_dir, input_dir, clips_dir)
 		path = next((v['video_path'] for v in vids if v['stem'] == stem and v['video_path']), None)
 		if path and os.path.exists(path):
 			cap = cv2.VideoCapture(path)
@@ -321,7 +326,7 @@ def generate_candidates_for_video(stem, csv_path, output_dir, params, bundle,
 		cands += al
 
 	cands = _dedup(cands)
-	fps, w, h = _video_metadata(output_dir, stem)
+	fps, w, h = _video_metadata(output_dir, stem, config_path)
 
 	video_filename = stem
 	out_path = candidate_csv_path(output_dir, stem)

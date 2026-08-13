@@ -26,7 +26,7 @@ import configparser
 from BehaveAI_augmentation import load_augmentation_config
 from BehaveAI_settings_help import apply_theme, Tooltip, BUTTON_HELP
 from behaveai_holdout import is_holdout_video, video_label_for_annotation
-from behaveai_config import load_secondary_config, NONE_LABEL
+from behaveai_config import load_secondary_config, NONE_LABEL, resolve_project_dir
 
 
 # -------------------------- utils --------------------------
@@ -532,9 +532,7 @@ class ScriptRunnerApp:
 	                        lines.append(f"    {name:<28} {pool[name]:>5} crops")
 
 	        # ── Videos in clips dir ────────────────────────────────────
-	        clips_dir_raw = d.get('clips_dir', 'clips')
-	        clips_dir = Path(clips_dir_raw) if os.path.isabs(clips_dir_raw) \
-	                    else project_path / clips_dir_raw
+	        clips_dir = Path(resolve_project_dir(d, project_path, 'clips'))
 
 	        video_ext = ('.mp4', '.avi', '.mov', '.mkv')
 	        clips_entries, clips_status = list_dir_with_timeout(clips_dir)

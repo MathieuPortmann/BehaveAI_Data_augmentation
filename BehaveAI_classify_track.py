@@ -9,6 +9,7 @@ import configparser
 from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
+	resolve_project_dirs,
 )
 from behaveai_render import (
 	load_render_style, draw_labeled_detection, draw_frame_number,
@@ -343,23 +344,9 @@ config = configparser.ConfigParser()
 config.optionxform = str  # keep case
 config.read(config_path)
 
-# Helper: resolve a path from INI (absolute or relative to project_dir)
-def resolve_project_path(value, fallback):
-	if value is None or str(value).strip() == '':
-		value = fallback
-	value = str(value)
-	if os.path.isabs(value):
-		return os.path.normpath(value)
-	return os.path.normpath(os.path.join(project_dir, value))
-
-# Read dataset / directory keys from INI (defaults are relative names inside the project)
-clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
-input_dir_ini = config['DEFAULT'].get('input_dir', 'input')
-output_dir_ini = config['DEFAULT'].get('output_dir', 'output')
-
-clips_dir = resolve_project_path(clips_dir_ini, 'clips')
-input_folder = resolve_project_path(input_dir_ini, 'input')
-output_folder = resolve_project_path(output_dir_ini, 'output')
+# Directory keys from the INI: absolute as given, relative to the project
+# otherwise, defaults clips/ input/ output/ inside the project.
+clips_dir, input_folder, output_folder = resolve_project_dirs(config, project_dir)
 
 
 # ---- Species (model 0) + per-species ethogram/age (model 0.5) ----
@@ -1062,8 +1049,13 @@ if __name__ == '__main__':
 	expA2 = 1 - expA
 	expB2 = 1 - expB
 
-	input_folder  = os.path.join(project_dir, 'input')
-	output_folder = os.path.join(project_dir, 'output')
+	# input_folder / output_folder come from the INI (resolved at module level).
+	# They used to be overwritten here with <project_dir>/input and
+	# <project_dir>/output, which silently ignored input_dir/output_dir: a
+	# project pointing its videos elsewhere found nothing to process and said
+	# nothing about it.
+	print(f"Reading videos from: {input_folder}")
+	print(f"Writing results to:  {output_folder}")
 
 	progress_update = 10 # print progress every n frames
 

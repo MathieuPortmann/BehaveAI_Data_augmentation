@@ -63,6 +63,12 @@ except ImportError:  # run directly from inside the package dir
 	from flightlog import load_flightlog, sample_flightlog, flightlog_summary
 	from horizon_geometry import pixel_focal_length, horizon_row, ground_point_from_pixel
 
+try:
+	from behaveai_config import resolve_project_dir
+except ImportError:  # run directly: the repo root is not on sys.path
+	sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+	from behaveai_config import resolve_project_dir
+
 VIDEO_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.MP4', '.AVI', '.MOV', '.MKV')
 
 
@@ -592,13 +598,8 @@ def _media_dirs(config_path):
 	cfg.optionxform = str
 	cfg.read(config_path)
 	project_dir = os.path.dirname(os.path.abspath(config_path))
-	d = cfg['DEFAULT']
-
-	def _resolve(key, default):
-		v = d.get(key, default)
-		return v if os.path.isabs(v) else os.path.join(project_dir, v)
-
-	return _resolve('input_dir', 'input'), _resolve('clips_dir', 'clips')
+	return (resolve_project_dir(cfg, project_dir, 'input'),
+			resolve_project_dir(cfg, project_dir, 'clips'))
 
 
 def build_video_index(config_path):
@@ -644,9 +645,7 @@ def run_metric_geometry(config_path):
 	cfg.read(config_path)
 	d = cfg['DEFAULT']
 
-	output_dir_raw = d.get('output_dir', 'output')
-	output_dir = output_dir_raw if os.path.isabs(output_dir_raw) \
-		else os.path.join(project_dir, output_dir_raw)
+	output_dir = resolve_project_dir(d, project_dir, 'output')
 	input_dir, clips_dir = _media_dirs(config_path)
 
 	video_index = build_video_index(config_path)

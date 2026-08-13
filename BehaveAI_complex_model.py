@@ -56,6 +56,7 @@ from collections import defaultdict, Counter
 
 import numpy as np
 
+from behaveai_config import resolve_project_dir
 import BehaveAI_complex_features as CF
 from behaveai_holdout import is_holdout_video, split_groups
 
@@ -124,8 +125,7 @@ def _resolve_output_dir(config_path):
 	cfg.optionxform = str
 	cfg.read(config_path)
 	project_dir = os.path.dirname(os.path.abspath(config_path))
-	raw = cfg['DEFAULT'].get('output_dir', 'output')
-	return project_dir, (raw if os.path.isabs(raw) else os.path.join(project_dir, raw))
+	return project_dir, resolve_project_dir(cfg, project_dir, 'output')
 
 
 def _config_path_for(project_path):

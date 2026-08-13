@@ -36,6 +36,8 @@ import csv
 import argparse
 import configparser
 
+from behaveai_config import resolve_project_dirs
+
 # Tk / OpenCV are only needed for the interactive app (imported lazily in main()).
 
 COMPLEX_CSV_COLUMNS = [
@@ -96,14 +98,8 @@ def resolve_dirs(config_path):
 	cfg = configparser.ConfigParser()
 	cfg.optionxform = str
 	cfg.read(config_path)
-	d = cfg['DEFAULT']
-
-	def _res(key, default):
-		v = d.get(key, default)
-		return v if os.path.isabs(v) else os.path.join(project_dir, v)
-
-	return (project_dir, _res('output_dir', 'output'),
-			_res('input_dir', 'input'), _res('clips_dir', 'clips'))
+	clips_dir, input_dir, output_dir = resolve_project_dirs(cfg, project_dir)
+	return project_dir, output_dir, input_dir, clips_dir
 
 
 def find_annotatable_videos(output_dir, input_dir, clips_dir):

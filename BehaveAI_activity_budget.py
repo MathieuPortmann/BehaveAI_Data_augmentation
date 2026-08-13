@@ -21,6 +21,8 @@ import sys
 import csv
 import configparser
 import glob
+
+from behaveai_config import resolve_project_dir
 from pathlib import Path
 from collections import defaultdict
 
@@ -606,21 +608,13 @@ def run_activity_budget(config_path, fps_default=30.0):
     ini.optionxform = str
     ini.read(config_path)
     d            = ini['DEFAULT']
-    output_dir_raw = d.get('output_dir', 'output')
-    if os.path.isabs(output_dir_raw):
-        output_dir = output_dir_raw
-    else:
-        output_dir = os.path.join(project_dir, output_dir_raw)
+    output_dir   = resolve_project_dir(d, project_dir, 'output')
 
     metadata     = load_groups_metadata(project_dir)
 
     # Resolve input_dir: protocol videos live here (e.g. Activity_budget folder).
     # Used to locate video files for FPS / dimension reading.
-    input_dir_raw = d.get('input_dir', 'input')
-    if os.path.isabs(input_dir_raw):
-        input_dir = input_dir_raw
-    else:
-        input_dir = os.path.join(project_dir, input_dir_raw)
+    input_dir = resolve_project_dir(d, project_dir, 'input')
 
     # Helper: build a name -> full_path map by walking input_dir recursively.
     # This lets us find any video file regardless of how deep in the tree it lives.
@@ -695,9 +689,7 @@ def run_activity_budget(config_path, fps_default=30.0):
                 break
         # Further fallback: check clips_dir (flat) for backward compatibility
         if video_full_path is None:
-            clips_dir_raw = d.get('clips_dir', 'clips')
-            clips_dir_ab  = clips_dir_raw if os.path.isabs(clips_dir_raw) \
-                            else os.path.join(project_dir, clips_dir_raw)
+            clips_dir_ab = resolve_project_dir(d, project_dir, 'clips')
             for ext in ('.MP4', '.mp4', '.avi', '.mov', '.mkv'):
                 candidate_path = os.path.join(clips_dir_ab, video_stem + ext)
                 if os.path.exists(candidate_path):

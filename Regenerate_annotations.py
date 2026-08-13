@@ -17,6 +17,8 @@ import cv2
 import os
 import numpy as np
 import configparser
+
+from behaveai_config import resolve_project_dir
 import glob
 import sys
 import time
@@ -33,16 +35,6 @@ except Exception:
 # -----------------------
 # Helpers: path resolve / config loader
 # -----------------------
-
-def resolve_project_path(project_dir, value, fallback):
-	"""Resolve a path specified in the INI: absolute or relative to project_dir."""
-	if value is None or str(value).strip() == '':
-		value = fallback
-	value = str(value)
-	if os.path.isabs(value):
-		return os.path.normpath(value)
-	return os.path.normpath(os.path.join(project_dir, value))
-
 
 def load_config(config_path):
 	"""
@@ -99,8 +91,7 @@ def load_config(config_path):
 		raise KeyError(f"Missing configuration parameter: {e}")
 
 	# Resolve clips_dir relative to project_dir (fallback 'clips')
-	clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
-	clips_dir = resolve_project_path(project_dir, clips_dir_ini, 'clips')
+	clips_dir = resolve_project_dir(config, project_dir, 'clips')
 
 	return params, clips_dir
 

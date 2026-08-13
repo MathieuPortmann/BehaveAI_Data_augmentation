@@ -9,7 +9,7 @@ import configparser
 import sys
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
-from behaveai_config import load_secondary_config, NONE_LABEL
+from behaveai_config import load_secondary_config, NONE_LABEL, resolve_project_dirs
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import deque
@@ -158,18 +158,9 @@ config = configparser.ConfigParser()
 config.optionxform = str
 config.read(config_path)
 
-def resolve_project_path(value, fallback):
-	if value is None or str(value).strip() == '':
-		value = fallback
-	value = str(value)
-	return os.path.normpath(value) if os.path.isabs(value) else os.path.normpath(os.path.join(project_dir, value))
-
-clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
-input_dir_ini = config['DEFAULT'].get('input_dir', 'input')
-output_dir_ini = config['DEFAULT'].get('output_dir', 'output')
-clips_dir = resolve_project_path(clips_dir_ini, 'clips')
-input_folder = resolve_project_path(input_dir_ini, 'input')
-output_folder = resolve_project_path(output_dir_ini, 'output')
+# Directory keys from the INI: absolute as given, relative to the project
+# otherwise, defaults clips/ input/ output/ inside the project.
+clips_dir, input_folder, output_folder = resolve_project_dirs(config, project_dir)
 
 # ---------- Raspberry Pi detection & picamera2 handling ----------
 def is_raspberry_pi():

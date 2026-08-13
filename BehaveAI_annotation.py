@@ -21,6 +21,7 @@ from index_annotations import AnnotationIndex
 from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
+	resolve_project_dir,
 )
 from behaveai_render import load_render_style, draw_labeled_detection
 from behaveai_holdout import is_holdout_video
@@ -70,21 +71,12 @@ config = configparser.ConfigParser()
 config.optionxform = str
 config.read(config_path)
 
-def resolve_project_path(value, fallback):
-	if value is None or str(value).strip() == '':
-		value = fallback
-	value = str(value)
-	if os.path.isabs(value):
-		return os.path.normpath(value)
-	return os.path.normpath(os.path.join(project_dir, value))
-
-clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
-clips_dir = resolve_project_path(clips_dir_ini, 'clips')
+clips_dir = resolve_project_dir(config, project_dir, 'clips')
 
 # Second annotation source: input_dir (e.g. Activity_budget folder).
-# If the key is missing or empty the source is simply ignored.
-input_dir_ini = config['DEFAULT'].get('input_dir', '')
-input_dir_for_annotation = resolve_project_path(input_dir_ini, '') if input_dir_ini.strip() else ''
+# fallback='' -> a missing or empty key simply disables this source, instead of
+# falling back to <project_dir>/input like the other stages.
+input_dir_for_annotation = resolve_project_dir(config, project_dir, 'input', fallback='')
 
 
 

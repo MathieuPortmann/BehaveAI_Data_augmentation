@@ -78,6 +78,8 @@ import math
 import hashlib
 import argparse
 import configparser
+
+from behaveai_config import resolve_project_dir
 from collections import defaultdict
 
 import numpy as np
@@ -827,10 +829,9 @@ def run_stitch_project(config_path):
 	project_dir = os.path.dirname(config_path)
 	p = _load_cfg(config_path)
 	cfg = configparser.ConfigParser(); cfg.optionxform = str; cfg.read(config_path)
-	# 'output_dir' is what every other stage reads; 'output_folder' is only a
-	# legacy fallback (an INI using it would otherwise silently stitch nothing).
-	out_raw = cfg['DEFAULT'].get('output_dir') or cfg['DEFAULT'].get('output_folder', 'output')
-	output_dir = out_raw if os.path.isabs(out_raw) else os.path.join(project_dir, out_raw)
+	# resolve_project_dir also honours the legacy 'output_folder' spelling, so an
+	# INI using it does not silently stitch nothing.
+	output_dir = resolve_project_dir(cfg, project_dir, 'output')
 
 	jobs = {}
 	for c in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):

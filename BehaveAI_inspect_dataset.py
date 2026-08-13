@@ -12,7 +12,7 @@ from collections import deque
 import sys
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
-from behaveai_config import load_secondary_config, NONE_LABEL
+from behaveai_config import load_secondary_config, NONE_LABEL, resolve_project_dir
 
 
 # Optional YOLO import
@@ -63,16 +63,7 @@ config = configparser.ConfigParser()
 config.optionxform = str
 config.read(config_path)
 
-def resolve_project_path(value, fallback):
-	if value is None or str(value).strip() == '':
-		value = fallback
-	value = str(value)
-	if os.path.isabs(value):
-		return os.path.normpath(value)
-	return os.path.normpath(os.path.join(project_dir, value))
-
-clips_dir_ini = config['DEFAULT'].get('clips_dir', 'clips')
-clips_dir = resolve_project_path(clips_dir_ini, 'clips')
+clips_dir = resolve_project_dir(config, project_dir, 'clips')
 
 # Read parameters (copied from your inspector; keep consistent)
 try:

@@ -18,6 +18,8 @@
 # secondary_motion_classes, ignore_secondary) and reconstructs an equivalent
 # pool + map so existing projects keep working.
 
+import os
+
 DEFAULT_SECONDARY_COLOR = (200, 200, 200)  # BGR, used when a colour is missing
 
 # Reserved class name for the "no secondary" negative in the secondary classifier.
@@ -29,6 +31,57 @@ NONE_LABEL = "__none__"
 # Default species when a project predates the species feature (species_list absent).
 # Scientific name, matching the convention used for every entry in species_list.
 DEFAULT_SPECIES = "Equus caballus"
+
+# INI keys for the three project directories, newest key first. The `*_folder`
+# spellings are legacy and only ever appear in old settings files.
+PROJECT_DIR_KEYS = {
+    'clips':  ('clips_dir', 'clips_folder'),
+    'input':  ('input_dir', 'input_folder'),
+    'output': ('output_dir', 'output_folder'),
+}
+
+
+def resolve_project_path(value, fallback, project_dir):
+    """Resolve one directory setting: absolute as given, relative to the project.
+
+    Empty or missing falls back to `fallback` (pass '' to mean "this source is
+    disabled", as the annotation tool does for input_dir).
+    """
+    if value is None or str(value).strip() == '':
+        value = fallback
+    value = str(value).strip()
+    if value == '':
+        return ''
+    if os.path.isabs(value):
+        return os.path.normpath(value)
+    return os.path.normpath(os.path.join(project_dir, value))
+
+
+def resolve_project_dir(config, project_dir, which, fallback=None):
+    """Resolve 'clips' | 'input' | 'output' for a project from its INI.
+
+    The single definition of the rule every stage must follow, because they used
+    to each re-implement it and drift: BehaveAI_classify_track resolved the INI
+    values and then overwrote them with a hardcoded <project_dir>/input just
+    before use (a project pointing elsewhere silently processed nothing), the
+    complex-candidate helper rebuilt input/clips from the output directory's
+    parent, and the variants reading the key with a plain .get() sent output to
+    the project root when the key existed but was empty. `config` accepts either
+    a ConfigParser or its [DEFAULT] section.
+    """
+    section = config['DEFAULT'] if hasattr(config, 'sections') else config
+    raw = ''
+    for key in PROJECT_DIR_KEYS[which]:
+        raw = section.get(key, '') or ''
+        if str(raw).strip():
+            break
+    return resolve_project_path(raw, which if fallback is None else fallback, project_dir)
+
+
+def resolve_project_dirs(config, project_dir):
+    """(clips, input, output) for a project, resolved from its INI."""
+    return tuple(resolve_project_dir(config, project_dir, w)
+                 for w in ('clips', 'input', 'output'))
 
 
 def species_slug(name):
