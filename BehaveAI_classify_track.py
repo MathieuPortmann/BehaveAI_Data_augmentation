@@ -1823,6 +1823,17 @@ if __name__ == '__main__':
 			if _fname.lower().endswith(_video_exts):
 				_all_input_videos.append(os.path.join(_dirpath, _fname))
 
+	# Say why nothing will be processed. os.walk() on a missing directory yields
+	# nothing at all, so an input_dir left over from another machine used to end
+	# the run in silence, looking like a success.
+	if not _all_input_videos:
+		if not os.path.isdir(input_folder):
+			print(f"WARNING: input directory does not exist: {input_folder}\n"
+				  f"         Fix 'input_dir' in {os.path.basename(config_path)} "
+				  f"(empty = <project>/input). No video will be processed.")
+		else:
+			print(f"No video found under {input_folder} — nothing to process.")
+
 	for vid in _all_input_videos:
 			process_video(vid)
 
