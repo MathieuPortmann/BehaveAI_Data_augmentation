@@ -1065,6 +1065,13 @@ if __name__ == '__main__':
 		inter = max(0, xb-xa) * max(0, yb-ya)
 		area1 = (box1[2]-box1[0])*(box1[3]-box1[1])
 		area2 = (box2[2]-box2[0])*(box2[3]-box2[1])
+		# A box can be degenerate (zero width or height): YOLO occasionally
+		# returns one thinner than a pixel and int() collapses it. There is no
+		# area to express the intersection as a proportion of, and inter is 0
+		# anyway, so report no overlap instead of dividing by zero -- that crash
+		# used to kill the run 88% into a video.
+		if area1 <= 0 or area2 <= 0:
+			return 0
 		prop1 = inter/area1
 		prop2 = inter/area2
 		# return the larger proportional overlap - e.g. if one box is entirely inside another, this will return a 1.0, whereas the previous wouldn't
@@ -1452,6 +1459,17 @@ if __name__ == '__main__':
 								'primary_conf_combined': 0.0
 							})
 
+
+				# Drop degenerate boxes before anything consumes them. A detection
+				# thinner than a pixel collapses to zero width or height once the
+				# corners are cast to int, and such a box has no crop to classify
+				# and no area to compare -- it is junk, not a detection.
+				_usable = [d for d in all_detections
+						   if d['coords'][2] > d['coords'][0] and d['coords'][3] > d['coords'][1]]
+				if len(_usable) != len(all_detections):
+					print(f"\n  frame {frame_idx}: dropped "
+						  f"{len(all_detections) - len(_usable)} zero-area detection(s)")
+				all_detections = _usable
 
 				# Merge detections based on proximity
 				merged_detections = []
