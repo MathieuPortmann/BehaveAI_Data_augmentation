@@ -24,7 +24,7 @@ from BehaveAI_settings_help import (
 from behaveai_config import (
 	parse_secondary_map, format_secondary_map, load_secondary_config,
 	species_key, get_species_list, load_ethogram_for_species, load_age_classes,
-	DEFAULT_SPECIES,
+	parse_train_overrides, DEFAULT_SPECIES,
 )
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
@@ -1393,6 +1393,18 @@ class SettingsEditorApp(tk.Tk):
 		self.secondary_imgsz_var.trace_add('write', lambda *a: self._set_dirty())
 		help_line(tab3, 'secondary_imgsz').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
+		help_label(tab3, 'Primary train overrides', 'primary_train_overrides').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.primary_train_overrides_var = tk.StringVar(value='')
+		ttk.Entry(tab3, textvariable=self.primary_train_overrides_var, width=44).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		self.primary_train_overrides_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'primary_train_overrides').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		help_label(tab3, 'Secondary train overrides', 'secondary_train_overrides').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.secondary_train_overrides_var = tk.StringVar(value='')
+		ttk.Entry(tab3, textvariable=self.secondary_train_overrides_var, width=44).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		self.secondary_train_overrides_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'secondary_train_overrides').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
 		self.use_ncnn_var = tk.BooleanVar(value=False)
 		cb_ncnn = ttk.Checkbutton(tab3, text='use_ncnn  ' + 'ⓘ', variable=self.use_ncnn_var, command=self._set_dirty)
 		cb_ncnn.grid(row=t, column=0, sticky='w', padx=8, pady=(8, 0)); t += 1
@@ -2233,6 +2245,8 @@ class SettingsEditorApp(tk.Tk):
 		self.secondary_epochs_var.set(int(d.get('secondary_epochs', fallback='100')))
 		self._load_imgsz(self.secondary_imgsz_combo, self.secondary_imgsz_var,
 						 SECONDARY_IMGSZ_OPTIONS, d.get('secondary_imgsz', fallback='224'), 224)
+		self.primary_train_overrides_var.set(d.get('primary_train_overrides', fallback=''))
+		self.secondary_train_overrides_var.set(d.get('secondary_train_overrides', fallback=''))
 		self.use_ncnn_var.set(self._str_to_bool(d.get('use_ncnn', fallback='false')))
 		self.primary_conf_var.set(float(d.get('primary_conf_thresh', fallback='0.5')))
 		self.secondary_conf_var.set(float(d.get('secondary_conf_thresh', fallback='0.5')))
@@ -2863,6 +2877,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['secondary_classifier'] = self.secondary_classifier_var.get()
 		new_default['secondary_epochs'] = str(self.secondary_epochs_var.get())
 		new_default['secondary_imgsz'] = self._imgsz_text(self.secondary_imgsz_var, 224)
+		new_default['primary_train_overrides'] = self.primary_train_overrides_var.get().strip()
+		new_default['secondary_train_overrides'] = self.secondary_train_overrides_var.get().strip()
 		new_default['use_ncnn'] = str(self.use_ncnn_var.get()).lower()
 		new_default['primary_conf_thresh'] = str(self.primary_conf_var.get())
 		new_default['secondary_conf_thresh'] = str(self.secondary_conf_var.get())
@@ -2995,6 +3011,21 @@ class SettingsEditorApp(tk.Tk):
 		if path_error:
 			messagebox.showwarning("Invalid paths", path_error)
 			return
+
+		# Train-override syntax: a rejected entry is silently absent at training
+		# time, which on a long run means finding out hours later that the
+		# experiment ran with the defaults. Say so now, but let the user save
+		# anyway -- a half-typed value is a normal intermediate state.
+		_ovr_problems = []
+		for _var, _label in ((self.primary_train_overrides_var, 'primary_train_overrides'),
+							 (self.secondary_train_overrides_var, 'secondary_train_overrides')):
+			parse_train_overrides(_var.get(), _label, problems=_ovr_problems)
+		if _ovr_problems:
+			messagebox.showwarning(
+				"Train overrides ignored",
+				"These entries will not reach training:\n\n  - "
+				+ "\n  - ".join(_ovr_problems)
+				+ "\n\nEverything else is saved normally.")
 
 		# Determine if we should prompt for regeneration AFTER saving:
 		should_prompt_regen = False

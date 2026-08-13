@@ -9,7 +9,7 @@ import configparser
 from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
-	resolve_project_dirs,
+	resolve_project_dirs, parse_train_overrides,
 )
 from behaveai_render import (
 	load_render_style, draw_labeled_detection, draw_frame_number,
@@ -443,8 +443,36 @@ try:
 	# re-introduces through the back door exactly the colour jitter hsv_*=0 just
 	# removed. Detection training ignores the key.
 	motion_disable_color_aug = config['DEFAULT'].get('motion_disable_color_aug', 'true').lower() == 'true'
-	motion_train_overrides = {'hsv_h': 0.0, 'hsv_s': 0.0, 'hsv_v': 0.0,
-		'auto_augment': None} if motion_disable_color_aug else None
+
+	# User-supplied model.train() kwargs, one set for the detectors and one for
+	# the crop classifiers. They are kept separate because the two tasks read
+	# different keys: `mosaic` is detection-only, while `scale` and
+	# `auto_augment` also drive classification's RandomResizedCrop, so a single
+	# shared list would change the crop models by accident.
+	primary_train_overrides = parse_train_overrides(
+		config['DEFAULT'].get('primary_train_overrides', ''), 'primary_train_overrides')
+	secondary_train_overrides = parse_train_overrides(
+		config['DEFAULT'].get('secondary_train_overrides', ''), 'secondary_train_overrides')
+
+	def _with_motion_color_rules(base):
+		"""Layer the motion stream's colour rules on top of the user overrides.
+
+		The motion images are false colour -- the hue IS the movement signal --
+		so hsv_* jitter and RandomAugment's colour ops destroy the very thing
+		being learned. That is a correctness constraint, not a preference, so it
+		wins over anything set in the INI."""
+		if not motion_disable_color_aug:
+			return dict(base) if base else None
+		merged = dict(base) if base else {}
+		clobbered = [k for k in ('hsv_h', 'hsv_s', 'hsv_v', 'auto_augment') if k in merged]
+		if clobbered:
+			print(f"motion stream: ignoring {', '.join(clobbered)} from the INI overrides -- "
+				  f"motion_disable_color_aug is on and the motion images encode movement as colour.")
+		merged.update({'hsv_h': 0.0, 'hsv_s': 0.0, 'hsv_v': 0.0, 'auto_augment': None})
+		return merged
+
+	primary_motion_train_overrides = _with_motion_color_rules(primary_train_overrides)
+	secondary_motion_train_overrides = _with_motion_color_rules(secondary_train_overrides)
 
 	if hierarchical_mode:
 		secondary_static_project_path = species_folder('model_secondary_static', species_list[0], species_list)
@@ -977,7 +1005,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary static', _static_train_yaml, primary_static_project_path,
-			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience)
+			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_train_overrides)
 
 
 	if primary_motion_classes:
@@ -990,7 +1018,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary motion', _motion_train_yaml, primary_motion_project_path,
-			primary_motion_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=motion_train_overrides)
+			primary_motion_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_motion_train_overrides)
 
 	if hierarchical_mode:
 		# Static stream (pooled over all static primaries)
@@ -1001,7 +1029,7 @@ if __name__ == '__main__':
 			# unseeded (see behaveai_holdout.build_classification_split).
 			_static_crop_data = build_classification_split(secondary_static_data_path, val_frequency)
 			maybe_retrain('secondary_static', _static_crop_data, secondary_static_project_path,
-				secondary_static_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
+				secondary_static_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
 			if use_ncnn == 'true':
 				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
 			else:
@@ -1017,7 +1045,7 @@ if __name__ == '__main__':
 		if _motion_class_count >= 2:
 			_motion_crop_data = build_classification_split(secondary_motion_data_path, val_frequency)
 			maybe_retrain('secondary_motion', _motion_crop_data, secondary_motion_project_path,
-				secondary_motion_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=motion_train_overrides)
+				secondary_motion_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_motion_train_overrides)
 			if use_ncnn == 'true':
 				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
 			else:
@@ -1036,7 +1064,7 @@ if __name__ == '__main__':
 	if _species_class_count >= 2:
 		_species_crop_data = build_classification_split(species_cropped_base_dir, val_frequency)
 		maybe_retrain('species', _species_crop_data, 'model_species',
-			species_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
+			species_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
 		if use_ncnn == 'true':
 			model_species = load_model_with_ncnn_preference(species_model_path, "classify")
 		else:
@@ -1050,7 +1078,7 @@ if __name__ == '__main__':
 	if _age_class_count >= 2:
 		_age_crop_data = build_classification_split(age_cropped_base_dir, val_frequency)
 		maybe_retrain('age', _age_crop_data, 'model_age',
-			age_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience)
+			age_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
 		if use_ncnn == 'true':
 			model_age = load_model_with_ncnn_preference(age_model_path, "classify")
 		else:

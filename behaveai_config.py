@@ -314,3 +314,93 @@ def load_secondary_config(config, primary_static_classes, primary_motion_classes
         'allowed_secondary_idx': allowed_secondary_idx,
         'hierarchical_mode': hierarchical_mode,
     }
+
+
+# Extra model.train() keyword arguments, straight from the INI.
+#
+# Ultralytics' augmentation defaults are tuned for ground-level photography and
+# a few of them actively hurt small aerial targets: `mosaic` composites four
+# frames into one before resizing to imgsz (halving every animal again), and
+# `scale` samples a zoom in [1-scale, 1+scale], so scale=0.5 can shrink an
+# already-marginal animal below the resolution limit. There is no way to reach
+# those from the INI otherwise -- only epochs, patience and imgsz are settable.
+#
+# Keys are validated against Ultralytics' own DEFAULT_CFG_DICT, and coerced to
+# the type of the shipped default, so a typo or a bad value is reported here
+# rather than silently ignored deep inside training.
+_TRAIN_OVERRIDE_RESERVED = {
+    # set by the pipeline itself; letting an override win would silently
+    # contradict primary_imgsz / primary_epochs / train_patience.
+    'model', 'data', 'epochs', 'imgsz', 'project', 'name', 'exist_ok',
+    'workers', 'patience', 'resume',
+}
+
+
+def _coerce_override(text, default):
+    """Turn an INI string into the type Ultralytics expects for that key."""
+    v = text.strip()
+    low = v.lower()
+    if low in ('none', 'null', ''):
+        return None
+    if low in ('true', 'false'):
+        return low == 'true'
+    if isinstance(default, bool):          # before int: bool subclasses int
+        raise ValueError(f"expected true/false, got '{v}'")
+    if isinstance(default, int):
+        return int(float(v))
+    if isinstance(default, float):
+        return float(v)
+    if default is None:                    # unknown type -- best effort
+        try:
+            return float(v) if ('.' in v or 'e' in low) else int(v)
+        except ValueError:
+            return v
+    return v
+
+
+def parse_train_overrides(raw, label, problems=None):
+    """'mosaic=0.0, scale=0.2' -> {'mosaic': 0.0, 'scale': 0.2}.
+
+    Returns None when nothing usable is configured, so the caller can pass it
+    straight through as "use Ultralytics' defaults".
+
+    Every rejected entry is printed and, when `problems` is a list, appended to
+    it. The settings GUI passes one so a typo is caught at save time rather than
+    hours later when training finally starts."""
+    def _reject(msg):
+        print(f"{label}: {msg}")
+        if problems is not None:
+            problems.append(msg)
+
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        from ultralytics.cfg import DEFAULT_CFG_DICT as _ULTRA_DEFAULTS
+    except Exception:
+        _ULTRA_DEFAULTS = None
+
+    out = {}
+    for item in str(raw).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '=' not in item:
+            _reject(f"ignoring '{item}' -- expected key=value.")
+            continue
+        key, _, value = item.partition('=')
+        key = key.strip()
+        if key in _TRAIN_OVERRIDE_RESERVED:
+            _reject(f"refusing '{key}' -- the pipeline sets it itself "
+                    f"(use the dedicated setting instead). Ignored.")
+            continue
+        if _ULTRA_DEFAULTS is not None and key not in _ULTRA_DEFAULTS:
+            _reject(f"'{key}' is not an Ultralytics training argument. Ignored.")
+            continue
+        default = _ULTRA_DEFAULTS.get(key) if _ULTRA_DEFAULTS else None
+        try:
+            out[key] = _coerce_override(value, default)
+        except ValueError as e:
+            _reject(f"bad value for '{key}' ({e}). Ignored.")
+    if out:
+        print(f"{label}: {out}")
+    return out or None

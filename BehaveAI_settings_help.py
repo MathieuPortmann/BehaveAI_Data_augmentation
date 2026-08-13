@@ -436,6 +436,39 @@ PARAM_HELP = {
             "640 when they are already large or the GPU is limited. Must be a multiple of 32."
         ),
     },
+    "primary_train_overrides": {
+        "short": "Extra model.train() arguments for the two detectors, as key=value pairs.",
+        "what": (
+            "Comma-separated Ultralytics training arguments, e.g. "
+            "'mosaic=0.0, scale=0.2'. Keys are checked against Ultralytics' own "
+            "defaults; anything unknown, malformed, or already set by the pipeline "
+            "(imgsz, epochs, patience, data, project...) is reported on the console "
+            "and ignored. Leave empty for Ultralytics' defaults."
+        ),
+        "influence": (
+            "The defaults are tuned for ground-level photography and two of them can "
+            "hurt small aerial targets. 'mosaic' stitches four frames into one before "
+            "resizing to imgsz, halving every animal again; 'scale' samples a zoom in "
+            "[1-scale, 1+scale], so the default 0.5 can shrink an already-marginal "
+            "animal below the resolution limit. On a corpus where animals are large "
+            "in frame, both help instead -- this is worth an A/B run, not a blind change."
+        ),
+    },
+    "secondary_train_overrides": {
+        "short": "Extra model.train() arguments for the crop classifiers (secondary, species, age).",
+        "what": (
+            "Same syntax and validation as primary_train_overrides, applied to the "
+            "classification models instead of the detectors. Kept separate because the "
+            "two tasks read different arguments: 'mosaic' is detection-only, while "
+            "'scale' and 'auto_augment' also drive classification's random resized crop."
+        ),
+        "influence": (
+            "Mostly useful to tame augmentation on small or low-contrast crops. Note "
+            "that when motion_disable_color_aug is on, the motion stream's colour "
+            "settings (hsv_*, auto_augment) always win over anything set here -- the "
+            "motion images encode movement as colour."
+        ),
+    },
     "secondary_imgsz": {
         "short": "Resolution the crop classifiers are trained and run at (default 224).",
         "what": (
