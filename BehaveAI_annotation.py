@@ -25,6 +25,7 @@ from behaveai_config import (
 )
 from behaveai_render import load_render_style, draw_labeled_detection
 from behaveai_holdout import is_holdout_video
+import behaveai_frame_cache as frame_cache
 
 
 # Try to import YOLO
@@ -609,22 +610,16 @@ def parse_timecode_csv(csv_path, full_pool, frame_window, report=None, meta_out=
 	print(f"CSV time-codes: loaded {len(targets)} target frame(s) from {os.path.basename(csv_path)}.")
 	return targets
 
-# frameWindow logic
-frameWindow = 4
-if strategy == 'exponential':
-	if expA > 0.2 or expB > 0.2:
-		frameWindow = 5
-	if expA > 0.5 or expB > 0.5:
-		frameWindow = 10
-	if expA > 0.7 or expB > 0.7:
-		frameWindow = 15
-	if expA > 0.8 or expB > 0.8:
-		frameWindow = 20
-	if expA > 0.9 or expB > 0.9:
-		frameWindow = 45
+# frameWindow logic. Derived in behaveai_frame_cache so the pre-cache reads
+# exactly as many frames as this tool would: a shorter run-up gives a different
+# motion image, and the motion image *is* the training input.
+frameWindow, _buf_len = frame_cache.derive_frame_window(strategy, expA, expB, frame_skip)
+raw_buf = deque(maxlen=_buf_len)
 
-raw_buf = deque(maxlen=frameWindow)
-frameWindow = frameWindow * (frame_skip + 1)
+# Motion-engine settings as one object, so the decode path is shared with the
+# miner's pre-cache rather than reimplemented from these globals.
+motion_params = frame_cache.motion_params_from_config(config)
+mined_cache_dir = frame_cache.cache_dir(project_dir)
 
 
 # ---- Initial random frame selection ----
@@ -1245,9 +1240,22 @@ def save_annotation():
 	if deleted:
 		print("Overwriting existing annotation")
 
+	# A pre-cached frame can be *moved* into the dataset instead of re-encoded,
+	# but only when the image the annotator saw is the image the dataset should
+	# hold. The grey blocking rectangles are what break that: they exist so the
+	# two detectors do not cross-train on each other's animals, so a frame
+	# carrying them must be written from the composited array. Moving it would
+	# silently drop the blocking — a correctness bug, not a size one.
+	_can_move_static = (not grey_boxes
+						and not (motion_blocks_static == 'true' and motion_count > 0))
+	_can_move_motion = (not grey_boxes
+						and not (static_blocks_motion == 'true' and static_count > 0))
+
 	if static_count > 0 or save_empty_frames == 'true': # don't save blank images
 		static_img_path = os.path.join(static_target_img_dir, f"{base_filename}.jpg")
-		cv2.imwrite(static_img_path, static_ann_frame)
+		if not (_can_move_static and frame_cache.take_image(
+				mined_cache_dir, base_filename, 'static', static_img_path)):
+			cv2.imwrite(static_img_path, static_ann_frame)
 
 
 		# Save static labels
@@ -1269,7 +1277,9 @@ def save_annotation():
 
 	if motion_count > 0 or save_empty_frames == 'true': # don't save blank images
 		img_path = os.path.join(motion_target_img_dir, f"{base_filename}.jpg")
-		cv2.imwrite(img_path, motion_ann_frame)
+		if not (_can_move_motion and frame_cache.take_image(
+				mined_cache_dir, base_filename, 'motion', img_path)):
+			cv2.imwrite(img_path, motion_ann_frame)
 
 		# Save motion labels
 		motion_ann_path = os.path.join(motion_target_lbl_dir, f"{base_filename}.txt")
@@ -1409,6 +1419,11 @@ def save_annotation():
 	with open(motion_mask_path, 'w') as f:
 		f.write(mask_content)
 
+	# The frame is in the dataset now, so its cache entry has no reader left:
+	# drop whatever take_image did not already move out. Tolerant of a missing
+	# entry, which is the normal case outside mining mode.
+	frame_cache.discard_entry(mined_cache_dir, base_filename)
+
 	print(f"Saved #{annot_count} frame {frame_number} -> {annot_type}")
 
 	annot_count += 1
@@ -1446,80 +1461,30 @@ def _compute_frame_data(vpath, fnum):
 	Returns a dict ready to be stored in _prefetch_cache, or None on failure.
 	This function is designed to run in a background thread — it uses only
 	local variables and does not touch any global state.
+
+	The decode itself comes from behaveai_frame_cache: either already on disk,
+	put there by the miner's pre-cache pass (which is the whole point — a 4K
+	seek over the SSHFS mount costs seconds), or computed on the spot by the
+	same function that filled the cache, so the two can never disagree.
 	"""
 	try:
-		cap = cv2.VideoCapture(vpath)
-		if not cap.isOpened():
+		# Same key save_annotation writes under, so a cached image can be moved
+		# straight into the dataset. Deliberately the raw stem, not
+		# video_label_for_annotation: that one groups drone re-encodes together.
+		base = frame_cache.base_name(os.path.splitext(os.path.basename(vpath))[0], fnum)
+		data = frame_cache.read_entry(mined_cache_dir, base)
+		if data is None:
+			data = frame_cache.compute_frame_data(vpath, fnum, motion_params)
+		if data is None:
 			return None
 
-		n_frames   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-		vid_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-		vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-		start_frame = fnum - frameWindow + 1
-		if start_frame < 0:
-			cap.release()
-			return None
-
-		cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-		prev_frames = [None] * 3
-		local_raw_buf = []
-		local_fr = None
-		local_motion = None
-		local_original = None
-		gray = None
-		diffs = None
-		frame_count = 0
-
-		for i in range(frameWindow):
-			ret, raw_frame = cap.read()
-			if not ret:
-				break
-			if frame_count == 0:
-				local_fr = raw_frame.copy()
-				if scale_factor != 1.0:
-					local_fr = cv2.resize(local_fr, (0, 0), fx=scale_factor, fy=scale_factor)
-				local_raw_buf.append(local_fr.copy())
-				gray = cv2.cvtColor(local_fr, cv2.COLOR_BGR2GRAY)
-				if i == 0:
-					prev_frames = [gray.copy()] * 3
-					frame_count += 1
-					if frame_count > frame_skip:
-						frame_count = 0
-					continue
-				diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
-				if strategy == 'exponential':
-					prev_frames[0] = gray
-					prev_frames[1] = cv2.addWeighted(prev_frames[1], expA, gray, 1 - expA, 0)
-					prev_frames[2] = cv2.addWeighted(prev_frames[2], expB, gray, 1 - expB, 0)
-				else:
-					prev_frames[2] = prev_frames[1]
-					prev_frames[1] = prev_frames[0]
-					prev_frames[0] = gray
-			frame_count += 1
-			if frame_count > frame_skip:
-				frame_count = 0
-
-		cap.release()
-
-		if diffs is None or local_fr is None:
-			return None
-
-		if chromatic_tail_only == 'true':
-			tb = cv2.subtract(diffs[0], diffs[1])
-			tr = cv2.subtract(diffs[2], diffs[1])
-			tg = cv2.subtract(diffs[1], diffs[0])
-			blue  = cv2.addWeighted(gray, lum_weight, tb, rgb_multipliers[2], motion_threshold)
-			green = cv2.addWeighted(gray, lum_weight, tg, rgb_multipliers[1], motion_threshold)
-			red   = cv2.addWeighted(gray, lum_weight, tr, rgb_multipliers[0], motion_threshold)
-		else:
-			blue  = cv2.addWeighted(gray, lum_weight, diffs[0], rgb_multipliers[2], motion_threshold)
-			green = cv2.addWeighted(gray, lum_weight, diffs[1], rgb_multipliers[1], motion_threshold)
-			red   = cv2.addWeighted(gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold)
-
-		local_motion   = cv2.merge((blue, green, red)).astype(np.uint8)
-		local_original = local_motion.copy()
+		local_fr       = data['fr']
+		local_motion   = data['motion_image']
+		local_original = data['original_frame']
+		local_raw_buf  = data['raw_buf']
+		vid_width      = data['video_width']
+		vid_height     = data['video_height']
+		n_frames       = data['total_frames']
 
 		# ---- Precompute the scaled composite for instant display ----
 		# We compute both the motion view and the static view at display size
@@ -3236,54 +3201,21 @@ class AnnotatorTk:
 				raw_buf.clear()
 				need_ = True
 			else:
-				capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-				prev_frames = [None] * 3
+				# Cache first (the miner's pre-cache pass), then the shared
+				# decode. Both come from behaveai_frame_cache so this path and
+				# the prefetch thread cannot drift apart.
+				_base = frame_cache.base_name(video_label, last_frame)
+				_data = frame_cache.read_entry(mined_cache_dir, _base)
+				if _data is None:
+					_data = frame_cache.compute_frame_data(video_path, last_frame, motion_params)
 				motion_image = None
-				frame_count = 0
 				raw_buf.clear()
-				for i in range(frameWindow):
-					ret, raw_frame = capture.read()
-					if not ret:
-						break
-					if frame_count == 0:
-						fr = raw_frame.copy()
-						if scale_factor != 1.0:
-							fr = cv2.resize(fr, (0,0), fx=scale_factor, fy=scale_factor)
-						raw_buf.append(fr.copy())
-						gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-						if i == 0:
-							prev_frames = [gray.copy()] * 3
-							frame_count += 1
-							if frame_count > frame_skip:
-								frame_count = 0
-							continue
-						diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
-						if strategy == 'exponential':
-							prev_frames[0] = gray
-							prev_frames[1] = cv2.addWeighted(prev_frames[1], expA, gray, 1-expA, 0)
-							prev_frames[2] = cv2.addWeighted(prev_frames[2], expB, gray, 1-expB, 0)
-						else:
-							prev_frames[2] = prev_frames[1]
-							prev_frames[1] = prev_frames[0]
-							prev_frames[0] = gray
-					frame_count += 1
-					if frame_count > frame_skip:
-						frame_count = 0
-				if 'diffs' in locals():
-					if chromatic_tail_only == 'true':
-						tb = cv2.subtract(diffs[0], diffs[1])
-						tr = cv2.subtract(diffs[2], diffs[1])
-						tg = cv2.subtract(diffs[1], diffs[0])
-						blue = cv2.addWeighted(gray, lum_weight, tb, rgb_multipliers[2], motion_threshold)
-						green = cv2.addWeighted(gray, lum_weight, tg, rgb_multipliers[1], motion_threshold)
-						red = cv2.addWeighted(gray, lum_weight, tr, rgb_multipliers[0], motion_threshold)
-					else:
-						blue = cv2.addWeighted(gray, lum_weight, diffs[0], rgb_multipliers[2], motion_threshold)
-						green = cv2.addWeighted(gray, lum_weight, diffs[1], rgb_multipliers[1], motion_threshold)
-						red = cv2.addWeighted(gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold)
-					motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
-					original_frame = motion_image.copy()
-
+				if _data is not None:
+					fr = _data['fr']
+					motion_image = _data['motion_image']
+					original_frame = _data['original_frame']
+					for _b in _data['raw_buf']:
+						raw_buf.append(_b)
 
 					try:
 						base = f"{video_label}_{frame_number}"

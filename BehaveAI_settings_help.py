@@ -421,6 +421,29 @@ PARAM_HELP = {
                      "the footage can honestly fill simply comes back short. Re-running after "
                      "an annotation pass skips whatever was annotated in between.",
     },
+    "mining_precache_workers": {
+        "short": "Parallel decoders used when pre-caching mined frames.",
+        "what": "After choosing its targets, the miner decodes each one and stores the static "
+                "and motion images under the project's mined_frames/ folder, so the annotation "
+                "tool reads them from local disk instead of seeking into a 4K clip on the "
+                "network share. This is how many frames it decodes at once.",
+        "influence": "The wait is latency, not bandwidth, so several requests in flight help a "
+                     "lot on a remote mount (ERDA/SSHFS) — 4 to 8 is a reasonable range. Raise "
+                     "it and the share, not the CPU, is what saturates; on a local disk there "
+                     "is little to gain past the core count.",
+    },
+    "mining_precache_animation": {
+        "short": "Also pre-cache the frames feeding the animated zoom pane.",
+        "what": "The annotation tool's bottom zoom pane loops the frames preceding the one "
+                "being annotated, which is how movement reads at a glance. Caching them keeps "
+                "that working offline, but there are 10-45 of them per target (set by the "
+                "motion decay) against one static and one motion image, so they are the bulk "
+                "of the cache: roughly 25 MB per 4K frame with them, 7 MB without.",
+        "influence": "Turn it off when disk is the constraint — everything else about mining "
+                     "is unchanged and the pane simply shows a still. Leave it on when "
+                     "annotating motion behaviours, where the loop is what distinguishes a "
+                     "walking animal from a standing one.",
+    },
     "primary_classifier": {
         "short": "Base YOLO detector for the primary models (size n/s/m/l).",
         "what": "Pretrained weights used as the starting point (yolo8/11/26).",

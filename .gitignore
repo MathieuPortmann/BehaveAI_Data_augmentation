@@ -55,3 +55,7 @@ runs/
 # are moved here instead of being deleted outright, with trash/README.md as the
 # catalogue of what came from where and why.
 trash/
+
+# Pre-cached mined frames (BehaveAI_mine_frames.py --precache). Regenerable
+# from the videos, gigabytes at 4K, and consumed as it is annotated.
+mined_frames/

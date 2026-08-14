@@ -85,8 +85,10 @@ from collections import defaultdict
 
 from behaveai_config import (
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
+	resolve_project_dir,
 )
 from behaveai_holdout import is_holdout_video
+import behaveai_frame_cache as frame_cache
 
 # Budget share per stratum. Detection (gap + missed + lowconf) takes 0.35 because
 # an animal that is never detected can be neither tracked, classified nor
@@ -158,7 +160,32 @@ def load_project(project_arg):
 		'conf_thresh': float(d.get('primary_conf_thresh', '0.1') or 0.1),
 		'track_buffer': int(float(d.get('tracker_track_buffer', '30') or 30)),
 		'mining_budget': int(float(d.get('mining_budget', '300') or 300)),
+		'precache_workers': int(float(d.get('mining_precache_workers', '4') or 4)),
+		'precache_animation': str(d.get('mining_precache_animation', 'true')).strip().lower() != 'false',
+		'clips_dir': resolve_project_dir(config, project_dir, 'clips'),
+		'config': config,
 	}
+
+
+VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
+
+
+def index_videos(clips_dir):
+	"""Map video stem -> path, matching the annotation tool's convention.
+
+	Lower-cased because a tracking CSV is named from the file on disk while the
+	mined list is matched against the same pool the annotation tool builds, and
+	a case difference between the two is not a real mismatch.
+	"""
+	index = {}
+	if not os.path.isdir(clips_dir):
+		return index
+	for dirpath, _dirs, files in os.walk(clips_dir):
+		for name in sorted(files):
+			if name.lower().endswith(VIDEO_EXTENSIONS):
+				index.setdefault(os.path.splitext(name)[0].lower(),
+                                 os.path.join(dirpath, name))
+	return index
 
 
 # --------------------------------------------------------------------------
@@ -606,7 +633,7 @@ def frame_to_timecode(frame, fps):
 # --------------------------------------------------------------------------
 
 def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
-		 include_holdout, seed, out_path=None):
+		 include_holdout, seed, out_path=None, log=print):
 	proj = load_project(project_arg)
 	# None means "no explicit --budget", which is how the launcher button runs:
 	# the INI is then the single place the size of a mining pass is set.
@@ -635,14 +662,22 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 	candidates = defaultdict(list)
 	skipped_holdout, stale_csvs, used = [], [], []
 
-	for path in csv_paths:
+	log(f"Scoring {len(csv_paths)} tracking CSV(s) from {proj['output_dir']}")
+	log(f"  {len(excluded)} frame(s) already annotated will be excluded")
+	if rarity:
+		log(f"  rare classes (< {RARE_MAX_COUNT} boxes): {', '.join(sorted(rarity))}")
+	log(f"  {len(pairs)} (static, motion) combination(s) observed in the annotations")
+
+	for n, path in enumerate(csv_paths, 1):
 		stem = os.path.basename(path)[:-len('_tracking.csv')]
 		if not include_holdout and is_holdout_video(stem, proj['val_frequency']):
 			skipped_holdout.append(stem)
+			log(f"  [{n}/{len(csv_paths)}] {stem}: skipped (holdout video)")
 			continue
 
 		rows, has_source = load_tracking_csv(path)
 		if not rows:
+			log(f"  [{n}/{len(csv_paths)}] {stem}: skipped (no rows)")
 			continue
 		if not has_source:
 			stale_csvs.append(stem)
@@ -662,11 +697,31 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 		if has_source:
 			signals['pair_unseen'] = signal_pair_unseen(rows, pairs, static_totals)
 
+		found = {}
 		for stratum, raw in signals.items():
+			n_here = 0
 			for frame, score, detail, hits in collapse(raw):
 				candidates[stratum].append((stem, frame, score, detail, hits))
+				n_here += 1
+			if n_here:
+				found[stratum] = n_here
+		# Per video, because that is the grain at which something looks wrong:
+		# a clip contributing nothing but `random` is one the detector either
+		# handles perfectly or does not see at all, and the two are worth
+		# telling apart before spending a budget on it.
+		summary = ', '.join(f"{k} {v}" for k, v in sorted(found.items(), key=lambda kv: -kv[1]))
+		log(f"  [{n}/{len(csv_paths)}] {stem}: {len(rows)} rows -> "
+			+ (summary if summary else 'no candidate'))
 
+	total_candidates = sum(len(v) for v in candidates.values())
+	log(f"\nSelecting {budget} frame(s) from {total_candidates} candidate(s)"
+		f" (min spacing {min_spacing_s:g} s, max {max_per_video} per video)")
 	selected = select(candidates, quotas, budget, min_spacing, max_per_video, excluded)
+	for stratum in sorted(candidates, key=lambda s: -len(candidates[s])):
+		got, avail = len(selected.get(stratum, [])), len(candidates[stratum])
+		want = int(round(budget * quotas.get(stratum, 0)))
+		flag = '' if got >= want else f"  (quota {want}, short by {want - got})"
+		log(f"  {stratum:<12} {got:>4} kept of {avail:>6} available{flag}")
 	order = interleave(selected)
 
 	if out_path is None:
@@ -683,6 +738,7 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 
 	report = {
 		'out_path': out_path,
+		'order': order,
 		'videos_used': used,
 		'skipped_holdout': skipped_holdout,
 		'stale_csvs': stale_csvs,
@@ -692,6 +748,108 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 		'zero_classes': sorted(c for c, n in rarity_counts.items() if n == 0),
 	}
 	return report
+
+
+def precache(proj, order, workers=4, animation=True, log=print):
+	"""Decode every mined frame ahead of time into <project>/mined_frames/.
+
+	The seek-plus-read of one 4K frame on a network mount is seconds of latency
+	and almost no bandwidth, so the loop is I/O-bound and threads help: several
+	requests in flight amortise the round trips that dominate. Threads (not
+	processes) because the wait happens inside cv2, which releases the GIL.
+
+	Frames already cached from an earlier run are skipped, which makes a second
+	invocation after an interrupted one cheap.
+
+	Returns a summary dict; never raises for a single unreadable frame, since
+	one bad clip should not cost the whole batch.
+	"""
+	import time
+	import threading
+	from concurrent.futures import ThreadPoolExecutor
+
+	cdir = frame_cache.cache_dir(proj['project_dir'])
+	params = frame_cache.motion_params_from_config(proj['config'])
+	videos = index_videos(proj['clips_dir'])
+
+	todo, cached, unresolved = [], 0, set()
+	for stem, frame, _stratum, _score, _detail in order:
+		base = frame_cache.base_name(stem, frame)
+		if frame_cache.has_entry(cdir, base):
+			cached += 1
+			continue
+		vpath = videos.get(stem.lower())
+		if vpath is None:
+			unresolved.add(stem)
+			continue
+		todo.append((base, vpath, frame))
+
+	log(f"\nPre-caching frames into {cdir}")
+	log(f"  {len(todo)} to decode, {cached} already cached, "
+		f"{len(unresolved)} target(s) whose video was not found")
+	# Said up front rather than discovered afterwards: at 4K this runs to
+	# gigabytes, and the animation buffer is most of it.
+	per_frame_mb = 7.5 + (params.buf_len * 1.2 if animation else 0.0)
+	log(f"  animation buffer {'on' if animation else 'off'}"
+		f" ({params.buf_len} frame(s) per target)"
+		f" -> roughly {per_frame_mb:.0f} MB each, {per_frame_mb * len(todo) / 1000:.1f} GB total")
+	if unresolved:
+		log(f"  videos not found under {proj['clips_dir']}: "
+			+ ', '.join(sorted(unresolved)[:5])
+			+ (' …' if len(unresolved) > 5 else ''))
+	if not todo:
+		log("  nothing to do.")
+		return {'written': 0, 'cached': cached, 'failed': 0,
+				'unresolved': sorted(unresolved), 'bytes': 0}
+
+	# Sorting by video keeps each worker reading one file at a time; a network
+	# mount serves sequential-ish access far better than a scattered one.
+	todo.sort(key=lambda t: (t[1], t[2]))
+
+	state = {'done': 0, 'written': 0, 'failed': 0, 'bytes': 0}
+	lock = threading.Lock()
+	started = time.time()
+	# Report on a cadence, not per frame: a 300-frame run over SSHFS should say
+	# enough to show it is alive and to let the annotator judge when to start,
+	# without turning the log into 300 lines.
+	step = max(1, len(todo) // 20)
+
+	def _one(item):
+		base, vpath, frame = item
+		try:
+			data = frame_cache.compute_frame_data(vpath, frame, params)
+			if data is None:
+				raise ValueError(f"frame {frame} unreadable "
+								 f"(needs {params.frame_window} preceding frames)")
+			written = frame_cache.write_entry(cdir, base, data, animation=animation)
+		except Exception as e:
+			with lock:
+				state['failed'] += 1
+				state['done'] += 1
+				log(f"  ! {base}: {e}")
+			return
+		with lock:
+			state['written'] += 1
+			state['bytes'] += written
+			state['done'] += 1
+			done = state['done']
+			if done % step == 0 or done == len(todo):
+				elapsed = time.time() - started
+				rate = done / elapsed if elapsed > 0 else 0
+				eta = (len(todo) - done) / rate if rate > 0 else 0
+				log(f"  {done:>5}/{len(todo)}  ({100.0 * done / len(todo):4.0f} %)  "
+					f"{rate:4.1f} frame/s  eta {int(eta // 60):d}m{int(eta % 60):02d}s  "
+					f"{state['bytes'] / 1e6:.0f} MB")
+
+	with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+		list(pool.map(_one, todo))
+
+	elapsed = time.time() - started
+	log(f"  cached {state['written']} frame(s) in {int(elapsed // 60)}m{int(elapsed % 60):02d}s"
+		f", {state['bytes'] / 1e6:.0f} MB written"
+		+ (f", {state['failed']} failed" if state['failed'] else ""))
+	return {'written': state['written'], 'cached': cached, 'failed': state['failed'],
+			'unresolved': sorted(unresolved), 'bytes': state['bytes']}
 
 
 def parse_quota_overrides(raw, quotas):
@@ -739,6 +897,13 @@ def _main():
 					help='Also mine validation videos (biases the test set — see module docstring)')
 	ap.add_argument('--seed', type=int, default=0,
 					help='Seed of the random stratum, for reproducibility')
+	ap.add_argument('--no-precache', action='store_true',
+					help='Only write the target list; do not decode the frames ahead of time')
+	ap.add_argument('--precache-workers', type=int, default=None,
+					help='Parallel decoders (default: the mining_precache_workers setting)')
+	ap.add_argument('--no-animation-cache', action='store_true',
+					help='Skip the animation buffer (most of the disk cost; the zoom pane '
+						 'then shows a still)')
 	args = ap.parse_args()
 
 	project = args.project or args.project_pos or os.environ.get('BEHAVEAI_PROJECT')
@@ -764,6 +929,14 @@ def _main():
 		print(f"\n  No detector can propose these (zero annotated examples): "
 			  f"{', '.join(report['zero_classes'])}.\n"
 			  "  They need a human ethogram sweep or BehaveAI_complex_candidates.py.")
+
+	if not args.no_precache and report['order']:
+		proj = load_project(project)
+		workers = args.precache_workers or proj['precache_workers']
+		animation = proj['precache_animation'] and not args.no_animation_cache
+		precache(proj, report['order'], workers, animation)
+		print("\nThe annotation tool will serve these from disk: "
+			  "Source > Mined frames (model is unsure).")
 	return 0
 
 
