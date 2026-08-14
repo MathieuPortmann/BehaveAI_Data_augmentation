@@ -171,10 +171,29 @@ def sahi_detect(sahi_model, image, class_names, source,
 			'primary_class': class_names[int(op.category.id)],
 			'primary_conf': float(op.score.value),
 			'source': source,
-			'primary_class_combined': '',
-			'primary_conf_combined': 0.0,
 		})
 	return dets
+
+
+def record_stream_verdict(md, det):
+	"""Keep the best verdict of EACH stream on a merged detection.
+
+	primary_static_* / primary_motion_* are read downstream (activity budget,
+	complex features, and the frame miner) as "what the static / motion detector
+	said about this animal", so they have to be filled by source. The merge below
+	is winner-takes-all: it overwrites primary_class and only remembers the single
+	detection it displaced, whatever that one's source was. Two same-source
+	detections merging -- the common case under dominant_source='confidence' --
+	would therefore file a static verdict under primary_motion_class, and every
+	reader downstream would trust it.
+	"""
+	if det['source'] == 'static':
+		key_cls, key_conf = 'static_class', 'static_conf'
+	else:
+		key_cls, key_conf = 'motion_class', 'motion_conf'
+	if det['primary_conf'] > md.get(key_conf, 0.0):
+		md[key_cls] = det['primary_class']
+		md[key_conf] = det['primary_conf']
 # --------------------------------------------------------------------
 
 
@@ -1387,6 +1406,9 @@ if __name__ == '__main__':
 		# only read the first 12 columns (e.g. activity budget) are unaffected.
 		# species_class/age_class (model 0/0.5) are appended after x1,y1,x2,y2 -
 		# same additive convention, existing readers of the first 16 columns unaffected.
+		# `source` (last column, same convention) names the stream whose detection
+		# won the box, which the per-stream class columns no longer imply now that
+		# they are filled by source: it says which image the crop classifiers ran on.
 		csv_writer.writerow([
 			"frame", "id", "x", "y",
 			"primary_static_class", "primary_static_conf",
@@ -1394,7 +1416,8 @@ if __name__ == '__main__':
 			"secondary_static_class", "secondary_static_conf",
 			"secondary_motion_class", "secondary_motion_conf",
 			"x1", "y1", "x2", "y2",
-			"species_class", "species_conf", "age_class", "age_conf"
+			"species_class", "species_conf", "age_class", "age_conf",
+			"source"
 		])
 
 		print(f"Processing video: {file}")
@@ -1477,8 +1500,6 @@ if __name__ == '__main__':
 								'primary_class': class_name,
 								'primary_conf': conf,
 								'source': 'static',
-								'primary_class_combined': '',
-								'primary_conf_combined': 0.0
 							})
 
 				# Primary motion detection (SAHI-tiled when enabled, else whole-frame)
@@ -1502,8 +1523,6 @@ if __name__ == '__main__':
 								'primary_class': class_name,
 								'primary_conf': conf,
 								'source': 'motion',
-								'primary_class_combined': '',
-								'primary_conf_combined': 0.0
 							})
 
 
@@ -1536,13 +1555,15 @@ if __name__ == '__main__':
 						ms_source = md['source']
 
 						if dist < centroid_merge_thresh or overlap > iou_thresh:
+							# Record what each stream said BEFORE the winner-takes-all
+							# arbitration below overwrites primary_class.
+							record_stream_verdict(md, det)
+
 							# Merge classes - keep highest confidence detection for each source
 							if det['source'] == ms_source or dominant_source == 'confidence': # mathcing sources so select best, or confidence strategy used
 								if det['source'] == 'static':
 									# Keep highest confidence static detection
 									if 'primary_conf' not in md or det['primary_conf'] > md['primary_conf']:
-										md['primary_class_combined'] = md['primary_class'] # retain the combined primary
-										md['primary_conf_combined'] = md['primary_conf']
 										md['primary_class'] = det['primary_class']
 										md['primary_conf'] = det['primary_conf']
 										md['coords'] = det['coords']  # Update to higher conf box
@@ -1551,8 +1572,6 @@ if __name__ == '__main__':
 								else:  # motion source
 									# Keep highest confidence motion detection
 									if 'primary_conf' not in md or det['primary_conf'] > md['primary_conf']:
-										md['primary_class_combined'] = md['primary_class'] # retain the combined primary
-										md['primary_conf_combined'] = md['primary_conf']
 										md['primary_class'] = det['primary_class']
 										md['primary_conf'] = det['primary_conf']
 										md['coords'] = det['coords']  # Update to higher conf box
@@ -1560,8 +1579,6 @@ if __name__ == '__main__':
 										md['source'] = det['source']
 							elif det['source'] == 'static' and dominant_source == 'static':
 									# Keep static detection
-									md['primary_class_combined'] = md['primary_class'] # retain the combined primary
-									md['primary_conf_combined'] = md['primary_conf']
 									md['primary_class'] = det['primary_class']
 									md['primary_conf'] = det['primary_conf']
 									md['coords'] = det['coords']  # Update to higher conf box
@@ -1569,8 +1586,6 @@ if __name__ == '__main__':
 									md['source'] = det['source']
 							elif det['source'] == 'motion' and dominant_source == 'motion':
 									# Keep motion detection
-									md['primary_class_combined'] = md['primary_class'] # retain the combined primary
-									md['primary_conf_combined'] = md['primary_conf']
 									md['primary_class'] = det['primary_class']
 									md['primary_conf'] = det['primary_conf']
 									md['coords'] = det['coords']  # Update to higher conf box
@@ -1587,9 +1602,12 @@ if __name__ == '__main__':
 							'coords': det['coords'],
 							'centroid': (cx, cy),
 							'source': det['source'],
-							'primary_class_combined': '',
-							'primary_conf_combined': 0.0
+							'static_class': '',
+							'static_conf': 0.0,
+							'motion_class': '',
+							'motion_conf': 0.0,
 						}
+						record_stream_verdict(new_det, det)
 						if det['source'] == 'static':
 							new_det['primary_class'] = det['primary_class']
 							new_det['primary_conf'] = det['primary_conf']
@@ -1611,22 +1629,16 @@ if __name__ == '__main__':
 				for det in merged_detections:
 					coords = det['coords']
 					primary_class = det['primary_class']
-					primary_conf = det['primary_conf']
 					source = det['source']
-					primary_class_combined = det['primary_class_combined']
-					primary_conf_combined = det['primary_conf_combined']
 
-
-					if source == 'static':
-						det['primary_static_class'] = primary_class
-						det['primary_static_conf'] = primary_conf
-						det['primary_motion_class'] = primary_class_combined
-						det['primary_motion_conf'] = primary_conf_combined
-					else:
-						det['primary_motion_class'] = primary_class
-						det['primary_motion_conf'] = primary_conf
-						det['primary_static_class'] = primary_class_combined
-						det['primary_static_conf'] = primary_conf_combined
+					# One column pair per stream, filled by source (see
+					# record_stream_verdict). An empty class means that detector did
+					# not see this animal at all -- which is the signal the frame
+					# miner reads to find what one stream misses.
+					det['primary_static_class'] = det['static_class']
+					det['primary_static_conf'] = det['static_conf']
+					det['primary_motion_class'] = det['motion_class']
+					det['primary_motion_conf'] = det['motion_conf']
 
 					# Species (model 0) / age (model 0.5): run on the same crop the
 					# secondary classifiers use below, unconditionally (mandatory per
@@ -1832,7 +1844,8 @@ if __name__ == '__main__':
 						ss_class, f"{ss_conf:.3f}",
 						sm_class, f"{sm_conf:.3f}",
 						x1, y1, x2, y2,
-						sp_class, f"{sp_conf:.3f}", ag_class, f"{ag_conf:.3f}"
+						sp_class, f"{sp_conf:.3f}", ag_class, f"{ag_conf:.3f}",
+						p_source
 					])
 
 
