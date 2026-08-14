@@ -163,7 +163,8 @@ class ScriptRunnerApp:
 
 		stages = [
 			("1 - Setup",    [("Settings", "BehaveAI_settings_gui.py")]),
-			("2 - Annotate", [("Annotate", "BehaveAI_annotation.py"),
+			("2 - Annotate", [("Mine frames", "BehaveAI_mine_frames.py"),
+							   ("Annotate", "BehaveAI_annotation.py"),
 							   ("Annotate complex", "BehaveAI_annotation_complex.py"),
 							   ("Inspect Dataset", "BehaveAI_inspect_dataset.py"),
 							   ("Augment Dataset", "BehaveAI_augmentation.py")]),

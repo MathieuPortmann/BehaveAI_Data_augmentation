@@ -409,6 +409,18 @@ PARAM_HELP = {
         "influence": "Bigger holdout = more reliable, honest metrics but fewer training videos. "
                      "~0.1–0.2 is typical.",
     },
+    "mining_budget": {
+        "short": "How many frames the frame miner proposes per run.",
+        "what": "Size of the mining_targets.csv that 'Mine frames' writes, and so the length of "
+                "the queue the annotation tool's mined-frames mode walks through. The budget is "
+                "split between the strata (detection gaps, low confidence, rare classes, "
+                "flicker, unseen pairs, attributes, plus a random control) by fixed shares, so "
+                "raising it lengthens every stratum rather than favouring one.",
+        "influence": "Set it to a session's worth of work, not to a wish-list: the miner "
+                     "enforces a minimum spacing and a per-video cap, so a budget larger than "
+                     "the footage can honestly fill simply comes back short. Re-running after "
+                     "an annotation pass skips whatever was annotated in between.",
+    },
     "primary_classifier": {
         "short": "Base YOLO detector for the primary models (size n/s/m/l).",
         "what": "Pretrained weights used as the starting point (yolo8/11/26).",
@@ -1303,6 +1315,12 @@ BUTTON_HELP = {
     "BehaveAI_settings_gui.py":
         "Configure the project: classes, motion encoding, training, tracking and analysis "
         "settings. Start here — most other steps need settings filled in first.",
+    "BehaveAI_mine_frames.py":
+        "Pick which frames are worth annotating next, from the tracking CSVs of a previous "
+        "batch run: detection gaps, low confidence, rare classes, flickering predictions. "
+        "Writes output/mining_targets.csv, which 'Annotate' can then walk through via "
+        "Source > Mined frames. Needs a batch classify pass to have run first; the number of "
+        "frames it proposes is the 'Frame mining budget' setting.",
     "BehaveAI_annotation.py":
         "Label primary behaviours on the motion and static image streams to build the "
         "training dataset.",

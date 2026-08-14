@@ -26,7 +26,7 @@ from BehaveAI_mine_frames import (
 	signal_det_gap, signal_det_missed, signal_det_lowconf, signal_pair_unseen,
 	signal_flicker, signal_rare_class, collapse, select, interleave,
 	observed_pairs, annotated_frames, tracking_csvs, load_tracking_csv,
-	parse_quota_overrides, DEFAULT_QUOTAS, PAIR_MIN_SUPPORT,
+	parse_quota_overrides, load_project, DEFAULT_QUOTAS, PAIR_MIN_SUPPORT,
 )
 
 
@@ -441,6 +441,45 @@ def test_quota_overrides_renormalise():
 
 def test_default_quotas_sum_to_one():
 	assert abs(sum(DEFAULT_QUOTAS.values()) - 1.0) < 1e-9, DEFAULT_QUOTAS
+
+
+def _minimal_project(tmp, extra=''):
+	"""Smallest INI load_project accepts, so the budget wiring can be tested
+	without a full project on disk."""
+	ini = os.path.join(tmp, 'BehaveAI_settings.ini')
+	with open(ini, 'w', encoding='utf-8') as f:
+		f.write('[DEFAULT]\nspecies = Horse\noutput_dir = output\n' + extra)
+	return tmp
+
+
+def test_mining_budget_comes_from_the_ini():
+	with tempfile.TemporaryDirectory() as tmp:
+		proj = load_project(_minimal_project(tmp, 'mining_budget = 42\n'))
+		assert proj['mining_budget'] == 42, proj['mining_budget']
+
+
+def test_mining_budget_defaults_when_the_ini_predates_the_setting():
+	with tempfile.TemporaryDirectory() as tmp:
+		proj = load_project(_minimal_project(tmp))
+		assert proj['mining_budget'] == 300, proj['mining_budget']
+
+
+def test_launcher_offers_the_miner_above_annotate():
+	"""The launcher runs tools as `python <script> <project_dir>`, so the miner
+	has to accept the project positionally; and the button is only useful before
+	annotating, which is what its position in the stage list says."""
+	# `stages` lives inside the launcher's __init__, so it is picked out of the
+	# tree rather than executed: importing BehaveAI.py would build a window.
+	path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'BehaveAI.py')
+	stages = None
+	for node in ast.walk(ast.parse(open(path, encoding='utf-8').read())):
+		if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', None) == 'stages':
+			stages = ast.literal_eval(node.value)
+	assert stages, "no `stages` list found in BehaveAI.py"
+	stage = dict(stages)['2 - Annotate']
+	scripts = [s for _label, s in stage]
+	assert 'BehaveAI_mine_frames.py' in scripts, scripts
+	assert scripts.index('BehaveAI_mine_frames.py') < scripts.index('BehaveAI_annotation.py'), scripts
 
 
 if __name__ == '__main__':

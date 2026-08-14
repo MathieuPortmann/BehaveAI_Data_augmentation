@@ -1349,6 +1349,14 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.val_frequency_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'val_frequency').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
+		# Sits next to val_frequency because both decide which frames end up in the
+		# dataset: one splits what is already annotated, the other picks what to
+		# annotate next.
+		help_label(tab3, 'Frame mining budget', 'mining_budget').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.mining_budget_var = tk.IntVar(value=300)
+		ttk.Spinbox(tab3, from_=10, to=5000, increment=10, textvariable=self.mining_budget_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'mining_budget').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
 		help_label(tab3, 'Primary classifier', 'primary_classifier').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.primary_classifier_var = tk.StringVar(value='yolo26n.pt')
 		ttk.Combobox(tab3, values=CLASSIFIER_OPTIONS, textvariable=self.primary_classifier_var).grid(row=t, column=1, sticky='w', padx=8); t += 1
@@ -2237,6 +2245,7 @@ class SettingsEditorApp(tk.Tk):
 
 		# model type
 		self.val_frequency_var.set(float(d.get('val_frequency', fallback='0.2')))
+		self.mining_budget_var.set(int(float(d.get('mining_budget', fallback='300'))))
 		self.primary_classifier_var.set(d.get('primary_classifier', fallback='yolo26n.pt'))
 		self.primary_epochs_var.set(int(d.get('primary_epochs', fallback='100')))
 		self._load_imgsz(self.primary_imgsz_combo, self.primary_imgsz_var,
@@ -2825,6 +2834,7 @@ class SettingsEditorApp(tk.Tk):
 			new_default[_mkey] = str(self.metric_display_vars[_mkey].get()).lower()
 
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
+		new_default['mining_budget'] = str(self.mining_budget_var.get())
 
 		# Data augmentation parameters
 		new_default['aug_global_probability'] = str(self.aug_global_prob_var.get())

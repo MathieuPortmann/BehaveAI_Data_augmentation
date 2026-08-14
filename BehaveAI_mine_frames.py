@@ -157,6 +157,7 @@ def load_project(project_arg):
 		'val_frequency': float(d.get('val_frequency', '0.2') or 0.2),
 		'conf_thresh': float(d.get('primary_conf_thresh', '0.1') or 0.1),
 		'track_buffer': int(float(d.get('tracker_track_buffer', '30') or 30)),
+		'mining_budget': int(float(d.get('mining_budget', '300') or 300)),
 	}
 
 
@@ -607,6 +608,10 @@ def frame_to_timecode(frame, fps):
 def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 		 include_holdout, seed, out_path=None):
 	proj = load_project(project_arg)
+	# None means "no explicit --budget", which is how the launcher button runs:
+	# the INI is then the single place the size of a mining pass is set.
+	if budget is None:
+		budget = proj['mining_budget']
 	csv_paths = tracking_csvs(proj['output_dir'])
 	if not csv_paths:
 		raise SystemExit(
@@ -711,12 +716,17 @@ def parse_quota_overrides(raw, quotas):
 def _main():
 	ap = argparse.ArgumentParser(description=__doc__,
 								 formatter_class=argparse.RawDescriptionHelpFormatter)
-	ap.add_argument('--project', required=True,
+	# The launcher runs every tool as `python <script>.py <project_dir>`, so the
+	# project is accepted positionally as well as by flag. --project wins when
+	# both are given; without either, the env var the launcher also exports.
+	ap.add_argument('project_pos', nargs='?', default=None,
+					help=argparse.SUPPRESS)
+	ap.add_argument('--project', default=None,
 					help='Project directory or its BehaveAI_settings.ini')
 	ap.add_argument('--out', default=None,
 					help='Output CSV (default <output_dir>/mining_targets.csv)')
-	ap.add_argument('--budget', type=int, default=300,
-					help='How many frames to propose (default 300)')
+	ap.add_argument('--budget', type=int, default=None,
+					help='How many frames to propose (default: the mining_budget setting)')
 	ap.add_argument('--fps', type=float, default=30.0,
 					help='Frame rate, used for spacing and time-codes (default 30)')
 	ap.add_argument('--min-spacing-s', type=float, default=3.0,
@@ -731,8 +741,13 @@ def _main():
 					help='Seed of the random stratum, for reproducibility')
 	args = ap.parse_args()
 
+	project = args.project or args.project_pos or os.environ.get('BEHAVEAI_PROJECT')
+	if not project:
+		ap.error('no project given: pass --project, a positional path, '
+				 'or set BEHAVEAI_PROJECT')
+
 	quotas = parse_quota_overrides(args.quota, DEFAULT_QUOTAS)
-	report = mine(args.project, args.budget, args.fps, args.min_spacing_s,
+	report = mine(project, args.budget, args.fps, args.min_spacing_s,
 				  args.max_per_video, quotas, args.include_holdout, args.seed,
 				  args.out)
 
