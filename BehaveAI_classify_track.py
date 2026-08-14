@@ -3,6 +3,7 @@ import numpy as np
 import csv
 import os
 import glob
+import random
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
 import configparser
@@ -1896,7 +1897,29 @@ if __name__ == '__main__':
 		else:
 			print(f"No video found under {input_folder} — nothing to process.")
 
-	for vid in _all_input_videos:
+	# Processing order. Name order is chronological here (the clips are named from
+	# their capture timestamp) and therefore also groups by site and by herd, so a
+	# run that is interrupted -- or simply read before it finishes -- leaves a
+	# partial set covering the first sites only. Everything downstream inherits
+	# that: the frame miner scores whatever tracking CSVs exist, and the activity
+	# budget aggregates them. Shuffling makes any prefix of the run a
+	# representative sample of the corpus instead of its first chapter.
+	_order = str(config['DEFAULT'].get('video_order', 'name')).strip().lower()
+	if _order == 'random':
+		# Seed 0 means "a different order every run", which is what you want when
+		# re-running to widen coverage. A non-zero seed pins the order, so an
+		# interrupted run can be resumed in the same sequence and a paper can
+		# state exactly which videos a partial pass covered.
+		_seed = int(float(config['DEFAULT'].get('video_order_seed', '0') or 0))
+		_rng = random.Random(_seed) if _seed else random.Random()
+		_rng.shuffle(_all_input_videos)
+		print(f"Processing {len(_all_input_videos)} video(s) in random order"
+			  + (f" (seed {_seed})" if _seed else " (unseeded)"))
+	elif _all_input_videos:
+		print(f"Processing {len(_all_input_videos)} video(s) in name order")
+
+	for _n, vid in enumerate(_all_input_videos, 1):
+			print(f"\n[{_n}/{len(_all_input_videos)}] {os.path.basename(vid)}")
 			process_video(vid)
 
 	# Auto-launch drone motion correction when enabled (disabled -> no behaviour change)

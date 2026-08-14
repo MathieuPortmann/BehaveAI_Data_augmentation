@@ -1349,6 +1349,19 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab3, from_=0.0, to=1.0, increment=0.01, textvariable=self.val_frequency_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'val_frequency').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
+		help_label(tab3, 'Video processing order', 'video_order').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.video_order_var = tk.StringVar(value='name')
+		ttk.Combobox(tab3, values=['name', 'random'], textvariable=self.video_order_var,
+					 state='readonly', width=10).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		self.video_order_var.trace_add('write', lambda *a: self._set_dirty())
+		help_line(tab3, 'video_order').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		# Only meaningful for the random order, so it follows it directly.
+		help_label(tab3, 'Video order seed', 'video_order_seed').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.video_order_seed_var = tk.IntVar(value=0)
+		ttk.Spinbox(tab3, from_=0, to=999999, increment=1, textvariable=self.video_order_seed_var, width=8, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'video_order_seed').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
 		# Sits next to val_frequency because both decide which frames end up in the
 		# dataset: one splits what is already annotated, the other picks what to
 		# annotate next.
@@ -2257,6 +2270,8 @@ class SettingsEditorApp(tk.Tk):
 
 		# model type
 		self.val_frequency_var.set(float(d.get('val_frequency', fallback='0.2')))
+		self.video_order_var.set(str(d.get('video_order', fallback='name')).strip().lower() or 'name')
+		self.video_order_seed_var.set(int(float(d.get('video_order_seed', fallback='0'))))
 		self.mining_budget_var.set(int(float(d.get('mining_budget', fallback='300'))))
 		self.mining_precache_workers_var.set(int(float(d.get('mining_precache_workers', fallback='4'))))
 		self.mining_precache_animation_var.set(
@@ -2849,6 +2864,8 @@ class SettingsEditorApp(tk.Tk):
 			new_default[_mkey] = str(self.metric_display_vars[_mkey].get()).lower()
 
 		new_default['val_frequency'] = str(self.val_frequency_var.get())
+		new_default['video_order'] = self.video_order_var.get()
+		new_default['video_order_seed'] = str(self.video_order_seed_var.get())
 		new_default['mining_budget'] = str(self.mining_budget_var.get())
 		new_default['mining_precache_workers'] = str(self.mining_precache_workers_var.get())
 		new_default['mining_precache_animation'] = str(self.mining_precache_animation_var.get()).lower()

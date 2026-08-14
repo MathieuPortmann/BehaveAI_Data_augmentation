@@ -409,6 +409,25 @@ PARAM_HELP = {
         "influence": "Bigger holdout = more reliable, honest metrics but fewer training videos. "
                      "~0.1–0.2 is typical.",
     },
+    "video_order": {
+        "short": "Order in which batch classify processes the input videos.",
+        "what": "'name' walks them alphabetically; 'random' shuffles them first. The clips are "
+                "named from their capture timestamp, so name order is also chronological and "
+                "groups by site and by herd.",
+        "influence": "A full run ends the same either way — this only matters for a run that "
+                     "is interrupted or read before it finishes. In name order such a partial "
+                     "pass covers the first sites only, and everything downstream inherits the "
+                     "bias (the frame miner scores whatever tracking CSVs exist; the activity "
+                     "budget aggregates them). Random makes any prefix a representative sample.",
+    },
+    "video_order_seed": {
+        "short": "Fixes the random processing order; 0 reshuffles every run.",
+        "what": "Seed for the shuffle when video_order is 'random'. Any non-zero value gives "
+                "the same order every time; 0 draws a fresh one per run.",
+        "influence": "Leave at 0 to widen coverage across repeated partial runs. Set it when "
+                     "an interrupted run should resume in the same sequence, or when a paper "
+                     "has to state exactly which videos a partial pass covered.",
+    },
     "mining_budget": {
         "short": "How many frames the frame miner proposes per run.",
         "what": "Size of the mining_targets.csv that 'Mine frames' writes, and so the length of "
