@@ -475,7 +475,7 @@ def _parse_frame_value(raw, fps):
 	return None
 
 
-def parse_timecode_csv(csv_path, full_pool, frame_window, report=None):
+def parse_timecode_csv(csv_path, full_pool, frame_window, report=None, meta_out=None):
 	"""
 	Parse a CSV listing frames / time-codes to annotate and return an ordered
 	list of (video_path, frame_number) targets.
@@ -494,6 +494,11 @@ def parse_timecode_csv(csv_path, full_pool, frame_window, report=None):
 		Filled in with why rows were dropped ('rows', 'unknown_video',
 		'bad_time', 'header', 'error', 'columns') so the caller can show the
 		user something more useful than "nothing was loaded".
+	meta_out : dict | None
+		Filled in with (video_path, frame) -> memo text taken from the optional
+		`reason` / `detail` columns. BehaveAI_mine_frames writes those to say why
+		a frame was picked, and an annotator who can see "static=Graze while
+		motion=Walk" knows what to look at instead of hunting for it.
 	"""
 	if report is None:
 		report = {}
@@ -546,6 +551,8 @@ def parse_timecode_csv(csv_path, full_pool, frame_window, report=None):
 
 		video_col = _pick('video_filename', 'video', 'filename')
 		time_col  = _pick('frame', 'timecode', 'time', 'start_frame')
+		reason_col = _pick('reason', 'behaviour')
+		detail_col = _pick('detail')
 
 		if video_col is None or time_col is None:
 			print("CSV time-codes: could not find a video column "
@@ -585,6 +592,14 @@ def parse_timecode_csv(csv_path, full_pool, frame_window, report=None):
 				continue
 			seen.add(key)
 			targets.append(key)
+
+			if meta_out is not None:
+				memo = ' · '.join(
+					part for part in ((row.get(reason_col) or '').strip() if reason_col else '',
+									  (row.get(detail_col) or '').strip() if detail_col else '')
+					if part)
+				if memo:
+					meta_out[key] = memo
 
 	except Exception as e:
 		print(f"CSV time-codes: failed to parse '{csv_path}': {e}")
@@ -661,17 +676,28 @@ fr = None
 motion_image = None
 
 # Frame-source navigation state.
-#   nav_mode    : 'random' (default), 'csv' (walk through CSV time-codes) or
+#   nav_mode    : 'random' (default), 'csv' (walk through CSV time-codes),
 #                 'sequential' (step through the current video frame by frame)
-#   csv_targets : ordered list of (video_path, frame_number) parsed from a CSV
+#                 or 'mining' (walk a BehaveAI_mine_frames target list)
+#   csv_targets : ordered list of (video_path, frame_number) parsed from a CSV.
+#                 Shared by 'csv' and 'mining': both are an ordered walk over
+#                 explicit targets, and only the label, the memo and the
+#                 end-of-list message differ.
 #   csv_cursor  : index of the next CSV target to present
+#   csv_reasons : (video_path, frame_number) -> why the miner picked this frame
 #   seq_step    : frames to advance per save in 'sequential' mode.  1 = every
 #                 frame; fps//2 gives the ~2 fps cadence a MOT ground truth
 #                 wants without annotating 30 near-identical frames a second.
 nav_mode = 'random'
 csv_targets = []
 csv_cursor = 0
+csv_reasons = {}
 seq_step = 1
+
+# A model-proposed box under this confidence gets an orange marker, so the eye
+# goes to what the detector doubts instead of reading every label. Matches the
+# upper edge of BehaveAI_mine_frames' hesitation band.
+UNCERTAIN_CONF = 0.35
 
 video_label = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -1063,9 +1089,23 @@ def draw_boxes_on_image(base_img, selected_set=None, to_screen=None, bounds=None
 	line_mult = 1.0 if render_style.adaptive else box_line_scale
 	font_mult = 1.0 if render_style.adaptive else box_font_scale
 
+	def _is_uncertain(box):
+		"""True for a model proposal the model itself is unsure of.
+
+		Hand-drawn boxes and boxes reloaded from a saved annotation carry -1 in
+		the confidence slot (see index_annotations.load_labels_and_masks_for_item),
+		so they are never flagged: the annotator's own work is not in doubt.
+		"""
+		idx = 6 if hierarchical_mode else 5
+		if len(box) <= idx:
+			return False
+		conf = box[idx]
+		return isinstance(conf, (int, float)) and 0 <= conf < UNCERTAIN_CONF
+
 	def _draw(x1, y1, x2, y2, box, **kw):
 		"""Delegate to the shared renderer, feeding it the box's NATIVE size so
 		font/thickness adapt to the animal rather than to the zoom level."""
+		kw.setdefault('uncertain', _is_uncertain(box))
 		draw_labeled_detection(out, x1, y1, x2, y2, box[2] - box[0], box[3] - box[1],
 							 render_style, display_scale=display_scale,
 							 line_mult=line_mult, font_mult=font_mult,
@@ -1646,10 +1686,16 @@ def load_next_target(app_instance):
 	"""
 	global csv_cursor
 
-	if nav_mode == 'csv' and csv_targets:
+	if nav_mode in ('csv', 'mining') and csv_targets:
 		if csv_cursor >= len(csv_targets):
-			messagebox.showinfo("CSV finished",
-				"All time-codes from the CSV have been visited. Switching back to random mode.")
+			if nav_mode == 'mining':
+				messagebox.showinfo("Mining list finished",
+					"Every mined frame has been visited. Switching back to random mode.\n\n"
+					"Re-run BehaveAI_mine_frames.py to propose a new batch — it will "
+					"skip everything annotated in this pass.")
+			else:
+				messagebox.showinfo("CSV finished",
+					"All time-codes from the CSV have been visited. Switching back to random mode.")
 			app_instance.set_nav_mode('random')
 			load_next_random_frame(app_instance)
 			return
@@ -1658,6 +1704,7 @@ def load_next_target(app_instance):
 		go_to_frame(app_instance, vpath, fnum)
 		# Update the button label so progress (i/N) stays in sync
 		app_instance.update_source_button()
+		app_instance.show_target_reason(vpath, fnum)
 	elif nav_mode == 'sequential':
 		load_next_sequential_frame(app_instance)
 	else:
@@ -2208,9 +2255,10 @@ class AnnotatorTk:
 	def update_source_button(self):
 		"""Refresh the Source button label to reflect the active nav mode."""
 		try:
-			if nav_mode == 'csv' and csv_targets:
+			if nav_mode in ('csv', 'mining') and csv_targets:
+				label = 'Mining' if nav_mode == 'mining' else 'CSV'
 				self.source_btn.config(
-					text=f"Source: CSV ({min(csv_cursor, len(csv_targets))}/{len(csv_targets)})")
+					text=f"Source: {label} ({min(csv_cursor, len(csv_targets))}/{len(csv_targets)})")
 			elif nav_mode == 'sequential':
 				self.source_btn.config(text=f"Source: Frame+{seq_step}")
 			else:
@@ -2220,8 +2268,22 @@ class AnnotatorTk:
 
 	def set_nav_mode(self, mode):
 		global nav_mode
-		nav_mode = mode if mode in ('random', 'csv', 'sequential') else 'random'
+		nav_mode = mode if mode in ('random', 'csv', 'sequential', 'mining') else 'random'
 		self.update_source_button()
+
+	def show_target_reason(self, vpath, fnum):
+		"""Put the miner's reason for this frame in the title bar.
+
+		Without it the annotator is served a frame with no idea what to look for,
+		which on a 4K frame holding twenty animals is the difference between
+		checking one box and re-reading the whole herd.
+		"""
+		try:
+			memo = csv_reasons.get((vpath, fnum))
+			base = f"BehaveAI — {os.path.basename(vpath)}"
+			self.root.title(f"{base}  [{memo}]" if memo else base)
+		except Exception:
+			pass
 
 	def _enter_sequential_mode(self):
 		"""
@@ -2291,6 +2353,8 @@ class AnnotatorTk:
 						 command=self._enter_sequential_mode)
 		menu.add_command(label="Load a time-code CSV…",
 						 command=self._load_csv_source)
+		menu.add_command(label="Mined frames (model is unsure)…",
+						 command=self._load_mining_source)
 		try:
 			x = self.source_btn.winfo_rootx()
 			y = self.source_btn.winfo_rooty() + self.source_btn.winfo_height()
@@ -2299,7 +2363,6 @@ class AnnotatorTk:
 			menu.grab_release()
 
 	def _load_csv_source(self):
-		global csv_targets, csv_cursor
 		initial = self._project_timecodes_dir() or project_dir
 		path = filedialog.askopenfilename(
 			title="Choose a time-code CSV",
@@ -2307,14 +2370,38 @@ class AnnotatorTk:
 			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
 		if not path:
 			return
-		report = {}
-		targets = parse_timecode_csv(path, full_frame_pool, frameWindow, report)
+		self._adopt_target_list(path, 'csv')
+
+	def _load_mining_source(self):
+		"""Walk the frames BehaveAI_mine_frames.py flagged as worth annotating.
+
+		Defaults to <output_dir>/mining_targets.csv, the path the miner writes,
+		so the common case is two clicks.
+		"""
+		out_dir = resolve_project_dir(config, project_dir, 'output')
+		default = os.path.join(out_dir, 'mining_targets.csv')
+		path = default
+		if not os.path.exists(default):
+			path = filedialog.askopenfilename(
+				title="Choose a mining target list",
+				initialdir=out_dir if os.path.isdir(out_dir) else project_dir,
+				filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+			if not path:
+				return
+		self._adopt_target_list(path, 'mining')
+
+	def _adopt_target_list(self, path, mode):
+		"""Parse an ordered target list and switch to it. Shared by both modes."""
+		global csv_targets, csv_cursor, csv_reasons
+		report, meta = {}, {}
+		targets = parse_timecode_csv(path, full_frame_pool, frameWindow, report, meta)
 		if not targets:
 			messagebox.showerror("Invalid CSV", self._csv_failure_message(path, report))
 			return
 		csv_targets = targets
 		csv_cursor = 0
-		self.set_nav_mode('csv')
+		csv_reasons = meta
+		self.set_nav_mode(mode)
 		# Jump straight to the first target
 		load_next_target(self)
 

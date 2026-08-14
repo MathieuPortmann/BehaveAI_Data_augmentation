@@ -24,6 +24,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 PENDING_COLOR = (0, 0, 255)      # BGR red - box with no primary chosen yet
 SELECTED_COLOR = (0, 255, 255)   # BGR cyan - selection highlight
+UNCERTAIN_COLOR = (0, 165, 255)  # BGR orange - model-proposed box the model doubts
 PENDING_TEXT = "? choose primary"
 
 # Extra pixels the hierarchical outer (primary) box extends beyond the inner one.
@@ -228,12 +229,18 @@ def draw_labeled_detection(img, x1, y1, x2, y2, box_w, box_h, style, *,
                            display_scale=1.0, line_mult=1.0, font_mult=1.0,
                            primary_color=(255, 255, 255), secondary_color=None,
                            top_lines=(), label='', hierarchical=False,
-                           pending=False, selected=False, bounds=None):
+                           pending=False, selected=False, uncertain=False,
+                           bounds=None):
     """Draw one detection: box(es) + stacked label. Single entry point shared by
     the output-video renderer and the annotation tool.
 
     x1..y2 are drawing coordinates (already mapped to screen space by the caller);
     box_w/box_h are the NATIVE box size that drives adaptive sizing.
+
+    `uncertain` adds an outer marker for a model proposal whose confidence is
+    low. Only the annotation tool passes it: on an output video every box is the
+    pipeline's own answer and flagging them would say nothing, whereas an
+    annotator is looking for exactly the boxes worth a second look.
     """
     font_scale, th = adaptive_font_thickness(
         style, box_w, box_h, display_scale, line_mult, font_mult)
@@ -256,6 +263,11 @@ def draw_labeled_detection(img, x1, y1, x2, y2, box_w, box_h, style, *,
         draw_stacked_label(img, [*top_lines, label], x1, y1, primary_color,
                            font_scale, th, style, bounds)
         pad = 3
+
+    if uncertain:
+        cv2.rectangle(img, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad),
+                      UNCERTAIN_COLOR, 1)
+        pad += 2
 
     if selected:
         cv2.rectangle(img, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad),
