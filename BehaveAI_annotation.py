@@ -647,7 +647,35 @@ if not unannotated_pool:
 	root_tmp.destroy()
 	sys.exit(0)
 
-video_path, _initial_frame = pick_random_frame(unannotated_pool)
+# Open on the mined list when the miner left one, rather than on a random frame.
+# Decided here, before the capture is opened, and not after the window is built:
+# opening a random 4K clip over the mount costs the seconds the whole pre-cache
+# exists to avoid, and that work would be thrown away as soon as the mining list
+# took over. Falls back to Random when there is no list, when nothing is left in
+# it, or when none of its videos are in the pool.
+_autostart_targets, _autostart_reasons, _autostart_path = [], {}, None
+_mining_list = frame_cache.targets_path(mined_cache_dir)
+if os.path.exists(_mining_list):
+	_pruned = frame_cache.prune_targets(
+		_mining_list,
+		lambda label, frame: frame in annotated_frames_map.get(label, set()))
+	if _pruned:
+		print(f"Mining: {_pruned} target(s) already annotated, removed from the list.")
+	_meta = {}
+	_autostart_targets = parse_timecode_csv(_mining_list, full_frame_pool,
+											frameWindow, {}, _meta)
+	if _autostart_targets:
+		_autostart_reasons, _autostart_path = _meta, _mining_list
+		print(f"Mining: resuming on {len(_autostart_targets)} pending frame(s). "
+			  "Switch with the Source button.")
+	else:
+		print("Mining: the target list is empty — re-run BehaveAI_mine_frames.py "
+			  "for a new batch. Starting in Random mode.")
+
+if _autostart_targets:
+	video_path, _initial_frame = _autostart_targets[0]
+else:
+	video_path, _initial_frame = pick_random_frame(unannotated_pool)
 
 
 capture = cv2.VideoCapture(video_path)
@@ -3354,15 +3382,35 @@ class AnnotatorTk:
 root = tk.Tk()
 app = AnnotatorTk(root)
 
-# Pick the first prefetch target deterministically and remember it
-_initial_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
-_initial_unannotated = [(vp, fn) for vp, fn in _initial_unannotated
-						if not (vp == video_path and fn == frame_number)]
-if _initial_unannotated:
-	_next_vpath, _next_fnum = pick_random_frame(_initial_unannotated)
-	_prefetched_target = (_next_vpath, _next_fnum)
-	# Delay so the first frame loads without competing with the prefetch thread
-	root.after(3000, lambda vp=_next_vpath, fn=_next_fnum: _start_prefetch(vp, fn))
+if _autostart_targets:
+	# Adopt the list the startup frame was already chosen from. Done by hand
+	# rather than through _adopt_target_list because that one re-parses and then
+	# jumps to the first target — which is the frame already on screen.
+	csv_targets = _autostart_targets
+	# 1, not 0: target[0] is the frame already on screen. Leaving the cursor at
+	# zero would serve it a second time on the first save, and the button would
+	# read 0/N while a frame was being annotated.
+	csv_cursor = 1
+	csv_reasons = _autostart_reasons
+	mining_targets_path = _autostart_path
+	app.set_nav_mode('mining')
+	app.show_target_reason(video_path, frame_number)
+	# Prefetch the *next* target, not a random frame: in mining mode that is
+	# where the annotator is actually going.
+	if len(_autostart_targets) > 1:
+		_next_vpath, _next_fnum = _autostart_targets[1]
+		_prefetched_target = (_next_vpath, _next_fnum)
+		root.after(3000, lambda vp=_next_vpath, fn=_next_fnum: _start_prefetch(vp, fn))
+else:
+	# Pick the first prefetch target deterministically and remember it
+	_initial_unannotated = get_unannotated_pool(full_frame_pool, annotation_index)
+	_initial_unannotated = [(vp, fn) for vp, fn in _initial_unannotated
+							if not (vp == video_path and fn == frame_number)]
+	if _initial_unannotated:
+		_next_vpath, _next_fnum = pick_random_frame(_initial_unannotated)
+		_prefetched_target = (_next_vpath, _next_fnum)
+		# Delay so the first frame loads without competing with the prefetch thread
+		root.after(3000, lambda vp=_next_vpath, fn=_next_fnum: _start_prefetch(vp, fn))
 
 root.mainloop()
 

@@ -507,6 +507,35 @@ def test_mining_budget_defaults_when_the_ini_predates_the_setting():
 		assert proj['mining_budget'] == 300, proj['mining_budget']
 
 
+def _annotation_source():
+	path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+						'BehaveAI_annotation.py')
+	return open(path, encoding='utf-8').read()
+
+
+def test_startup_picks_the_mined_frame_before_opening_a_capture():
+	"""The point of the pre-cache is not paying a 4K seek interactively. Choosing
+	the first frame *after* cv2.VideoCapture would pay exactly that, on a random
+	clip, and then throw it away."""
+	src = _annotation_source()
+	choose = src.index('_autostart_targets:\n\tvideo_path, _initial_frame')
+	open_cap = src.index('capture = cv2.VideoCapture(video_path)')
+	assert choose < open_cap, "the startup frame must be chosen before the capture opens"
+
+
+def test_startup_cursor_does_not_re_serve_the_frame_on_screen():
+	"""csv_cursor is the index of the NEXT target; target[0] is already shown."""
+	src = _annotation_source()
+	block = src[src.index('if _autostart_targets:\n\t# Adopt the list'):]
+	block = block[:block.index('else:')]
+	assert 'csv_cursor = 1' in block, block[:400]
+
+
+def test_startup_falls_back_to_random_without_a_list():
+	src = _annotation_source()
+	assert 'video_path, _initial_frame = pick_random_frame(unannotated_pool)' in src
+
+
 def test_launcher_offers_the_miner_above_annotate():
 	"""The launcher runs tools as `python <script> <project_dir>`, so the miner
 	has to accept the project positionally; and the button is only useful before
