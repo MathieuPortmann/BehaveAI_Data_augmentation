@@ -3273,6 +3273,18 @@ class AnnotatorTk:
 					_data = frame_cache.compute_frame_data(video_path, last_frame, motion_params)
 				motion_image = None
 				raw_buf.clear()
+				if _data is None:
+					# Silence here is expensive: the canvas simply keeps the last
+					# frame and the annotator waits on something that will never
+					# arrive. A truncated file is the usual cause — it opens,
+					# reports a full duration, and then has no media past a
+					# point — so the diagnosis is worth the one-off atom read.
+					_why = frame_cache.diagnose_video(video_path)
+					print(f"Could not decode frame {last_frame} of "
+						  f"{os.path.basename(video_path)}."
+						  + (f"\n  Reason: {_why}." if _why else
+							 "\n  The file opens, so this frame is probably past the "
+							 "readable media."))
 				if _data is not None:
 					fr = _data['fr']
 					motion_image = _data['motion_image']
