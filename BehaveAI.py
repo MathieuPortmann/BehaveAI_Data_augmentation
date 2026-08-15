@@ -327,6 +327,10 @@ class ScriptRunnerApp:
 	        primary_motion_classes  = parse_list('primary_motion_classes')
 	        all_primary_classes     = primary_static_classes + primary_motion_classes
 	        val_frequency           = float(d.get('val_frequency', '0.1'))
+	        # primary_train_both_streams: the two label trees hold the same boxes under
+	        # the shared global index space, so counting both would double every class
+	        # and reading the motion tree with the motion-only map would rename them.
+	        primary_both_streams    = str(d.get('primary_train_both_streams', 'false')).strip().lower() == 'true'
 
 	        # ── Annotation directories ─────────────────────────────────
 	        annot_dirs = {
@@ -441,9 +445,15 @@ class ScriptRunnerApp:
 	            lines.append(f"\n  CLASS DISTRIBUTION  (boxes from label files, "
 	                          f"crops from annot_<stream>_crop/)")
 
+	            if primary_both_streams:
+	                lines.append("    (both detectors train on all classes — boxes counted once)")
+
 	            # Map class index -> name for static and motion
 	            static_class_map = {i: name for i, name in enumerate(primary_static_classes)}
 	            motion_class_map = {i: name for i, name in enumerate(primary_motion_classes)}
+	            if primary_both_streams:
+	                static_class_map = {i: name for i, name in enumerate(all_primary_classes)}
+	                motion_class_map = {}   # identical copy of the static tree
 
 	            class_counts = {name: 0 for name in all_primary_classes}
 

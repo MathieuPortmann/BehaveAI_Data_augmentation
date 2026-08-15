@@ -21,7 +21,7 @@ from index_annotations import AnnotationIndex
 from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
-	resolve_project_dir,
+	resolve_project_dir, load_stream_training_config, stream_label_classes,
 )
 from behaveai_render import load_render_style, draw_labeled_detection
 from behaveai_holdout import is_holdout_video
@@ -115,6 +115,7 @@ def _load_ethogram_globals(species):
 	global primary_static_hotkeys, primary_motion_hotkeys
 	global primary_classes, primary_colors, primary_hotkeys
 	global primary_classes_info, primary_class_dict
+	global static_label_classes, motion_label_classes
 	global secondary_classes, secondary_colors, secondary_hotkeys, secondary_map
 	global allowed_secondary_idx, hierarchical_mode
 	global secondary_classes_info, secondary_class_dict, ignore_secondary
@@ -140,6 +141,10 @@ def _load_ethogram_globals(species):
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
+	# What each trained detector's class indices mean - the union of both lists when
+	# the primary cross-stream switch is on, that stream's own list otherwise.
+	static_label_classes, motion_label_classes = stream_label_classes(
+		primary_static_classes, primary_motion_classes, primary_both_streams)
 	primary_classes_info = list(zip(primary_hotkeys, primary_classes))
 	primary_class_dict = {ord(key): idx for idx, (key, _) in enumerate(primary_classes_info) if key}
 
@@ -205,6 +210,12 @@ try:
 
 	dominant_source = config['DEFAULT']['dominant_source'].lower()
 
+	# Read before the ethogram: _load_ethogram_globals derives each stream's label
+	# space from the primary switch.
+	_stream_cfg = load_stream_training_config(config)
+	primary_both_streams = _stream_cfg['primary_both_streams']
+	secondary_both_streams = _stream_cfg['secondary_both_streams']
+
 	_load_ethogram_globals(species_list[0])
 
 	# Common parameters
@@ -243,6 +254,16 @@ if motion_blocks_static not in ('true', 'false'):
 	raise ValueError("motion_blocks_static must be 'true' or 'false'")
 if static_blocks_motion not in ('true', 'false'):
 	raise ValueError("static_blocks_motion must be 'true' or 'false'")
+
+# Blocking exists so the two detectors do not cross-train on each other's animals.
+# When both detectors are trained on every box that reasoning is inverted: greying
+# a box out would delete a target the other model is now supposed to learn. Force
+# the two keys off rather than honour a combination that cannot mean anything.
+if primary_both_streams and (motion_blocks_static == 'true' or static_blocks_motion == 'true'):
+	print("Primary cross-stream training is on: ignoring motion_blocks_static / "
+		  "static_blocks_motion (both detectors must see every animal).")
+	motion_blocks_static = 'false'
+	static_blocks_motion = 'false'
 if save_empty_frames not in ('true', 'false'):
 	raise ValueError("save_empty_frames must be 'true' or 'false'")
 
@@ -289,6 +310,7 @@ def _build_annotation_index():
 		age_classes=age_classes,
 		species_cropped_base_dir=species_cropped_base_dir,
 		age_cropped_base_dir=age_cropped_base_dir,
+		union_labels=primary_both_streams,
 	)
 
 
@@ -825,10 +847,16 @@ if YOLO is not None:
 			print("Failed to load age model:", e)
 
 
-def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_img):
+def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_img, source=None):
 	"""Run the stream-appropriate secondary classifier on a crop and return
 	(pool_index, confidence), restricted to the secondaries allowed for this
-	primary. Returns (-1, -1.0) when no secondary applies/available."""
+	primary. Returns (-1, -1.0) when no secondary applies/available.
+
+	`source` names the stream the box was detected in. It only matters under
+	primary cross-stream training, where a class no longer implies a stream: a
+	static-image detection must be classified by the static model on the static
+	crop even when it carries a motion behaviour. Left None (or in legacy mode)
+	the primary's own class picks the stream, exactly as before."""
 	if not hierarchical_mode:
 		return -1, -1.0
 	if primary_global_idx is None or primary_global_idx < 0 or primary_global_idx >= len(allowed_secondary_idx):
@@ -836,7 +864,11 @@ def classify_secondary(primary_global_idx, x1, y1, x2, y2, static_img, motion_im
 	allowed = allowed_secondary_idx[primary_global_idx]
 	if not allowed:
 		return -1, -1.0
-	if primary_global_idx < len(primary_static_classes):
+	if source in ('static', 'motion'):
+		use_static = (source == 'static')
+	else:
+		use_static = primary_global_idx < len(primary_static_classes)
+	if use_static:
 		model = secondary_static_model
 		crop_src = static_img
 	else:
@@ -1020,20 +1052,21 @@ def auto_annotate_local():
 	# ~ all_detections = []
 	global boxes
 
-	# Primary static detection
-	if primary_static_classes and model_static != None:
+	# Primary static detection. A static-model index is a global primary index in
+	# both modes (the static classes come first in the union), so nothing is added.
+	if static_label_classes and model_static != None:
 		results_static = model_static.predict(fr, conf=primary_conf_thresh, verbose=False)
 		for box in results_static[0].boxes:
 			# ~ coords = tuple(map(int, box.xyxy[0].tolist()))
 			class_idx = int(box.cls[0])
-			primary_class = primary_static_classes[class_idx]
+			primary_class = static_label_classes[class_idx]
 			conf = float(box.conf[0])
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
 			sp_idx, sp_conf, ag_idx, ag_conf = _classify_species_and_age(x1, y1, x2, y2, 'static')
 
 			if hierarchical_mode:
 				secondary_class_idx, secondary_conf = classify_secondary(
-					class_idx, x1, y1, x2, y2, fr, motion_image)
+					class_idx, x1, y1, x2, y2, fr, motion_image, source='static')
 				boxes.append((x1, y1, x2, y2, class_idx, secondary_class_idx, conf, secondary_conf,
 							  sp_idx, sp_conf, ag_idx, ag_conf))
 
@@ -1042,25 +1075,28 @@ def auto_annotate_local():
 				boxes.append((x1, y1, x2, y2, class_idx, conf, sp_idx, sp_conf, ag_idx, ag_conf))
 
 
-	# Primary motion detection
-	if primary_motion_classes and model_motion != None:
+	# Primary motion detection. The motion model's own indices are re-based onto the
+	# global space only in legacy mode; under cross-stream training it already emits
+	# global indices, so adding the offset would shift every class.
+	if motion_label_classes and model_motion != None:
+		_motion_offset = 0 if primary_both_streams else len(primary_static_classes)
 		results_motion = model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
 		for box in results_motion[0].boxes:
 			class_idx = int(box.cls[0])
-			primary_class = primary_motion_classes[class_idx]
+			primary_class = motion_label_classes[class_idx]
 			conf = float(box.conf[0])
 			x1, y1, x2, y2 = map(int, box.xyxy[0])
 			sp_idx, sp_conf, ag_idx, ag_conf = _classify_species_and_age(x1, y1, x2, y2, 'motion')
+			global_primary_idx = class_idx + _motion_offset
 
 			if hierarchical_mode:
-				global_primary_idx = class_idx + len(primary_static_classes)
 				secondary_class_idx, secondary_conf = classify_secondary(
-					global_primary_idx, x1, y1, x2, y2, fr, motion_image)
+					global_primary_idx, x1, y1, x2, y2, fr, motion_image, source='motion')
 				boxes.append((x1, y1, x2, y2, global_primary_idx, secondary_class_idx, conf, secondary_conf,
 							  sp_idx, sp_conf, ag_idx, ag_conf))
 
 			else:
-				boxes.append((x1, y1, x2, y2, class_idx + len(primary_static_classes), conf,
+				boxes.append((x1, y1, x2, y2, global_primary_idx, conf,
 							  sp_idx, sp_conf, ag_idx, ag_conf))
 
 	if boxes:
@@ -1259,7 +1295,13 @@ def save_annotation():
 			x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 		else:
 			x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
-		if primary_cls < len(primary_static_classes): # primary class is static
+		if primary_both_streams:
+			# Both detectors are trained on every box, so every box counts for both
+			# datasets and neither stream blocks the other (the two flags are forced
+			# off at startup in this mode).
+			static_count += 1
+			motion_count += 1
+		elif primary_cls < len(primary_static_classes): # primary class is static
 			static_count +=1
 			if static_blocks_motion == 'true':
 				cv2.rectangle(motion_ann_frame, (x1, y1), (x2, y2), (128, 128, 128), -line_thickness)
@@ -1296,7 +1338,10 @@ def save_annotation():
 			cv2.imwrite(static_img_path, static_ann_frame)
 
 
-		# Save static labels
+		# Save static labels. The class index written here is the STATIC dataset's
+		# own index space: normally that is "static classes only", where the global
+		# index already is the local one; under primary cross-stream training it is
+		# the full global space (static then motion), shared with the motion tree.
 		static_ann_path = os.path.join(static_target_lbl_dir, f"{base_filename}.txt")
 		with open(static_ann_path, 'w') as f:
 			for box in boxes:
@@ -1304,7 +1349,7 @@ def save_annotation():
 					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				else:
 					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
-				if primary_cls < len(primary_static_classes):
+				if primary_both_streams or primary_cls < len(primary_static_classes):
 					# ~ if y1 < button_height:
 						# ~ continue
 					xc = (x1 + x2) / 2 / w
@@ -1319,7 +1364,10 @@ def save_annotation():
 				mined_cache_dir, base_filename, 'motion', img_path)):
 			cv2.imwrite(img_path, motion_ann_frame)
 
-		# Save motion labels
+		# Save motion labels. Legacy mode re-bases the global index onto the motion
+		# list (index 0 = first motion class); under primary cross-stream training
+		# the motion tree uses the same global space as the static one, so the index
+		# is written unchanged and no offset is ever re-added on read.
 		motion_ann_path = os.path.join(motion_target_lbl_dir, f"{base_filename}.txt")
 		with open(motion_ann_path, 'w') as f:
 			for box in boxes:
@@ -1327,14 +1375,15 @@ def save_annotation():
 					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
 				else:
 					x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
-				if primary_cls >= len(primary_static_classes):
+				if primary_both_streams or primary_cls >= len(primary_static_classes):
 					# ~ if y1 < button_height:
 						# ~ continue
 					xc = (x1 + x2) / 2 / w
 					yc = (y1 + y2) / 2 / h
 					bw = abs(x2 - x1) / w
 					bh = abs(y2 - y1) / h
-					f.write(f"{primary_cls - len(primary_static_classes) } {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
+					cls_in_file = primary_cls if primary_both_streams else primary_cls - len(primary_static_classes)
+					f.write(f"{cls_in_file} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
 
 	if static_blocks_motion == 'true':
 		# ann_frames need re-making after greying out the static for the above primary training
@@ -1393,21 +1442,25 @@ def save_annotation():
 
 			# Route the crop to the stream of the primary only; pooled layout
 			# annot_<stream>_crop/<secondary | __none__>/ (no per-primary level).
-			if primary_cls < len(primary_static_classes):
-				base_crop_dir = static_cropped_base_dir
-				crop_src = static_ann_frame
+			# Under secondary cross-stream training the same box is cropped from both
+			# renderings instead, so each classifier trains on every annotated box.
+			if secondary_both_streams:
+				targets = ((static_cropped_base_dir, static_ann_frame),
+						   (motion_cropped_base_dir, motion_ann_frame))
+			elif primary_cls < len(primary_static_classes):
+				targets = ((static_cropped_base_dir, static_ann_frame),)
 			else:
-				base_crop_dir = motion_cropped_base_dir
-				crop_src = motion_ann_frame
+				targets = ((motion_cropped_base_dir, motion_ann_frame),)
 
-			crop = crop_src[y1:y2, x1:x2]
-			if crop is None or crop.size == 0:
-				continue
+			for base_crop_dir, crop_src in targets:
+				crop = crop_src[y1:y2, x1:x2]
+				if crop is None or crop.size == 0:
+					continue
 
-			class_dir = os.path.join(base_crop_dir, secondary_class_name)
-			os.makedirs(class_dir, exist_ok=True)
-			crop_path = os.path.join(class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg")
-			cv2.imwrite(crop_path, crop)
+				class_dir = os.path.join(base_crop_dir, secondary_class_name)
+				os.makedirs(class_dir, exist_ok=True)
+				crop_path = os.path.join(class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg")
+				cv2.imwrite(crop_path, crop)
 
 	# Species (model 0) / age (model 0.5) crops - pooled project-wide, unconditional
 	# (mandatory per box, unlike the optional/hierarchical-only secondary above).

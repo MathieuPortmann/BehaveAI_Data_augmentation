@@ -25,6 +25,7 @@ from behaveai_config import (
 	parse_secondary_map, format_secondary_map, load_secondary_config,
 	species_key, get_species_list, load_ethogram_for_species, load_age_classes,
 	parse_train_overrides, resolve_project_dir, DEFAULT_SPECIES,
+	stream_label_classes,
 )
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
@@ -1030,6 +1031,26 @@ class SettingsEditorApp(tk.Tk):
 			return messagebox.askyesno("Warning: existing annotations detected", msg)
 		return True
 
+	def _sync_blocking_state(self):
+		"""Enable/disable the two cross-stream blocking checkboxes to match the
+		primary switch (they are ignored by the pipeline while it is on)."""
+		widgets = getattr(self, '_blocking_checkbuttons', None)
+		if not widgets:
+			return
+		on = bool(self.primary_both_streams_var.get())
+		for cb in widgets:
+			cb.configure(state='disabled' if on else 'normal')
+		note = getattr(self, '_blocking_disabled_note', None)
+		if note is not None:
+			if on:
+				note.pack(anchor='w', padx=24, pady=(2, 0))
+			else:
+				note.pack_forget()
+
+	def _on_both_streams_toggled(self):
+		self._sync_blocking_state()
+		self._set_dirty()
+
 	def _scroll_tab(self, notebook, title):
 		"""Create a vertically-scrollable notebook tab and return the inner frame
 		to populate. Used for tabs that grow tall once help lines are added, so
@@ -1115,6 +1136,30 @@ class SettingsEditorApp(tk.Tk):
 			tab1, self._get_primaries_for_map, self._get_pool_for_map, on_change=self._set_dirty)
 		self.secondary_map_editor.pack(fill='x', pady=(6,6), anchor='w', padx=8)
 
+		# --- Shared training across both streams (off = original BehaveAI behaviour) ---
+		ttk.Label(tab1, text='Train across both streams', style='Section.TLabel').pack(
+			anchor='w', padx=8, pady=(12, 0))
+		ttk.Label(tab1,
+			text=('Leave both unticked to keep the original BehaveAI behaviour: a box belongs to '
+			      'one stream only, decided by its class. Tick one to let that stage train on '
+			      'every annotated box from both streams. Ticking or unticking either box changes '
+			      'what the saved annotations mean, so saving offers a full rebuild.'),
+			style='Help.TLabel', wraplength=700, justify='left').pack(anchor='w', padx=8, pady=(0, 4))
+
+		self.primary_both_streams_var = tk.BooleanVar(value=False)
+		cb_pbs = ttk.Checkbutton(tab1, text='Primary: train both detectors on all classes  ' + 'ⓘ',
+			variable=self.primary_both_streams_var, command=self._on_both_streams_toggled)
+		cb_pbs.pack(anchor='w', padx=8)
+		Tooltip(cb_pbs, tooltip_text('primary_train_both_streams'))
+		ttk.Label(tab1, text=PARAM_HELP['primary_train_both_streams']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
+
+		self.secondary_both_streams_var = tk.BooleanVar(value=False)
+		cb_sbs = ttk.Checkbutton(tab1, text='Secondary: train both classifiers on all boxes  ' + 'ⓘ',
+			variable=self.secondary_both_streams_var, command=self._on_both_streams_toggled)
+		cb_sbs.pack(anchor='w', padx=8)
+		Tooltip(cb_sbs, tooltip_text('secondary_train_both_streams'))
+		ttk.Label(tab1, text=PARAM_HELP['secondary_train_both_streams']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
+
 		self.motion_blocks_static_var = tk.BooleanVar(value=False)
 		cb_mbs = ttk.Checkbutton(tab1, text='Motion blocks static  ' + 'ⓘ', variable=self.motion_blocks_static_var, command=self._set_dirty)
 		cb_mbs.pack(anchor='w', padx=8, pady=(8,0))
@@ -1125,6 +1170,18 @@ class SettingsEditorApp(tk.Tk):
 		cb_sbm.pack(anchor='w', padx=8)
 		Tooltip(cb_sbm, tooltip_text('static_blocks_motion'))
 		ttk.Label(tab1, text=PARAM_HELP['static_blocks_motion']['short'], style='Help.TLabel').pack(anchor='w', padx=24)
+
+		# Blocking hides the other stream's animals so the two detectors do not
+		# cross-train; with the primary switch on there is no "other stream" left to
+		# hide from, and greying those boxes would erase the very targets both
+		# detectors are now meant to learn. The pipeline ignores the two keys in that
+		# mode - disable them here so the window says the same thing.
+		self._blocking_checkbuttons = (cb_mbs, cb_sbm)
+		self._blocking_disabled_note = ttk.Label(tab1,
+			text=('Cross-stream blocking is disabled while the primary switch above is on: '
+			      'both detectors are meant to see every animal.'),
+			style='Help.TLabel', wraplength=700, justify='left')
+		self._sync_blocking_state()
 
 
 		# TAB 1.2: Project paths
@@ -2252,6 +2309,17 @@ class SettingsEditorApp(tk.Tk):
 		self.motion_blocks_static_var.set(self._str_to_bool(d.get('motion_blocks_static', fallback='false')))
 		self.static_blocks_motion_var.set(self._str_to_bool(d.get('static_blocks_motion', fallback='false')))
 
+		# Cross-stream training switches. Same "default false must match everywhere"
+		# rule as the two blocking keys above: the baseline below is what decides
+		# whether saving offers a rebuild, so an absent key must not look like a change.
+		self.primary_both_streams_var.set(self._str_to_bool(d.get('primary_train_both_streams', fallback='false')))
+		self.secondary_both_streams_var.set(self._str_to_bool(d.get('secondary_train_both_streams', fallback='false')))
+		self._loaded_stream_training = {
+			'primary_train_both_streams': str(d.get('primary_train_both_streams', fallback='false')).lower(),
+			'secondary_train_both_streams': str(d.get('secondary_train_both_streams', fallback='false')).lower(),
+		}
+		self._sync_blocking_state()
+
 		# motion tab
 		self.strategy_var.set(d.get('strategy', fallback='exponential'))
 		self.chromatic_tail_only_var.set(self._str_to_bool(d.get('chromatic_tail_only', fallback='false')))
@@ -2541,17 +2609,25 @@ class SettingsEditorApp(tk.Tk):
 			# dataset then pointed at the annotation folders of the machine the
 			# settings were last saved on ("images not found, missing path
 			# C:\...\annot_static\images\val" while training on the server).
+			# With the primary cross-stream switch on, both trees hold every box under
+			# the global index space (static classes first, then motion), so both
+			# YAMLs must declare the union - in that exact order, or every saved label
+			# index would point at the wrong name.
+			static_names, motion_names = stream_label_classes(
+				primary_static_classes, primary_motion_classes,
+				bool(self.primary_both_streams_var.get()))
+
 			static_yaml_dict = {
 				'train': 'annot_static/images/train',
 				'val':   'annot_static/images/val',
-				'nc':	len(primary_static_classes),
-				'names': primary_static_classes,
+				'nc':	len(static_names),
+				'names': static_names,
 			}
 			motion_yaml_dict = {
 				'train': 'annot_motion/images/train',
 				'val':   'annot_motion/images/val',
-				'nc':	len(primary_motion_classes),
-				'names': primary_motion_classes,
+				'nc':	len(motion_names),
+				'names': motion_names,
 			}
 
 			static_yaml_output = os.path.join(self.project_dir, 'static_annotations.yaml')
@@ -2612,6 +2688,23 @@ class SettingsEditorApp(tk.Tk):
 				return True
 		return False
 
+	def _stream_training_transitions(self):
+		"""Which of the two cross-stream switches changed since load.
+
+		Returns a dict with 'primary'/'secondary' -> 'on' | 'off' | None. The
+		direction matters: it is what tells Regenerate_annotations.py whether to
+		merge the two label trees into the shared global index space or split them
+		back into per-stream ones (and likewise for the secondary crops)."""
+		baseline = getattr(self, '_loaded_stream_training', None) or {}
+		out = {}
+		for name, key, var in (
+				('primary', 'primary_train_both_streams', self.primary_both_streams_var),
+				('secondary', 'secondary_train_both_streams', self.secondary_both_streams_var)):
+			now = str(var.get()).lower()
+			was = str(baseline.get(key, 'false')).lower()
+			out[name] = None if now == was else ('on' if now == 'true' else 'off')
+		return out
+
 	def _backup_dir(self, orig_path):
 		"""If orig_path exists, rename to orig_path_backupN where N is the next integer."""
 		if not os.path.isdir(orig_path):
@@ -2669,7 +2762,31 @@ class SettingsEditorApp(tk.Tk):
 					backed.append(b)
 		return backed
 
-	def _run_regenerate_script(self):
+	def _backup_selected_models(self, primary=False, secondary=False):
+		"""Rename the chosen model directories to *_backupN so they retrain.
+
+		Narrower than _backup_primary_and_secondary_motion_models (which always takes
+		both detectors and every secondary): a secondary-only change has no reason to
+		throw away two detector runs that are still valid.
+		"""
+		backed = []
+		names = []
+		if primary:
+			names += ['model_primary_static', 'model_primary_motion']
+		if secondary:
+			backup_suffix_re = re.compile(r'_backup\d+$')
+			names += [n for n in sorted(os.listdir(self.project_dir))
+					  if (n.startswith('model_secondary_static') or n.startswith('model_secondary_motion'))
+					  and not backup_suffix_re.search(n)]
+		for name in names:
+			path = os.path.join(self.project_dir, name)
+			if os.path.isdir(path):
+				b = self._backup_dir(path)
+				if b:
+					backed.append(b)
+		return backed
+
+	def _run_regenerate_script(self, extra_args=None):
 		"""
 		Search for regenerate script and run it. Returns (success:bool, message:str).
 		Search order:
@@ -2683,7 +2800,7 @@ class SettingsEditorApp(tk.Tk):
 		script_path = launcher_dir / script_name
 
 		# Call script with current Python executable and pass the project INI path
-		cmd = [sys.executable, script_path, self.ini_path]
+		cmd = [sys.executable, script_path, self.ini_path] + [str(a) for a in (extra_args or [])]
 		try:
 			# run in project_dir so script relative path resolution is consistent
 			proc = subprocess.run(cmd, cwd=self.project_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -2835,6 +2952,8 @@ class SettingsEditorApp(tk.Tk):
 		# viewing
 		new_default['motion_blocks_static'] = str(self.motion_blocks_static_var.get()).lower()
 		new_default['static_blocks_motion'] = str(self.static_blocks_motion_var.get()).lower()
+		new_default['primary_train_both_streams'] = str(self.primary_both_streams_var.get()).lower()
+		new_default['secondary_train_both_streams'] = str(self.secondary_both_streams_var.get()).lower()
 		# ignore_secondary is a LEGACY key: under the shared-pool schema the set of
 		# primaries without secondaries is derived from secondary_map, and this key
 		# is only consulted by behaveai_config's legacy fallback (no secondary pool
@@ -3083,16 +3202,64 @@ class SettingsEditorApp(tk.Tk):
 				+ "\n  - ".join(_ovr_problems)
 				+ "\n\nEverything else is saved normally.")
 
+		# Cross-stream training switches: unlike every other setting, flipping one
+		# changes what the annotations ALREADY on disk mean (a label index that read
+		# as motion class 0 now reads as static class 0, and a crop sitting in one
+		# stream's folder may no longer belong there). Saving the key without
+		# converting the dataset would train the next model on silently mislabelled
+		# data, so the rebuild is not optional here - confirm it BEFORE writing
+		# anything, and treat a refusal as "don't save this change at all".
+		stream_transitions = {'primary': None, 'secondary': None}
+		try:
+			existing_annotations = self._has_existing_annotations()
+		except Exception:
+			existing_annotations = True
+		try:
+			stream_transitions = self._stream_training_transitions()
+		except Exception:
+			pass
+		stream_changed = any(stream_transitions.values())
+
+		if stream_changed and existing_annotations:
+			lines = []
+			if stream_transitions['primary'] == 'on':
+				lines.append("  - Primary: every annotated box will be copied into BOTH detector\n"
+							 "    datasets and both models retrained on all classes.")
+			elif stream_transitions['primary'] == 'off':
+				lines.append("  - Primary: the shared label space will be split back into per-stream\n"
+							 "    classes (original BehaveAI behaviour) and both models retrained.")
+			if stream_transitions['secondary'] == 'on':
+				lines.append("  - Secondary: every box will be cropped into BOTH crop folders and\n"
+							 "    both secondary classifiers retrained.")
+			elif stream_transitions['secondary'] == 'off':
+				lines.append("  - Secondary: crops will be reduced back to their own stream's folder\n"
+							 "    and both secondary classifiers retrained.")
+			if not messagebox.askyesno(
+					"Rebuild the annotation dataset?",
+					("You changed how the models are trained across the static and motion streams:\n\n"
+					 + "\n".join(lines) +
+					 "\n\nThis project already contains annotations, and the change alters what the\n"
+					 "saved labels mean. Saving therefore rebuilds the whole annotation dataset now\n"
+					 "(no re-annotation needed - nothing you labelled is lost) and moves the affected\n"
+					 "model folders to *_backupN so they retrain from scratch.\n\n"
+					 "This can take a while on a large project.\n\n"
+					 "Yes  - save and rebuild now\n"
+					 "No   - go back without saving (untick the box to keep things as they are)")):
+				return
+
 		# Determine if we should prompt for regeneration AFTER saving:
 		should_prompt_regen = False
 		try:
 			motion_changed = self._motion_settings_changed()
-			existing_annotations = self._has_existing_annotations()
 			if motion_changed and existing_annotations:
 				should_prompt_regen = True
 		except Exception:
 			# conservative: prompt if unsure
 			should_prompt_regen = True
+		# The mandatory rebuild below regenerates the images too, so don't ask a
+		# second time for the same work.
+		if stream_changed and existing_annotations:
+			should_prompt_regen = False
 
 		# ---- atomically replace defaults and write file ----
 		try:
@@ -3112,6 +3279,32 @@ class SettingsEditorApp(tk.Tk):
 			except Exception:
 				# _write_yaml_configs already shows a messagebox on failure; keep going.
 				pass
+
+			# Mandatory rebuild for a cross-stream switch change (already confirmed
+			# above, before anything was written). Runs after the save so the script
+			# reads the new switches, and after the YAMLs so the declared class space
+			# already matches the labels it is about to write.
+			if stream_changed and existing_annotations:
+				backed = self._backup_selected_models(
+					primary=stream_transitions['primary'] is not None,
+					secondary=True)  # both switches invalidate the secondary crops' provenance
+				if backed:
+					print("Backed up model directories:")
+					for b in backed:
+						print("  ", b)
+				extra = []
+				if stream_transitions['primary'] == 'on':
+					extra += ['--relabel', 'merge']
+				elif stream_transitions['primary'] == 'off':
+					extra += ['--relabel', 'split']
+				if stream_transitions['secondary'] is not None or stream_transitions['primary'] is not None:
+					extra.append('--recrop')
+				ok, msg = self._run_regenerate_script(extra_args=extra)
+				if ok:
+					messagebox.showinfo("Rebuild finished",
+						"The annotation dataset was rebuilt for the new training mode.")
+				else:
+					messagebox.showwarning("Rebuild failed", msg)
 
 			# If we should prompt for regeneration, ask now (after save so regenerate uses new settings)
 			if should_prompt_regen:

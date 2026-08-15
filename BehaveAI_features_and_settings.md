@@ -118,7 +118,7 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
 
 ## 2\. SETTINGS GUI (BehaveAI\_settings\_gui.py)
 
-*Every parameter carries an inline **ⓘ help marker** with a hover tooltip (text from BehaveAI\_settings\_help.py / PARAM\_HELP), a consistent **theme** is applied via apply\_theme(), and every config key the pipeline reads is editable here. Settings are organised into tabs: **Species, Model structure, Video paths, Data augmentation, Motion strategy, Model type, Tracking** (which also hosts the drone-motion-correction and offline-stitching groups), **Metric, Interaction, Complex Behaviours, Display Settings, Activity Budget**.*
+*Every parameter carries an inline **ⓘ help marker** with a hover tooltip (text from BehaveAI\_settings\_help.py / PARAM\_HELP), a consistent **theme** is applied via apply\_theme(), and every config key the pipeline reads is editable here. Settings are organised into tabs: **Species, Model structure** (class groups, the two cross-stream training switches and cross-stream blocking)**, Video paths, Data augmentation, Motion strategy, Model type, Tracking** (which also hosts the drone-motion-correction and offline-stitching groups), **Metric, Interaction, Complex Behaviours, Display Settings, Activity Budget**.*
 
 *Two families of keys have no widget by design and are edited in the INI: the per-drone checkerboard focal lengths `metric_fpx_<DroneToken>` (one key per drone in the fleet, a list rather than a fixed field — a save carries them forward untouched), and `ignore_secondary`, a legacy key superseded by the secondary map (§2.2) and only consulted by behaveai\_config's fallback for projects with no secondary pool at all.*
 
@@ -146,10 +146,22 @@ A combined **user guide**, **README**, and **Materials & Methods source** for Be
   - *Purpose:* Set up the categories the system will learn — main ones, plus an optional shared set of finer ones chosen per main category.  
   - *Parameters:* The category names, colours, shortcut keys, and the per-main-category list of allowed finer categories.
 
+### 2.2b Cross-stream training (primary / secondary "train on both streams")
+
+- **\[Technical\]**  
+  - *How it works:* Two checkboxes on the **Model structure** tab, both **off by default**, in which case everything behaves exactly as the original BehaveAI: a box belongs to one stream, decided by its primary class (static classes occupy global indices 0…S−1, motion classes S…S+M−1), and only that stream's detector and secondary classifier ever see it. **primary\_train\_both\_streams** writes every box into *both* `annot_static` and `annot_motion` using the **global** index in both trees, and makes both dataset YAMLs declare the union of the two class lists in that same order — so an index means the same class in either tree, no motion offset is ever applied on read or at inference, and the two detectors learn the whole ethogram from two renderings of the same frame. Stream merging (`dominant_source`, `centroid_merge_thresh`) then arbitrates between two models that predict the same label space, i.e. a genuine ensemble rather than a union of disjoint outputs. Cross-stream blocking (§2.3) is *forced off* in this mode — it exists to stop the detectors cross-training, which is precisely what is now wanted — and the tick disables both checkboxes in the GUI. **secondary\_train\_both\_streams** crops every secondary-eligible box into *both* `annot_<stream>_crop/` folders (each from its own rendering) instead of only its primary's stream, so both per-stream classifiers train on every annotated box; the shared pool, the per-primary map and inference-time routing (a detection is classified by the model of the stream it was *detected* in) are unchanged. The two switches are independent. Because the primary switch changes what the *already saved* label indices mean, flipping either one is confirmed at **save** time and then runs a full rebuild: `Regenerate_annotations.py --relabel merge|split --recrop` converts the label trees and re-cuts the crops from the regenerated images, and the affected model folders are moved to `*_backupN` so they retrain. The conversion is lossless in both directions (the global index carries the class, and crops are re-cut rather than moved), so the switches can be flipped back and forth without re-annotating; declining the confirmation cancels the save rather than leaving the INI and the dataset disagreeing.  
+  - *Purpose:* Decouple "which classes exist" from "which stream is trained on them". It doubles each detector's training data without any extra annotation, removes the irreversible at-annotation-time choice of which stream a behaviour belongs to, and makes per-class static-vs-motion quality something the ablation (§9) measures rather than assumes. The cost is that the motion detector is also asked to learn postures that barely register in a movement image, so it can emit confident false positives that merging must arbitrate — which is why both switches ship off and are documented as an experiment.  
+  - *Parameters:* primary\_train\_both\_streams, secondary\_train\_both\_streams (§11).  
+  - *Implementation:* behaveai\_config.load\_stream\_training\_config() / stream\_label\_classes() (the single source of truth, read by the annotation tool, the inspector, classify\_track, the live tool and the detection evaluation); Regenerate\_annotations.relabel\_datasets() / index\_secondary\_crops() / recrop\_frame(); index\_annotations.AnnotationIndex(union\_labels=…). Tests in tests/test\_stream\_training.py.  
+- **\[Plain\]**  
+  - *How it works:* Two tick boxes decide whether each stage learns from everything or only from its own half. Left unticked (the default) the system works exactly as before. Ticked, every animal you labelled is used to train both versions of the model — the still-image one and the movement one — instead of each one only seeing its share. Because that changes the meaning of what is already saved, ticking or unticking asks you to confirm when you save, then rebuilds the training folders itself; nothing you annotated is lost and you can change your mind later.  
+  - *Purpose:* Get twice as much training material out of the same annotation work, and find out which of the two views is actually better for each behaviour.  
+  - *Parameters:* the two tick boxes.
+
 ### 2.3 Cross-stream blocking (motion/static masking)
 
 - **\[Technical\]**  
-  - *How it works:* *Motion blocks static* paints motion-annotation box regions grey on static training images at save time; *Static blocks motion* does the reverse. This removes the other stream's targets from each image so a detector is not trained against objects it is not meant to learn in that stream.  
+  - *How it works:* *Motion blocks static* paints motion-annotation box regions grey on static training images at save time; *Static blocks motion* does the reverse. This removes the other stream's targets from each image so a detector is not trained against objects it is not meant to learn in that stream. Both keys are **ignored** while `primary_train_both_streams` (§2.2b) is on, where every detector is meant to see every animal.  
   - *Purpose:* Prevent cross-contamination between the two single-stream detectors.  
   - *Parameters:* motion\_blocks\_static, static\_blocks\_motion.  
   - *Implementation:* grey fill via cv2.rectangle(...,(128,128,128),-1) (applied in annotation/regeneration saving).  
@@ -807,8 +819,10 @@ Small one-purpose scripts, run by hand from a project directory.
 | :---- | :---- | :---- |
 | val\_frequency | 0.1 | Fraction of **whole videos** held out, for every model in the pipeline (§3.9). The realised share of frames/crops differs, since videos carry unequal numbers of annotations |
 | save\_empty\_frames | true | Save frames with no annotations (negative examples) |
-| motion\_blocks\_static | false | Grey out motion boxes in static images |
-| static\_blocks\_motion | false | Grey out static boxes in motion images |
+| motion\_blocks\_static | false | Grey out motion boxes in static images (ignored when primary\_train\_both\_streams is on) |
+| static\_blocks\_motion | false | Grey out static boxes in motion images (ignored when primary\_train\_both\_streams is on) |
+| primary\_train\_both\_streams | false | Train BOTH primary detectors on every box, over the union of the two class lists (§2.2b) |
+| secondary\_train\_both\_streams | false | Crop every secondary-eligible box into BOTH crop folders, so both classifiers see every box (§2.2b) |
 
 ### Model training
 

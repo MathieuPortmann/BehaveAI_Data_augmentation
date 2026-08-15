@@ -30,6 +30,7 @@ class AnnotationIndex:
 		age_classes=None,
 		species_cropped_base_dir=None,
 		age_cropped_base_dir=None,
+		union_labels=False,
 	):
 		# directories
 		self.static_train_images_dir = static_train_images_dir
@@ -56,6 +57,11 @@ class AnnotationIndex:
 		self.age_classes = list(age_classes) if age_classes is not None else []
 		self.hierarchical_mode = bool(hierarchical_mode)
 		self.ignore_secondary = set(ignore_secondary or [])
+		# primary_train_both_streams: both label trees hold every box under the same
+		# global index space. Reading them the legacy way would both shift the motion
+		# indices by len(primary_static_classes) and load every box twice, so in this
+		# mode one tree is the source of truth and the other is skipped.
+		self.union_labels = bool(union_labels)
 
 
 
@@ -159,8 +165,12 @@ class AnnotationIndex:
 			except Exception:
 				pass
 
-		# motion labels
+		# motion labels. Under union labels the motion file is a copy of the static
+		# one, so it is only read when the static file is missing (a frame whose
+		# static image was never written), and its indices are already global.
 		motion_lbl = item.get('motion_lbl')
+		if self.union_labels and boxes:
+			motion_lbl = None
 		if motion_lbl and os.path.exists(motion_lbl):
 			try:
 				with open(motion_lbl, 'r') as f:
@@ -174,7 +184,7 @@ class AnnotationIndex:
 							continue
 						h, w = original_frame.shape[:2]
 						x1, y1, x2, y2 = self._norm_to_pixels(xc, yc, bw, bh, w, h)
-						global_primary_cls = cls + len(self.primary_static_classes)
+						global_primary_cls = cls if self.union_labels else cls + len(self.primary_static_classes)
 						if self.hierarchical_mode:
 							boxes.append((x1, y1, x2, y2, global_primary_cls, -1, -1, -1, -1, -1, -1, -1))
 						else:

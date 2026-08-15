@@ -48,7 +48,10 @@ import math
 import argparse
 
 import behaveai_eval_common as ec
-from behaveai_config import get_species_list, load_ethogram_for_species
+from behaveai_config import (
+	get_species_list, load_ethogram_for_species,
+	load_stream_training_config, stream_label_classes,
+)
 from behaveai_holdout import is_holdout_video, video_label_for_annotation
 
 IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
@@ -260,8 +263,15 @@ def main():
 	# pipeline's index->name mapping and the model_primary_* folders).
 	species_list = get_species_list(config)
 	etho = load_ethogram_for_species(config, species_list[0], species_list)
-	static_classes = etho['primary_static_classes']
-	motion_classes = etho['primary_motion_classes']
+	# Under primary cross-stream training both detectors predict - and both label
+	# trees store - the union of the two lists, so the ablation has to score them
+	# against that shared space or every motion index would name the wrong class.
+	primary_both_streams = load_stream_training_config(config)['primary_both_streams']
+	static_classes, motion_classes = stream_label_classes(
+		etho['primary_static_classes'], etho['primary_motion_classes'], primary_both_streams)
+	if primary_both_streams:
+		print("Cross-stream training is on: both detectors are scored on all "
+			  f"{len(static_classes)} classes.")
 
 	conf_thresh = a.conf if a.conf is not None else float(d.get('primary_conf_thresh', '0.5'))
 	centroid_merge_thresh = float(d.get('centroid_merge_thresh', '50'))

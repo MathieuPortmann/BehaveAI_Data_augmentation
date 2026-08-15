@@ -214,6 +214,34 @@ PARAM_HELP = {
         "influence": "Trains a secondary static classifier. If used, at least 2 secondary static "
                      "classes are required. Empty disables the secondary static stage.",
     },
+    "primary_train_both_streams": {
+        "short": "Train BOTH primary detectors on every class, from every annotated box.",
+        "what": "Off (default, original BehaveAI): a box belongs to one stream only — the "
+                "static detector learns the static classes, the motion detector the motion "
+                "classes, and each only ever sees its own boxes. On: every box is written to "
+                "both datasets and both detectors learn the union of the two class lists, so "
+                "each one sees the whole ethogram on its own rendering of the frame.",
+        "influence": "Doubles the training data of each detector without any extra annotation, "
+                     "and turns stream merging into a true two-model ensemble. In exchange, the "
+                     "motion detector is also asked to learn postures that barely show up in a "
+                     "movement image, so it can produce confident false positives that merging "
+                     "then has to arbitrate. Cross-stream blocking is ignored while this is on. "
+                     "Changing it changes what the saved label indices MEAN: the dataset must be "
+                     "fully regenerated and all primary models retrained.",
+    },
+    "secondary_train_both_streams": {
+        "short": "Crop every box into BOTH secondary datasets instead of only its own stream's.",
+        "what": "Off (default, original BehaveAI): a box's crop goes to the crop folder of its "
+                "primary's stream, so the static secondary classifier only sees static boxes and "
+                "the motion one only motion boxes. On: every secondary-eligible box is cropped "
+                "from both renderings, so both classifiers train on every annotated box. The "
+                "shared pool, the per-primary allowed list and inference routing are unchanged.",
+        "influence": "Both secondary classifiers get the full crop set (they already share the "
+                     "whole pool of secondary classes — only the crops differ). Costs twice the "
+                     "crops on disk and makes the two models near-duplicates of each other, "
+                     "differing only in the image the crop was cut from. Changing it requires "
+                     "rebuilding the crop folders and retraining the secondary models.",
+    },
     "class_colors": {
         "short": "Box/label colour for this class in annotation and output videos.",
         "what": "Purely a display colour (RGB) for the class.",

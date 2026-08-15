@@ -12,7 +12,10 @@ from collections import deque
 import sys
 from PIL import Image, ImageTk
 from index_annotations import AnnotationIndex
-from behaveai_config import load_secondary_config, NONE_LABEL, resolve_project_dir
+from behaveai_config import (
+	load_secondary_config, NONE_LABEL, resolve_project_dir,
+	load_stream_training_config,
+)
 
 
 # Optional YOLO import
@@ -145,6 +148,13 @@ try:
 	motion_blocks_static = config['DEFAULT']['motion_blocks_static'].lower()
 	static_blocks_motion = config['DEFAULT']['static_blocks_motion'].lower()
 	save_empty_frames = config['DEFAULT']['save_empty_frames'].lower()
+
+	# Cross-stream training switches (Model structure tab): this tool rewrites the
+	# same label trees and crop folders as the annotation tool, so it has to follow
+	# the same rules or a single save would undo the mode.
+	_stream_cfg = load_stream_training_config(config)
+	primary_both_streams = _stream_cfg['primary_both_streams']
+	secondary_both_streams = _stream_cfg['secondary_both_streams']
 	frame_skip = int(config['DEFAULT'].get('frame_skip', '0'))
 	motion_threshold = -1 * int(config['DEFAULT'].get('motion_threshold', '0'))
 
@@ -162,6 +172,13 @@ if static_blocks_motion not in ('true','false'):
 	raise ValueError("static_blocks_motion must be true or false")
 if save_empty_frames not in ('true','false'):
 	raise ValueError("save_empty_frames must be true or false")
+
+# Blocking would grey out boxes both detectors are now meant to learn - see the
+# same guard in BehaveAI_annotation.py.
+if primary_both_streams and (motion_blocks_static == 'true' or static_blocks_motion == 'true'):
+	print("Primary cross-stream training is on: ignoring motion_blocks_static / static_blocks_motion.")
+	motion_blocks_static = 'false'
+	static_blocks_motion = 'false'
 
 expA2 = 1 - expA
 expB2 = 1 - expB
@@ -204,7 +221,8 @@ annotation_index = AnnotationIndex(
 	primary_classes,
 	secondary_classes,
 	hierarchical_mode,
-	ignore_secondary=ignore_secondary
+	ignore_secondary=ignore_secondary,
+	union_labels=primary_both_streams,
 )
 
 
@@ -906,7 +924,12 @@ def save_annotation_and_overwrite_current():
 			x1, y1, x2, y2, primary_cls, _, _, _ = box
 		else:
 			x1, y1, x2, y2, primary_cls, _ = box
-		if primary_cls < len(primary_static_classes):
+		if primary_both_streams:
+			# Both detectors train on every box: it belongs to both datasets, and
+			# neither stream blocks the other (the flags are forced off at startup).
+			static_count += 1
+			motion_count += 1
+		elif primary_cls < len(primary_static_classes):
 			static_count += 1
 			if static_blocks_motion == 'true':
 				cv2.rectangle(motion_ann_frame, (x1, y1), (x2, y2), (128,128,128), -line_thickness)
@@ -928,7 +951,7 @@ def save_annotation_and_overwrite_current():
 						x1, y1, x2, y2, primary_cls, _, _, _ = box
 					else:
 						x1, y1, x2, y2, primary_cls, _ = box
-					if primary_cls < len(primary_static_classes):
+					if primary_both_streams or primary_cls < len(primary_static_classes):
 						xc = (x1 + x2) / 2 / w
 						yc = (y1 + y2) / 2 / h
 						bw = abs(x2 - x1) / w
@@ -946,8 +969,8 @@ def save_annotation_and_overwrite_current():
 						x1, y1, x2, y2, primary_cls, _, _, _ = box
 					else:
 						x1, y1, x2, y2, primary_cls, _ = box
-					if primary_cls >= len(primary_static_classes):
-						cls_in_file = primary_cls - len(primary_static_classes)
+					if primary_both_streams or primary_cls >= len(primary_static_classes):
+						cls_in_file = primary_cls if primary_both_streams else primary_cls - len(primary_static_classes)
 						xc = (x1 + x2) / 2 / w
 						yc = (y1 + y2) / 2 / h
 						bw = abs(x2 - x1) / w
@@ -1000,15 +1023,19 @@ def save_annotation_and_overwrite_current():
 				else:
 					continue
 
-				# Pooled layout, routed to the primary's own stream only.
+				# Pooled layout, routed to the primary's own stream only - or to both
+				# when secondary cross-stream training is on.
 				fname = f"{base}_{x1_b}_{y1_b}.jpg"
-				if primary_idx < len(primary_static_classes):
-					base_crop_dir = static_cropped_base_dir
-					crop_src = static_ann_frame
+				if secondary_both_streams:
+					crop_targets = ((static_cropped_base_dir, static_ann_frame),
+									(motion_cropped_base_dir, motion_ann_frame))
+				elif primary_idx < len(primary_static_classes):
+					crop_targets = ((static_cropped_base_dir, static_ann_frame),)
 				else:
-					base_crop_dir = motion_cropped_base_dir
-					crop_src = motion_ann_frame
-				if base_crop_dir:
+					crop_targets = ((motion_cropped_base_dir, motion_ann_frame),)
+				for base_crop_dir, crop_src in crop_targets:
+					if not base_crop_dir:
+						continue
 					c_dir = os.path.join(base_crop_dir, secondary_name)
 					os.makedirs(c_dir, exist_ok=True)
 					c_path = os.path.join(c_dir, fname)

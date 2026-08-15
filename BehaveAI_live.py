@@ -9,7 +9,10 @@ import configparser
 import sys
 from ultralytics import YOLO
 from scipy.optimize import linear_sum_assignment
-from behaveai_config import load_secondary_config, NONE_LABEL, resolve_project_dirs
+from behaveai_config import (
+	load_secondary_config, NONE_LABEL, resolve_project_dirs,
+	load_stream_training_config, stream_label_classes,
+)
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import deque
@@ -231,6 +234,14 @@ try:
 	primary_colors = primary_static_colors + primary_motion_colors
 	primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
 
+	# Cross-stream training switches: with the primary one on, both detectors
+	# predict the union of the two lists under the shared global index space
+	# (see behaveai_config.load_stream_training_config).
+	_stream_cfg = load_stream_training_config(config)
+	primary_both_streams = _stream_cfg['primary_both_streams']
+	static_label_classes, motion_label_classes = stream_label_classes(
+		primary_static_classes, primary_motion_classes, primary_both_streams)
+
 	# ---- Shared secondary configuration (pool + per-primary mapping) ----
 	_sec_cfg = load_secondary_config(config, primary_static_classes, primary_motion_classes)
 	secondary_classes = _sec_cfg['secondary_classes']
@@ -446,7 +457,7 @@ class CameraProcessor:
 	def _maybe_load_models(self):
 		# Primary models
 		try:
-			if len(primary_static_classes) > 0 and os.path.exists(primary_static_model_path):
+			if len(static_label_classes) > 0 and os.path.exists(primary_static_model_path):
 				# ~ self.model_static = YOLO(primary_static_model_path)
 				if use_ncnn == 'true':
 					self.model_static = load_model_with_ncnn_preference(primary_static_model_path, "detect")
@@ -454,7 +465,7 @@ class CameraProcessor:
 				else:
 					self.model_static = YOLO(primary_static_model_path)
 					print("Loaded primary static YOLO model")
-			if len(primary_motion_classes) > 0 and os.path.exists(primary_motion_model_path):
+			if len(motion_label_classes) > 0 and os.path.exists(primary_motion_model_path):
 				if use_ncnn == 'true':
 					self.model_motion = load_model_with_ncnn_preference(primary_motion_model_path, "detect")
 					print("Loaded primary motion NCNN model")
@@ -759,7 +770,7 @@ class CameraProcessor:
 				continue
 
 			# Motion processing
-			if primary_motion_classes and primary_motion_classes[0] != '0':
+			if motion_label_classes and motion_label_classes[0] != '0':
 				diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 				if strategy == 'exponential':
 					prev_frames[0] = gray
@@ -786,25 +797,25 @@ class CameraProcessor:
 			all_detections = []
 			if self.classifier_enabled:
 				# static model on frame
-				if primary_static_classes[0] != '0' and self.model_static is not None:
+				if static_label_classes and static_label_classes[0] != '0' and self.model_static is not None:
 					try:
 						results_static = self.model_static.predict(frame, conf=primary_conf_thresh, verbose=False)
 						for box in results_static[0].boxes:
 							x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
 							cls_idx = int(box.cls[0]); conf = float(box.conf[0])
-							class_name = primary_static_classes[cls_idx]
+							class_name = static_label_classes[cls_idx]
 							all_detections.append({'coords':(x1,y1,x2,y2),'primary_class':class_name,'primary_conf':conf,'source':'static'})
 					except Exception as e:
 						print("Static model inference error:", e)
 
 				# motion model on motion_image
-				if primary_motion_classes[0] != '0' and self.model_motion is not None:
+				if motion_label_classes and motion_label_classes[0] != '0' and self.model_motion is not None:
 					try:
 						results_motion = self.model_motion.predict(motion_image, conf=primary_conf_thresh, verbose=False)
 						for box in results_motion[0].boxes:
 							x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
 							cls_idx = int(box.cls[0]); conf = float(box.conf[0])
-							class_name = primary_motion_classes[cls_idx]
+							class_name = motion_label_classes[cls_idx]
 							all_detections.append({'coords':(x1,y1,x2,y2),'primary_class':class_name,'primary_conf':conf,'source':'motion'})
 					except Exception as e:
 						print("Motion model inference error:", e)
@@ -858,17 +869,21 @@ class CameraProcessor:
 					if source == 'static':
 						sec_model = self.secondary_static_model
 						crop_img = frame
-						try:
-							g_idx = primary_static_classes.index(primary_class)
-						except ValueError:
-							g_idx = -1
 					else:
 						sec_model = self.secondary_motion_model
 						crop_img = motion_image
-						try:
+					# The crop comes from the stream the box was detected in, but the
+					# global index is resolved against the full class list when both
+					# detectors share it - a static detection may carry a motion class.
+					try:
+						if primary_both_streams:
+							g_idx = primary_classes.index(primary_class)
+						elif source == 'static':
+							g_idx = primary_static_classes.index(primary_class)
+						else:
 							g_idx = len(primary_static_classes) + primary_motion_classes.index(primary_class)
-						except ValueError:
-							g_idx = -1
+					except ValueError:
+						g_idx = -1
 
 					allowed = allowed_secondary_idx[g_idx] if 0 <= g_idx < len(allowed_secondary_idx) else []
 

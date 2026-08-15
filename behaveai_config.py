@@ -175,6 +175,69 @@ def load_age_classes(config, species, species_list):
     return {'age_classes': classes, 'age_hotkeys': hotkeys, 'age_colors': colors}
 
 
+def _ini_flag(section, key):
+    """Read a 'true'/'false' INI key as a bool, defaulting to False when absent."""
+    return str(section.get(key, 'false') or 'false').strip().lower() == 'true'
+
+
+def load_stream_training_config(config):
+    """Read the two "train on both streams" switches (Model structure tab).
+
+    Both default to False, which is the original BehaveAI behaviour: a box belongs
+    to exactly one stream, decided by its primary class (static classes first, then
+    motion), and only that stream's detector / secondary classifier ever sees it.
+
+    primary_train_both_streams
+        Every annotated box is written to BOTH annot_static and annot_motion, using
+        the GLOBAL primary index (0..len(static)+len(motion)-1) in both label trees,
+        and both dataset YAMLs list the union of the two class lists. The two
+        detectors then learn the same full ethogram from two renderings of the same
+        frame, and merging their outputs becomes a real ensemble rather than a union
+        of disjoint label spaces. Cross-stream blocking is meaningless in this mode
+        (there is no "other stream's target" to hide) and is ignored while it is on.
+
+    secondary_train_both_streams
+        Every secondary-eligible box is cropped into BOTH annot_static_crop/ and
+        annot_motion_crop/ (each from its own rendering) instead of only the crop
+        folder of its primary's stream, so both per-stream secondary classifiers
+        train on every annotated box. The pool, the per-primary map and the
+        inference-time routing (a detection is classified by its own stream's model)
+        are unchanged.
+
+    The two are independent: either can be on without the other.
+
+    Toggling either one invalidates the datasets on disk (the primary switch changes
+    what the label indices MEAN), which is why the settings GUI offers a full
+    regeneration on save whenever one of them changes - see Regenerate_annotations.py
+    --relabel / --recrop.
+    """
+    # Accepts a ConfigParser or the {'DEFAULT': {...}} shim the rest of this module
+    # uses (load_secondary_config takes the same two shapes).
+    try:
+        d = config['DEFAULT']
+    except (KeyError, TypeError):
+        d = config
+    return {
+        'primary_both_streams': _ini_flag(d, 'primary_train_both_streams'),
+        'secondary_both_streams': _ini_flag(d, 'secondary_train_both_streams'),
+    }
+
+
+def stream_label_classes(primary_static_classes, primary_motion_classes, primary_both_streams):
+    """(static_label_classes, motion_label_classes): what each detector's label
+    space contains under the current primary switch.
+
+    Off  -> ([static...], [motion...])  each stream owns its own list (legacy).
+    On   -> (union, union)              both streams share the global index space,
+                                        so a label index means the same class in
+                                        either tree and no offset is ever applied.
+    """
+    if primary_both_streams:
+        union = list(primary_static_classes) + list(primary_motion_classes)
+        return union, list(union)
+    return list(primary_static_classes), list(primary_motion_classes)
+
+
 def parse_class_list(raw):
     """Split a comma-separated INI list, dropping blanks and the '0' sentinel."""
     if raw is None:

@@ -11,6 +11,7 @@ from behaveai_config import (
 	load_secondary_config, NONE_LABEL,
 	get_species_list, species_folder, load_ethogram_for_species, load_age_classes,
 	resolve_project_dirs, parse_train_overrides,
+	load_stream_training_config, stream_label_classes,
 )
 from behaveai_render import (
 	load_render_style, draw_labeled_detection, draw_frame_number,
@@ -404,6 +405,16 @@ try:
 	primary_classes = primary_static_classes + primary_motion_classes
 	primary_colors = primary_static_colors + primary_motion_colors
 
+	# Cross-stream training switches (Model structure tab). With the primary one on,
+	# both detectors are trained on - and therefore predict - the union of the two
+	# class lists, so each model's index space is the global one and neither the
+	# motion offset nor the "does this stream own any class?" guards apply.
+	_stream_cfg = load_stream_training_config(config)
+	primary_both_streams = _stream_cfg['primary_both_streams']
+	secondary_both_streams = _stream_cfg['secondary_both_streams']
+	static_label_classes, motion_label_classes = stream_label_classes(
+		primary_static_classes, primary_motion_classes, primary_both_streams)
+
 	secondary_classes = _eth['secondary_classes']
 	secondary_colors = _eth['secondary_colors']
 	secondary_hotkeys = _eth['secondary_hotkeys']
@@ -543,10 +554,10 @@ try:
 	# whole-frame model is never overwritten -- flip the flag off to fall back to
 	# it instantly. Redirect the project/model paths here (defined above) so both
 	# the training calls and the inference model-load below use the tiled model.
-	if sahi_enabled_static and primary_static_classes:
+	if sahi_enabled_static and static_label_classes:
 		primary_static_project_path = primary_static_project_path + '_tiled'
 		primary_static_model_path = os.path.join(primary_static_project_path, 'train', 'weights', 'best.pt')
-	if sahi_enabled_motion and primary_motion_classes:
+	if sahi_enabled_motion and motion_label_classes:
 		primary_motion_project_path = primary_motion_project_path + '_tiled'
 		primary_motion_model_path = os.path.join(primary_motion_project_path, 'train', 'weights', 'best.pt')
 
@@ -598,12 +609,12 @@ if len(primary_static_classes) != len(primary_static_colors) or len(primary_stat
 if dominant_source != 'motion' and dominant_source != 'static' and dominant_source != 'confidence':
 	raise ValueError("dominant_source must be motion, static, or confidence")
 
-if len(primary_static_classes) > 0:
+if len(static_label_classes) > 0:
 	if not os.path.exists(primary_static_yaml_path):
 		print(f"Error: Primary static YAML file not found. Run the Annotation script once to fix this")
 		sys.exit(1)
 
-if len(primary_motion_classes) > 0:
+if len(motion_label_classes) > 0:
 	if not os.path.exists(primary_motion_yaml_path):
 		print(f"Error: Primary motion YAML file not found. Run the Annotation script once to fix this")
 		sys.exit(1)
@@ -1012,7 +1023,7 @@ def _classify_pooled(model, class_names, crop):
 
 if __name__ == '__main__':
 	#-------CHECK PRIMARY MODEL EXISTS----------
-	if primary_static_classes:
+	if static_label_classes:
 		repair_dataset_yaml(primary_static_yaml_path)
 		_static_train_yaml = primary_static_yaml_path
 		if sahi_enabled_static:
@@ -1028,7 +1039,7 @@ if __name__ == '__main__':
 			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_train_overrides)
 
 
-	if primary_motion_classes:
+	if motion_label_classes:
 		repair_dataset_yaml(primary_motion_yaml_path)
 		_motion_train_yaml = primary_motion_yaml_path
 		if sahi_enabled_motion:
@@ -1343,13 +1354,13 @@ if __name__ == '__main__':
 				cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h)
 			)
 
-		if primary_static_classes:
+		if static_label_classes:
 			if use_ncnn == 'true':
 				model_static = load_model_with_ncnn_preference(primary_static_model_path, "detect")
 			else:
 				model_static = YOLO(primary_static_model_path)
 
-		if primary_motion_classes:
+		if motion_label_classes:
 			if use_ncnn == 'true':
 				model_motion = load_model_with_ncnn_preference(primary_motion_model_path, "detect")
 			else:
@@ -1365,9 +1376,9 @@ if __name__ == '__main__':
 		if (sahi_enabled_static or sahi_enabled_motion) and not _sahi_worth_it:
 			print(f"SAHI: frame {w}x{h} not larger than tile x {sahi_min_dim_factor:g}"
 				  f" — tiling skipped, using whole-frame detection.")
-		if sahi_enabled_static and _sahi_worth_it and primary_static_classes:
+		if sahi_enabled_static and _sahi_worth_it and static_label_classes:
 			sahi_model_static = build_sahi_model(model_static, primary_conf_thresh)
-		if sahi_enabled_motion and _sahi_worth_it and primary_motion_classes:
+		if sahi_enabled_motion and _sahi_worth_it and motion_label_classes:
 			sahi_model_motion = build_sahi_model(model_motion, primary_conf_thresh)
 
 
@@ -1448,7 +1459,7 @@ if __name__ == '__main__':
 					continue
 
 				# only process motion information if necessary
-				if primary_motion_classes:
+				if motion_label_classes:
 
 					diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 
@@ -1481,10 +1492,10 @@ if __name__ == '__main__':
 				all_detections = []
 
 				# Primary static detection (SAHI-tiled when enabled, else whole-frame)
-				if primary_static_classes:
+				if static_label_classes:
 					if sahi_model_static is not None:
 						all_detections.extend(sahi_detect(
-							sahi_model_static, frame, primary_static_classes, 'static',
+							sahi_model_static, frame, static_label_classes, 'static',
 							sahi_slice_height, sahi_slice_width,
 							sahi_overlap_height_ratio, sahi_overlap_width_ratio,
 							sahi_postprocess_type, sahi_postprocess_match_metric,
@@ -1494,7 +1505,7 @@ if __name__ == '__main__':
 						for box in results_static[0].boxes:
 							coords = tuple(map(int, box.xyxy[0].tolist()))
 							class_idx = int(box.cls[0])
-							class_name = primary_static_classes[class_idx]
+							class_name = static_label_classes[class_idx]
 							conf = float(box.conf[0])
 							all_detections.append({
 								'coords': coords,
@@ -1504,10 +1515,10 @@ if __name__ == '__main__':
 							})
 
 				# Primary motion detection (SAHI-tiled when enabled, else whole-frame)
-				if primary_motion_classes:
+				if motion_label_classes:
 					if sahi_model_motion is not None:
 						all_detections.extend(sahi_detect(
-							sahi_model_motion, motion_image, primary_motion_classes, 'motion',
+							sahi_model_motion, motion_image, motion_label_classes, 'motion',
 							sahi_slice_height, sahi_slice_width,
 							sahi_overlap_height_ratio, sahi_overlap_width_ratio,
 							sahi_postprocess_type, sahi_postprocess_match_metric,
@@ -1517,7 +1528,7 @@ if __name__ == '__main__':
 						for box in results_motion[0].boxes:
 							coords = tuple(map(int, box.xyxy[0].tolist()))
 							class_idx = int(box.cls[0])
-							class_name = primary_motion_classes[class_idx]
+							class_name = motion_label_classes[class_idx]
 							conf = float(box.conf[0])
 							all_detections.append({
 								'coords': coords,
@@ -1659,20 +1670,27 @@ if __name__ == '__main__':
 
 						# Per-stream secondary model + crop source, and the global
 						# primary index (to restrict output to allowed secondaries).
+						# The stream still comes from the detection's own source (the
+						# crop must be cut from the image the box was found in), but
+						# the index is resolved against the global class list: under
+						# cross-stream training a static detection can legitimately
+						# carry a motion behaviour, and looking it up in that stream's
+						# own list would miss and silently drop the secondary step.
 						if source == 'static':
 							sec_model = secondary_static_model
 							crop_img = frame
-							try:
-								g_idx = primary_static_classes.index(primary_class)
-							except ValueError:
-								g_idx = -1
 						else:  # motion source
 							sec_model = secondary_motion_model
 							crop_img = motion_image
-							try:
+						try:
+							if primary_both_streams:
+								g_idx = primary_classes.index(primary_class)
+							elif source == 'static':
+								g_idx = primary_static_classes.index(primary_class)
+							else:
 								g_idx = len(primary_static_classes) + primary_motion_classes.index(primary_class)
-							except ValueError:
-								g_idx = -1
+						except ValueError:
+							g_idx = -1
 
 						allowed = allowed_secondary_idx[g_idx] if 0 <= g_idx < len(allowed_secondary_idx) else []
 
