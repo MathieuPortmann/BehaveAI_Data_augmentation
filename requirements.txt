@@ -75,3 +75,9 @@ trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git
 # so the pipeline runs without it until a project turns tiling on. Pin the exact
 # resolved version once installed in BehaveAI.venv (check numpy/opencv compat).
 sahi
+# Test runner for tests/ (`python -m pytest tests/`). Nothing the pipeline imports
+# at runtime, but it belongs in the venv the launchers build: the tests guard the
+# parts that silently corrupt a dataset when they break (label-space conversion,
+# holdout splitting, the frame cache), so they have to be runnable on the machine
+# the project actually runs on, not only on a developer's.
+pytest==9.1.1
