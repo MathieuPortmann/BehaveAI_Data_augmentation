@@ -225,6 +225,65 @@ def compute_frame_data(vpath, fnum, p):
     }
 
 
+def diagnose_video(path):
+    """Explain, in one clause, why a video file cannot be opened.
+
+    "could not open X, skipping" is true but unactionable: it reads like a codec
+    problem or a flaky mount, and the honest answer is usually neither. A DJI
+    recording writes its `moov` atom -- the index of tracks, timestamps and
+    sample offsets -- *after* the media data, so an interrupted copy or an
+    unfinalised recording leaves a large file with everything except the one box
+    that makes it playable. No player can open it, and the size alone gives
+    nothing away. This looks, and says which.
+
+    Returns a short reason, or '' when nothing structural was found (in which
+    case the codec or the mount really is the suspect).
+    """
+    try:
+        total = os.path.getsize(path)
+    except OSError as e:
+        return f"cannot stat the file ({e.strerror or e})"
+    if total == 0:
+        return "the file is empty (0 bytes)"
+
+    import struct
+    atoms, off = [], 0
+    try:
+        with open(path, 'rb') as fh:
+            for _ in range(40):
+                fh.seek(off)
+                hdr = fh.read(8)
+                if len(hdr) < 8:
+                    break
+                size = struct.unpack('>I', hdr[:4])[0]
+                kind = hdr[4:8].decode('latin1', 'replace')
+                if size == 1:
+                    size = struct.unpack('>Q', fh.read(8))[0]
+                atoms.append((kind, size, off))
+                if size == 0:
+                    break
+                off += size
+                if off >= total:
+                    break
+    except OSError as e:
+        return f"cannot be read ({e.strerror or e})"
+
+    if not atoms:
+        return "not a recognisable MP4/MOV container"
+    kinds = [k for k, _s, _o in atoms]
+    short = max((o + s - total for k, s, o in atoms if k == 'mdat'), default=0)
+    if 'moov' not in kinds:
+        msg = ("no 'moov' index atom — the recording was never finalised, or the "
+               "copy was interrupted before the end")
+        if short > 0:
+            msg += f"; the media data is also {short / 1e6:.0f} MB short"
+        return msg
+    if short > 0:
+        return (f"the media data is {short / 1e6:.0f} MB shorter than the header "
+                "declares — the file is truncated and will fail near its end")
+    return ''
+
+
 # --------------------------------------------------------------------------
 # Cache layout
 

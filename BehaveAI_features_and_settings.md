@@ -754,7 +754,7 @@ Small one-purpose scripts, run by hand from a project directory.
 | BehaveAI\_bootstrap\_species.py | One-shot: back-fills annot\_species\_crop/ for a project whose primary annotations predate the species model, by cropping every existing box. Purely additive; self-deletes after a successful `--apply`. |
 | make\_timecodes\_template.py | Writes the Google-Sheets-ready .xlsx time-code template (§3.1). |
 | BehaveAI\_mine\_frames.py | Scores the tracking CSVs, writes mining\_targets.csv and pre-caches those frames to disk (§3.1A). |
-| behaveai\_frame\_cache.py | Shared decode of a frame's static+motion pair, and the on-disk layout of mined\_frames/ (§3.1A). |
+| behaveai\_frame\_cache.py | Shared decode of a frame's static+motion pair, the on-disk layout of mined\_frames/ and its target list, and `diagnose_video()` — the MP4 container check behind the "could not open" warning (§3.1A). |
 
 ---
 

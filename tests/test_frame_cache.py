@@ -285,6 +285,58 @@ def test_pruning_a_missing_file_is_silent():
         assert not fc.drop_target(os.path.join(tmp, 'nope.csv'), 'clipA', 1)
 
 
+def _mp4_atoms(*boxes):
+    """Build a minimal MP4 byte string from (type, payload_len) pairs."""
+    import struct
+    out = b''
+    for kind, payload in boxes:
+        out += struct.pack('>I', 8 + payload) + kind.encode('latin1') + b'\0' * payload
+    return out
+
+
+def test_diagnose_names_the_missing_index_atom():
+    """The real failure in this corpus: 3.27 GB of media with no moov, which
+    reads as a codec problem and is actually an interrupted copy."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'broken.mp4')
+        with open(p, 'wb') as f:
+            f.write(_mp4_atoms(('ftyp', 20), ('free', 0), ('mdat', 500)))
+        msg = fc.diagnose_video(p)
+        assert 'moov' in msg, msg
+        assert 'interrupted' in msg or 'finalised' in msg, msg
+
+
+def test_diagnose_reports_a_truncated_mdat():
+    """A file whose mdat header claims more than the file holds opens fine and
+    then fails near its end — worse than an outright refusal, because nothing
+    complains until the decode is already underway."""
+    import struct
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'short.mp4')
+        with open(p, 'wb') as f:
+            f.write(_mp4_atoms(('ftyp', 20), ('moov', 40)))
+            # mdat declaring 10 kB but carrying 100 bytes.
+            f.write(struct.pack('>I', 8 + 10000) + b'mdat' + b'\0' * 100)
+        msg = fc.diagnose_video(p)
+        assert 'truncated' in msg, msg
+        assert 'MB short' in msg or 'shorter' in msg, msg
+
+
+def test_diagnose_is_quiet_about_a_structurally_sound_file():
+    """No structural fault must return '' so the caller does not print a reason
+    it cannot stand behind — the codec or the mount is then the suspect."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'fine.mp4')
+        with open(p, 'wb') as f:
+            f.write(_mp4_atoms(('ftyp', 20), ('moov', 40), ('mdat', 500)))
+        assert fc.diagnose_video(p) == ''
+
+        empty = os.path.join(tmp, 'empty.mp4')
+        open(empty, 'wb').close()
+        assert 'empty' in fc.diagnose_video(empty)
+        assert fc.diagnose_video(os.path.join(tmp, 'nope.mp4'))
+
+
 def test_targets_live_beside_the_cached_frames():
     assert os.path.dirname(fc.targets_path(fc.cache_dir('/proj'))) == \
         fc.cache_dir('/proj')

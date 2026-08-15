@@ -378,7 +378,13 @@ def build_frame_pool(clips_directory, frame_window, extra_directories=None):
 
 			cap = cv2.VideoCapture(vpath)
 			if not cap.isOpened():
-				print(f"Warning: could not open {vpath}, skipping.")
+				# Say what is wrong with it, not just that something is. A file
+				# skipped here is a clip that cannot be annotated at all, so the
+				# difference between "re-copy it from the SD card" and "this is
+				# a codec problem" is worth the few bytes it takes to look.
+				reason = frame_cache.diagnose_video(vpath)
+				print(f"Warning: could not open {vpath}, skipping."
+					  + (f"\n         Reason: {reason}." if reason else ""))
 				cap.release()
 				continue
 			n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
