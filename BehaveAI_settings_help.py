@@ -440,6 +440,28 @@ PARAM_HELP = {
                      "the footage can honestly fill simply comes back short. Re-running after "
                      "an annotation pass skips whatever was annotated in between.",
     },
+    "mining_max_per_video": {
+        "short": "Most frames the miner may take from any one video.",
+        "what": "A ceiling applied per clip while the budget is filled. Within each stratum "
+                "the miner already goes breadth-first across videos — best frame of every "
+                "video, then second-best of every video — so this is the backstop for the "
+                "clips that are genuinely richer in signal than the rest.",
+        "influence": "Lower it when the day's frames feel like the same herd on the same "
+                     "afternoon; raise it when few videos have been processed and the cap is "
+                     "starving the budget. It only binds when budget ÷ videos approaches it: "
+                     "500 frames over 33 videos averages 15, so a cap of 20 is already tight.",
+    },
+    "mining_rare_max_count": {
+        "short": "A class with fewer annotated boxes than this counts as rare.",
+        "what": "Sets who the rare_class stratum is allowed to look for, and how hard: the "
+                "score scales with scarcity, so a class at 5 boxes always outranks one at 80. "
+                "Classes at exactly zero are excluded whatever the value — a detector cannot "
+                "propose what it has never seen, and those need a human sweep instead.",
+        "influence": "Raise it to pull in the classes just above the current line (Groom at "
+                     "63, AG at 94) that the detector still handles badly; lower it to "
+                     "concentrate the stratum on the truly starved ones. Widening costs "
+                     "ranking, not precision, since the scarcity weighting still orders them.",
+    },
     "mining_precache_workers": {
         "short": "Parallel decoders used when pre-caching mined frames.",
         "what": "After choosing its targets, the miner decodes each one and stores the static "

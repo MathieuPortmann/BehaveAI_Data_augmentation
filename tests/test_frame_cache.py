@@ -224,6 +224,72 @@ def test_a_frame_too_early_for_the_window_is_refused():
         assert fc.compute_frame_data(vid, 2, _params()) is None
 
 
+def _write_targets_csv(path, rows, header=None):
+    header = header or ['video_filename', 'frame', 'timecode', 'reason', 'score', 'detail']
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import csv as _csv
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = _csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
+def test_annotating_a_frame_removes_its_row():
+    """This is what makes an interrupted session resumable: the file on disk is
+    always exactly the work that is left."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, fc.TARGETS_NAME)
+        _write_targets_csv(p, [
+            ['clipA', 100, '00:03', 'det_gap', '11.0', 'track 2'],
+            ['clipA', 400, '00:13', 'rare_class', '0.9', 'Nurse'],
+            ['clipB', 250, '00:08', 'flicker', '3.0', 'track 5'],
+        ])
+        assert fc.drop_target(p, 'clipA', 400)
+        _fn, rows = fc.read_targets(p)
+        assert [(r['video_filename'], r['frame']) for r in rows] == \
+            [('clipA', '100'), ('clipB', '250')]
+        # The header survives, and a frame that is not there is a no-op.
+        assert not fc.drop_target(p, 'clipA', 999)
+        assert len(fc.read_targets(p)[1]) == 2
+
+
+def test_pruning_drops_everything_already_annotated():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, fc.TARGETS_NAME)
+        _write_targets_csv(p, [
+            ['clipA', 100, '00:03', 'det_gap', '11.0', ''],
+            ['clipA', 400, '00:13', 'rare_class', '0.9', ''],
+            ['clipB', 250, '00:08', 'flicker', '3.0', ''],
+        ])
+        done = {('clipA', 100), ('clipB', 250)}
+        assert fc.prune_targets(p, lambda lbl, f: (lbl, f) in done) == 2
+        _fn, rows = fc.read_targets(p)
+        assert [(r['video_filename'], r['frame']) for r in rows] == [('clipA', '400')]
+
+
+def test_a_hand_written_timecode_csv_is_never_rewritten():
+    """Mining owns its list; a user's own time-code file is theirs. Without a
+    frame column there is nothing to match on, so it must be left alone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'my_timecodes.csv')
+        _write_targets_csv(p, [['clipA', '02:15', 'grazing']],
+                           header=['video_filename', 'timecode', 'behaviour'])
+        before = open(p, encoding='utf-8').read()
+        assert fc.prune_targets(p, lambda lbl, f: True) == 0
+        assert open(p, encoding='utf-8').read() == before
+
+
+def test_pruning_a_missing_file_is_silent():
+    with tempfile.TemporaryDirectory() as tmp:
+        assert fc.prune_targets(os.path.join(tmp, 'nope.csv'), lambda l, f: True) == 0
+        assert not fc.drop_target(os.path.join(tmp, 'nope.csv'), 'clipA', 1)
+
+
+def test_targets_live_beside_the_cached_frames():
+    assert os.path.dirname(fc.targets_path(fc.cache_dir('/proj'))) == \
+        fc.cache_dir('/proj')
+
+
 def test_cache_base_name_matches_the_dataset_naming():
     """This is what lets a cached image be moved instead of re-encoded: the
     annotation tool writes <video_label>_<frame>.jpg."""

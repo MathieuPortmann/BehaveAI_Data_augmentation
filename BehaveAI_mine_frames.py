@@ -95,14 +95,22 @@ import behaveai_frame_cache as frame_cache
 # counted: its error is not recoverable downstream, unlike a wrong class.
 DEFAULT_QUOTAS = {
 	'det_gap':     0.20,
-	'det_missed':  0.10,
+	'det_missed':  0.08,
 	'det_lowconf': 0.05,
-	'pair_unseen': 0.25,
-	'flicker':     0.15,
-	'rare_class':  0.10,
-	'attr':        0.05,
-	'random':      0.10,
+	'pair_unseen': 0.20,
+	'flicker':     0.10,
+	'rare_class':  0.25,
+	'attr':        0.04,
+	'random':      0.08,
 }
+# rare_class carries the largest share on purpose. The imbalance is the
+# project's binding constraint — Graze and Stand are 90 % of the static boxes
+# and four classes sit at zero — and a rare-class frame is the only kind that
+# can move a class the detector currently cannot predict at all. flicker and
+# random gave up most of the room: flicker concentrates on the Stand/Graze
+# boundary, which is precisely where examples are least scarce, and random is a
+# control that only needs to stay measurable.
+# Override per project with mining_quota_overrides, or per run with --quota.
 
 # A stratum is only worth a share of the budget if the signal behind it is real;
 # these are the knobs that decide "real".
@@ -110,7 +118,13 @@ LOWCONF_BAND = (0.10, 0.35)
 FLICKER_WINDOW = 15          # frames (~0.5 s at 30 fps)
 FLICKER_MIN_CHANGES = 2      # changes inside the window before it counts
 ATTR_CONF_MAX = 0.60         # age/species verdicts under this are "unsure"
-RARE_MAX_COUNT = 50          # a class with fewer annotated boxes than this is rare
+RARE_MAX_COUNT = 100         # a class with fewer annotated boxes than this is rare.
+                             # Raised from 50 because that cut-off excluded the
+                             # classes just above it (Groom at 63) while the
+                             # detector is still visibly bad at them; the score
+                             # scales with scarcity anyway, so a wider net costs
+                             # ranking, not precision. Per project:
+                             # mining_rare_max_count.
 PAIR_MIN_SUPPORT = 30        # a static class needs this many observed boxes
                              # before "never seen with X" means anything
 BOX_MATCH_IOU = 0.5
@@ -144,9 +158,9 @@ def load_project(project_arg):
 	def _folder(base):
 		return os.path.join(project_dir, species_folder(base, species, species_list))
 
-	output_dir = d.get('output_dir', '') or d.get('output_folder', '') or 'output'
-	if not os.path.isabs(output_dir):
-		output_dir = os.path.join(project_dir, output_dir)
+	# The shared resolver owns the "blank means <project>/output" rule; this
+	# used to re-implement it, which is how the variants drifted before.
+	output_dir = resolve_project_dir(config, project_dir, 'output')
 
 	return {
 		'project_dir': project_dir,
@@ -162,6 +176,10 @@ def load_project(project_arg):
 		'mining_budget': int(float(d.get('mining_budget', '300') or 300)),
 		'precache_workers': int(float(d.get('mining_precache_workers', '4') or 4)),
 		'precache_animation': str(d.get('mining_precache_animation', 'true')).strip().lower() != 'false',
+		'rare_max_count': int(float(d.get('mining_rare_max_count', str(RARE_MAX_COUNT))
+									or RARE_MAX_COUNT)),
+		'quota_overrides': str(d.get('mining_quota_overrides', '') or '').strip(),
+		'max_per_video': int(float(d.get('mining_max_per_video', '20') or 20)),
 		'clips_dir': resolve_project_dir(config, project_dir, 'clips'),
 		'config': config,
 	}
@@ -533,6 +551,34 @@ def collapse(raw):
 # Selection
 # --------------------------------------------------------------------------
 
+def spread_by_video(ranked_items):
+	"""Re-order an already-ranked stratum breadth-first across videos.
+
+	Sorting by score alone lets one clip own a stratum: the videos the detector
+	struggles most on produce the highest scores everywhere in the clip, so the
+	top of the list is the same herd, the same light, the same afternoon. The
+	per-video cap does not help when the budget is smaller than cap x videos,
+	which is the normal case — 300 frames over 19 videos never reaches a cap of
+	20.
+
+	So: best frame of each video, then second-best of each, and so on. Score
+	still decides the order *inside* a video, and no candidate is dropped —
+	only the order changes, which is what the quota fill then reads down.
+	"""
+	by_video = defaultdict(list)
+	for item in ranked_items:
+		by_video[item[0]].append(item)
+	# Videos with the most candidates go first within a round, so a clip that is
+	# genuinely rich in signal still leads — it just cannot monopolise.
+	order = sorted(by_video, key=lambda s: (-len(by_video[s]), s))
+	out = []
+	for i in range(max((len(v) for v in by_video.values()), default=0)):
+		for stem in order:
+			if i < len(by_video[stem]):
+				out.append(by_video[stem][i])
+	return out
+
+
 def select(candidates, quotas, budget, min_spacing, max_per_video, excluded):
 	"""Fill each stratum's share, then spend the remainder on what is left.
 
@@ -566,7 +612,8 @@ def select(candidates, quotas, budget, min_spacing, max_per_video, excluded):
 
 	ranked = {}
 	for stratum, items in candidates.items():
-		ranked[stratum] = sorted(items, key=lambda c: (-c[2], -c[4], c[0], c[1]))
+		ranked[stratum] = spread_by_video(
+			sorted(items, key=lambda c: (-c[2], -c[4], c[0], c[1])))
 
 	# Pass 1 — each stratum up to its share.
 	for stratum, quota in quotas.items():
@@ -649,8 +696,9 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 	rarity_counts.update(class_counts(proj['motion_dir'], proj['motion_classes']))
 	# A class at zero examples is left out on purpose: the detector cannot
 	# predict what it has never seen, so no confidence of its will ever appear.
-	rarity = {c: 1.0 - (n / RARE_MAX_COUNT)
-			  for c, n in rarity_counts.items() if 0 < n < RARE_MAX_COUNT}
+	rare_max = proj['rare_max_count']
+	rarity = {c: 1.0 - (n / rare_max)
+			  for c, n in rarity_counts.items() if 0 < n < rare_max}
 
 	pairs, static_totals = observed_pairs(
 		proj['static_dir'], proj['motion_dir'],
@@ -665,7 +713,8 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 	log(f"Scoring {len(csv_paths)} tracking CSV(s) from {proj['output_dir']}")
 	log(f"  {len(excluded)} frame(s) already annotated will be excluded")
 	if rarity:
-		log(f"  rare classes (< {RARE_MAX_COUNT} boxes): {', '.join(sorted(rarity))}")
+		log(f"  rare classes (< {rare_max} boxes): "
+			+ ', '.join(f"{c} ({rarity_counts[c]})" for c in sorted(rarity, key=lambda c: rarity_counts[c])))
 	log(f"  {len(pairs)} (static, motion) combination(s) observed in the annotations")
 
 	for n, path in enumerate(csv_paths, 1):
@@ -725,7 +774,11 @@ def mine(project_arg, budget, fps, min_spacing_s, max_per_video, quotas,
 	order = interleave(selected)
 
 	if out_path is None:
-		out_path = os.path.join(proj['output_dir'], 'mining_targets.csv')
+		# Beside the cached frames, not in output/: the list and the frames it
+		# points at are one artefact, produced and consumed together. Rows are
+		# deleted as they get annotated, so this file is also the resume point.
+		out_path = frame_cache.targets_path(frame_cache.cache_dir(proj['project_dir']))
+	os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
 	with open(out_path, 'w', newline='', encoding='utf-8') as f:
 		w = csv.writer(f)
 		# video_filename + frame are what the annotation tool's CSV parser needs;
@@ -889,8 +942,8 @@ def _main():
 					help='Frame rate, used for spacing and time-codes (default 30)')
 	ap.add_argument('--min-spacing-s', type=float, default=3.0,
 					help='Minimum seconds between two proposals of one video')
-	ap.add_argument('--max-per-video', type=int, default=20,
-					help='Cap on proposals per video, to keep sites diverse')
+	ap.add_argument('--max-per-video', type=int, default=None,
+					help='Cap on proposals per video (default: the mining_max_per_video setting)')
 	ap.add_argument('--quota', default='',
 					help='Override stratum shares, e.g. flicker=0.3,rare_class=0.2')
 	ap.add_argument('--include-holdout', action='store_true',
@@ -911,9 +964,14 @@ def _main():
 		ap.error('no project given: pass --project, a positional path, '
 				 'or set BEHAVEAI_PROJECT')
 
-	quotas = parse_quota_overrides(args.quota, DEFAULT_QUOTAS)
+	# INI first, then the flag, so a one-off run can lean further without
+	# editing the project's own preference.
+	_proj = load_project(project)
+	quotas = parse_quota_overrides(_proj['quota_overrides'], DEFAULT_QUOTAS)
+	quotas = parse_quota_overrides(args.quota, quotas)
+	max_per_video = args.max_per_video if args.max_per_video is not None else _proj['max_per_video']
 	report = mine(project, args.budget, args.fps, args.min_spacing_s,
-				  args.max_per_video, quotas, args.include_holdout, args.seed,
+				  max_per_video, quotas, args.include_holdout, args.seed,
 				  args.out)
 
 	print(f"\nWrote {report['total']} target frame(s) to {report['out_path']}")
@@ -931,7 +989,7 @@ def _main():
 			  "  They need a human ethogram sweep or BehaveAI_complex_candidates.py.")
 
 	if not args.no_precache and report['order']:
-		proj = load_project(project)
+		proj = _proj
 		workers = args.precache_workers or proj['precache_workers']
 		animation = proj['precache_animation'] and not args.no_animation_cache
 		precache(proj, report['order'], workers, animation)

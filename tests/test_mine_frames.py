@@ -26,7 +26,8 @@ from BehaveAI_mine_frames import (
 	signal_det_gap, signal_det_missed, signal_det_lowconf, signal_pair_unseen,
 	signal_flicker, signal_rare_class, collapse, select, interleave,
 	observed_pairs, annotated_frames, tracking_csvs, load_tracking_csv,
-	parse_quota_overrides, load_project, DEFAULT_QUOTAS, PAIR_MIN_SUPPORT,
+	parse_quota_overrides, load_project, spread_by_video,
+	DEFAULT_QUOTAS, PAIR_MIN_SUPPORT,
 )
 
 
@@ -441,6 +442,48 @@ def test_quota_overrides_renormalise():
 
 def test_default_quotas_sum_to_one():
 	assert abs(sum(DEFAULT_QUOTAS.values()) - 1.0) < 1e-9, DEFAULT_QUOTAS
+
+
+def test_rare_class_holds_the_largest_share():
+	"""The imbalance is the project's binding constraint, so the stratum that
+	can move a starved class outranks the ones that refine a well-fed one."""
+	assert DEFAULT_QUOTAS['rare_class'] == max(DEFAULT_QUOTAS.values()), DEFAULT_QUOTAS
+	assert DEFAULT_QUOTAS['rare_class'] > DEFAULT_QUOTAS['flicker'], DEFAULT_QUOTAS
+
+
+def test_spread_by_video_breaks_one_clip_owning_a_stratum():
+	"""Score alone lets the hardest video own the top of the list: its frames all
+	score high, so the budget buys one herd on one afternoon."""
+	# clipA has the six best scores; clipB and clipC trail.
+	items = ([cand('clipA', 100 * i, 10.0 - i) for i in range(6)]
+			 + [cand('clipB', 100 * i, 3.0 - i * 0.1) for i in range(3)]
+			 + [cand('clipC', 100 * i, 2.0 - i * 0.1) for i in range(3)])
+	ranked = sorted(items, key=lambda c: (-c[2], -c[4], c[0], c[1]))
+	spread = spread_by_video(ranked)
+
+	assert len(spread) == len(items), "no candidate may be dropped"
+	assert sorted(spread) == sorted(items), "only the order may change"
+	# The first round covers every video before any video gets a second frame.
+	assert {c[0] for c in spread[:3]} == {'clipA', 'clipB', 'clipC'}, spread[:3]
+	# Score still decides the order inside a video.
+	a_frames = [c[1] for c in spread if c[0] == 'clipA']
+	assert a_frames == [0, 100, 200, 300, 400, 500], a_frames
+	# The richest video still leads each round.
+	assert spread[0][0] == 'clipA', spread[0]
+
+
+def test_selection_spreads_across_videos_within_a_stratum():
+	"""The end-to-end consequence: a 6-frame budget must not come from one clip
+	when three have candidates."""
+	candidates = {'det_gap': (
+		[cand('clipA', 1000 * i, 10.0 - i) for i in range(8)]
+		+ [cand('clipB', 1000 * i, 3.0) for i in range(4)]
+		+ [cand('clipC', 1000 * i, 2.0) for i in range(4)])}
+	out = select(candidates, {'det_gap': 1.0}, 6, min_spacing=90,
+				 max_per_video=20, excluded=set())
+	videos = {stem for stem, _f, _s, _d in out['det_gap']}
+	assert len(out['det_gap']) == 6, out
+	assert videos == {'clipA', 'clipB', 'clipC'}, videos
 
 
 def _minimal_project(tmp, extra=''):

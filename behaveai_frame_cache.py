@@ -40,6 +40,7 @@
 #   than re-encoded (see consume_entry and the caveat on it).
 
 import os
+import csv
 import json
 import shutil
 
@@ -367,3 +368,98 @@ def entry_count(cdir):
     if not os.path.isdir(cdir):
         return 0
     return sum(1 for n in os.listdir(cdir) if n.endswith('.json'))
+
+
+# --------------------------------------------------------------------------
+# The target list
+#
+# It lives beside the frames it points at rather than in output/, because the
+# two are one artefact: the list says what to annotate, the cache holds it
+# decoded, and both are consumed together. Keeping them apart meant a stale
+# list could outlive the frames, or survive a cache wipe pointing at nothing.
+#
+# Rows are removed as their frames get annotated, so the file doubles as the
+# resume point: an interrupted session leaves exactly the work left to do, and
+# reopening it picks up there rather than at the top.
+
+TARGETS_NAME = 'mining_targets.csv'
+
+
+def targets_path(cdir):
+    return os.path.join(cdir, TARGETS_NAME)
+
+
+def read_targets(path):
+    """Return (fieldnames, rows). ([], []) when the file is absent or unreadable."""
+    if not path or not os.path.exists(path):
+        return [], []
+    try:
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            return list(reader.fieldnames or []), list(reader)
+    except Exception:
+        return [], []
+
+
+def _column(fieldnames, *names):
+    """First matching column, case-insensitively — the parser in the annotation
+    tool accepts several spellings and this has to agree with it."""
+    lowered = {str(c).strip().lower(): c for c in fieldnames}
+    for n in names:
+        if n in lowered:
+            return lowered[n]
+    return None
+
+
+def _write_targets(path, fieldnames, rows):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    # Replace in one step: a session killed mid-write must not leave a
+    # half-written list, which would look like "almost everything is done".
+    os.replace(tmp, path)
+
+
+def prune_targets(path, is_annotated):
+    """Drop every row whose frame is already annotated.
+
+    `is_annotated(video_label, frame)` decides. Returns the number of rows
+    removed, or 0 when the file has no usable video/frame columns (a
+    hand-written time-code CSV, which must be left exactly as the user wrote
+    it).
+    """
+    fieldnames, rows = read_targets(path)
+    if not rows:
+        return 0
+    vcol = _column(fieldnames, 'video_filename', 'video', 'filename')
+    fcol = _column(fieldnames, 'frame', 'start_frame')
+    if not vcol or not fcol:
+        return 0
+
+    keep = []
+    for r in rows:
+        try:
+            frame = int(float(str(r.get(fcol, '')).strip()))
+        except (TypeError, ValueError):
+            keep.append(r)      # unparseable: not ours to throw away
+            continue
+        label = os.path.splitext(str(r.get(vcol, '')).strip())[0]
+        if not is_annotated(label, frame):
+            keep.append(r)
+    removed = len(rows) - len(keep)
+    if removed:
+        _write_targets(path, fieldnames, keep)
+    return removed
+
+
+def drop_target(path, video_label, frame):
+    """Remove the row for one frame, once it has been annotated.
+
+    Called on every save, so it is cheap and silent when the file does not
+    exist or does not mention this frame.
+    """
+    return prune_targets(
+        path, lambda lbl, f: lbl == video_label and f == int(frame)) > 0

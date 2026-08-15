@@ -66,6 +66,8 @@ from collections import defaultdict, Counter
 
 import numpy as np
 
+from behaveai_config import resolve_project_dir
+
 try:
 	import networkx as nx
 	_NX_AVAILABLE = True
@@ -1028,8 +1030,11 @@ def resolve_output_dir(config_path):
 	cfg.optionxform = str
 	cfg.read(config_path)
 	project_dir = os.path.dirname(os.path.abspath(config_path))
-	raw = cfg['DEFAULT'].get('output_dir', 'output')
-	return raw if os.path.isabs(raw) else os.path.join(project_dir, raw)
+	# Through the shared resolver, not a plain .get with a default: an INI that
+	# *has* the key but leaves it blank returns '' from .get, and the old code
+	# then joined nothing onto the project root, quietly writing outputs beside
+	# the settings file instead of into output/.
+	return resolve_project_dir(cfg, project_dir, 'output')
 
 
 def find_metric_csv(output_dir, stem):

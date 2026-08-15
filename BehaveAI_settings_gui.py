@@ -24,7 +24,7 @@ from BehaveAI_settings_help import (
 from behaveai_config import (
 	parse_secondary_map, format_secondary_map, load_secondary_config,
 	species_key, get_species_list, load_ethogram_for_species, load_age_classes,
-	parse_train_overrides, DEFAULT_SPECIES,
+	parse_train_overrides, resolve_project_dir, DEFAULT_SPECIES,
 )
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), 'BehaveAI_settings.ini')
@@ -1370,6 +1370,16 @@ class SettingsEditorApp(tk.Tk):
 		ttk.Spinbox(tab3, from_=10, to=5000, increment=10, textvariable=self.mining_budget_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
 		help_line(tab3, 'mining_budget').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
 
+		help_label(tab3, 'Frame mining max per video', 'mining_max_per_video').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.mining_max_per_video_var = tk.IntVar(value=20)
+		ttk.Spinbox(tab3, from_=1, to=200, increment=1, textvariable=self.mining_max_per_video_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'mining_max_per_video').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
+		help_label(tab3, 'Frame mining rare-class cut-off', 'mining_rare_max_count').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
+		self.mining_rare_max_count_var = tk.IntVar(value=100)
+		ttk.Spinbox(tab3, from_=1, to=2000, increment=10, textvariable=self.mining_rare_max_count_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
+		help_line(tab3, 'mining_rare_max_count').grid(row=t, column=0, columnspan=2, sticky='w', padx=24, pady=(0, 4)); t += 1
+
 		help_label(tab3, 'Frame pre-cache workers', 'mining_precache_workers').grid(row=t, column=0, sticky='w', padx=8, pady=(6, 0))
 		self.mining_precache_workers_var = tk.IntVar(value=4)
 		ttk.Spinbox(tab3, from_=1, to=16, increment=1, textvariable=self.mining_precache_workers_var, width=6, command=self._set_dirty).grid(row=t, column=1, sticky='w', padx=8); t += 1
@@ -2173,16 +2183,14 @@ class SettingsEditorApp(tk.Tk):
 		# populate fields
 		d = self.cfg['DEFAULT'] if 'DEFAULT' in self.cfg else self.cfg.defaults()
 
-		# project paths
-		self.clips_dir_var.set(
-			d.get('clips_dir', fallback=os.path.join(self.project_dir, 'clips'))
-		)
-		self.input_dir_var.set(
-			d.get('input_dir', fallback=os.path.join(self.project_dir, 'input'))
-		)
-		self.output_dir_var.set(
-			d.get('output_dir', fallback=os.path.join(self.project_dir, 'output'))
-		)
+		# Project paths. Shown through the same resolver the pipeline reads them
+		# with, so a blank setting displays the folder that will actually be
+		# used (<project>/clips, /input, /output) instead of an empty box the
+		# user has to guess about. A plain .get with a default does not do this:
+		# a key present but blank returns '', not the default.
+		self.clips_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'clips'))
+		self.input_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'input'))
+		self.output_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'output'))
 
 
 		# species
@@ -2273,6 +2281,8 @@ class SettingsEditorApp(tk.Tk):
 		self.video_order_var.set(str(d.get('video_order', fallback='name')).strip().lower() or 'name')
 		self.video_order_seed_var.set(int(float(d.get('video_order_seed', fallback='0'))))
 		self.mining_budget_var.set(int(float(d.get('mining_budget', fallback='300'))))
+		self.mining_max_per_video_var.set(int(float(d.get('mining_max_per_video', fallback='20'))))
+		self.mining_rare_max_count_var.set(int(float(d.get('mining_rare_max_count', fallback='100'))))
 		self.mining_precache_workers_var.set(int(float(d.get('mining_precache_workers', fallback='4'))))
 		self.mining_precache_animation_var.set(
 			str(d.get('mining_precache_animation', fallback='true')).strip().lower() != 'false')
@@ -2867,6 +2877,8 @@ class SettingsEditorApp(tk.Tk):
 		new_default['video_order'] = self.video_order_var.get()
 		new_default['video_order_seed'] = str(self.video_order_seed_var.get())
 		new_default['mining_budget'] = str(self.mining_budget_var.get())
+		new_default['mining_max_per_video'] = str(self.mining_max_per_video_var.get())
+		new_default['mining_rare_max_count'] = str(self.mining_rare_max_count_var.get())
 		new_default['mining_precache_workers'] = str(self.mining_precache_workers_var.get())
 		new_default['mining_precache_animation'] = str(self.mining_precache_animation_var.get()).lower()
 

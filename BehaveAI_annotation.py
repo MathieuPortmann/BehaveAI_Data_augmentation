@@ -687,6 +687,10 @@ nav_mode = 'random'
 csv_targets = []
 csv_cursor = 0
 csv_reasons = {}
+# Path of the mining list currently being walked, or None. Set only in mining
+# mode: a hand-written time-code CSV is the user's own file and must survive
+# annotating exactly as they wrote it.
+mining_targets_path = None
 seq_step = 1
 
 # A model-proposed box under this confidence gets an orange marker, so the eye
@@ -1423,6 +1427,12 @@ def save_annotation():
 	# drop whatever take_image did not already move out. Tolerant of a missing
 	# entry, which is the normal case outside mining mode.
 	frame_cache.discard_entry(mined_cache_dir, base_filename)
+
+	# Same for its row in the target list. Doing it per save rather than at exit
+	# is what makes an interrupted session resumable: whatever the crash, the
+	# file on disk is always exactly the work that is left.
+	if mining_targets_path:
+		frame_cache.drop_target(mining_targets_path, video_label, frame_number)
 
 	print(f"Saved #{annot_count} frame {frame_number} -> {annot_type}")
 
@@ -2340,25 +2350,44 @@ class AnnotatorTk:
 	def _load_mining_source(self):
 		"""Walk the frames BehaveAI_mine_frames.py flagged as worth annotating.
 
-		Defaults to <output_dir>/mining_targets.csv, the path the miner writes,
-		so the common case is two clicks.
+		Found automatically in mined_frames/, beside the cached frames it points
+		at, so the common case is two clicks. Lists written before the file
+		moved there are still picked up from output/.
 		"""
 		out_dir = resolve_project_dir(config, project_dir, 'output')
-		default = os.path.join(out_dir, 'mining_targets.csv')
-		path = default
-		if not os.path.exists(default):
-			path = filedialog.askopenfilename(
-				title="Choose a mining target list",
-				initialdir=out_dir if os.path.isdir(out_dir) else project_dir,
-				filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
-			if not path:
-				return
+		path = frame_cache.targets_path(mined_cache_dir)
+		if not os.path.exists(path):
+			legacy = os.path.join(out_dir, frame_cache.TARGETS_NAME)
+			if os.path.exists(legacy):
+				print(f"Mining: using the target list still in {out_dir}. "
+					  f"The next mining run will write it to {mined_cache_dir}.")
+				path = legacy
+			else:
+				path = filedialog.askopenfilename(
+					title="Choose a mining target list",
+					initialdir=mined_cache_dir if os.path.isdir(mined_cache_dir) else project_dir,
+					filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+				if not path:
+					return
 		self._adopt_target_list(path, 'mining')
 
 	def _adopt_target_list(self, path, mode):
 		"""Parse an ordered target list and switch to it. Shared by both modes."""
-		global csv_targets, csv_cursor, csv_reasons
+		global csv_targets, csv_cursor, csv_reasons, mining_targets_path
 		report, meta = {}, {}
+
+		mining_targets_path = path if mode == 'mining' else None
+		if mode == 'mining':
+			# Resume where the last session stopped. Rows are normally removed
+			# as they are saved, so this only catches frames annotated some
+			# other way — or a session that died between the save and the
+			# rewrite. Cheap either way, and it means the list can never
+			# re-serve work that is already done.
+			removed = frame_cache.prune_targets(
+				path, lambda label, frame: frame in annotated_frames_map.get(label, set()))
+			if removed:
+				print(f"Mining: {removed} target(s) already annotated, removed from the list.")
+
 		targets = parse_timecode_csv(path, full_frame_pool, frameWindow, report, meta)
 		if not targets:
 			messagebox.showerror("Invalid CSV", self._csv_failure_message(path, report))
