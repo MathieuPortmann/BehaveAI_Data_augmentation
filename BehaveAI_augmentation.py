@@ -267,6 +267,10 @@ def _label_contains_target_class(label_path, target_class_indices):
 # Parameter sampling — one dict per (parameter, segment) pair  (UPDATED)
 # ---------------------------------------------------------------------------
 
+# One-shot flag so the shear refusal is printed once, not once per image.
+_SHEAR_WARNED = []
+
+
 def sample_augmentation_list(aug_config):
     """
     Decide which augmentation parameters apply to one image and produce the
@@ -291,6 +295,18 @@ def sample_augmentation_list(aug_config):
     triggered = []
 
     for param_name, param_cfg in aug_config['params'].items():
+        # Shear moves the pixels but transform_labels() only rewrites the box
+        # coordinates for flip_h/flip_v, so a sheared copy would carry its
+        # ORIGINAL boxes -- silently mislabelled training data. Refuse it here
+        # rather than produce it: a missing augmentation costs far less than a
+        # corrupt one, and the failure would otherwise be invisible.
+        if param_name == 'shear' and param_cfg['probability'] > 0:
+            if not _SHEAR_WARNED:
+                print("Augmentation: ignoring 'shear' -- the label file is not "
+                      "transformed for it, so the copies would be mislabelled. "
+                      "Set aug_shear_probability = 0 to silence this.")
+                _SHEAR_WARNED.append(True)
+            continue
         if random.random() >= param_cfg['probability']:
             continue
 
@@ -491,12 +507,14 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
             print(f"  Warning: aug_target_classes={target_classes} but none were found "
                   f"in YAML files. All classes will be augmented.")
 
-    # Annotation image directories
+    # Annotation image directories -- TRAIN ONLY.
+    # Copies are written next to their original, so augmenting val used to put
+    # synthetic images in the set that decides early stopping and reports
+    # val_loss/mAP. That measures the model on data it will never meet and, worse,
+    # changes the stopping decision itself. The validation set stays real.
     image_dirs = [
         os.path.join(project_dir, 'annot_static',  'images', 'train'),
-        os.path.join(project_dir, 'annot_static',  'images', 'val'),
         os.path.join(project_dir, 'annot_motion',  'images', 'train'),
-        os.path.join(project_dir, 'annot_motion',  'images', 'val'),
     ]
 
     image_ext = ('.jpg', '.jpeg', '.png')
