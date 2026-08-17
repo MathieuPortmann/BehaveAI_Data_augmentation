@@ -446,6 +446,11 @@ try:
 	# stops after `train_patience` epochs with no val improvement (Ultralytics
 	# default is 100, which effectively never triggers on short runs).
 	train_patience = int(config['DEFAULT'].get('train_patience', '30'))
+	# Dataloader workers. The annotation images are full 4K, so JPEG decoding —
+	# not the GPU — is what paces training on a fast machine; 4 leaves a strong
+	# card idle. Kept out of *_train_overrides on purpose: it is a machine
+	# property, not a training hyperparameter, and the overrides reject it.
+	train_workers = int(config['DEFAULT'].get('train_workers', '4'))
 	# Training/inference resolution. Ultralytics stores imgsz in the checkpoint and
 	# predict() reads it back, so a single value governs both ends and they cannot
 	# drift apart. 640 on a 3840px drone frame shrinks every animal by 6x, which is
@@ -871,7 +876,7 @@ def repair_dataset_yaml(yaml_path):
 		print(f"Repaired {os.path.basename(yaml_path)}: '{key}' -> '{val}' ({why})")
 
 
-def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz, patience=None, train_overrides=None):
+def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz, patience=None, train_overrides=None, workers=4):
 	"""
 	Decide whether to (re)train a model based on existence and image counts.
 	- If model_path exists and the recorded train_count differs from the current dataset,
@@ -922,7 +927,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 
 		start_weights = os.path.join(final_backup, "train", "weights", "best.pt")
 		print(f'Training new {model_type} model using existing weights...')
-		train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path, patience=patience, train_overrides=train_overrides)
+		train_in_subprocess(start_weights, yaml_path, epochs, imgsz, project_path, workers=workers, patience=patience, train_overrides=train_overrides)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
 		_assert_weights(model_type, project_path, model_path)
 		print(f'Done training {model_type} model')
@@ -943,7 +948,7 @@ def maybe_retrain(model_type, yaml_path, project_path, model_path, classifier, e
 	else:
 		# Model missing -> do first-time training
 		print(f'{model_type} model not found, building it...')
-		train_in_subprocess(classifier, yaml_path, epochs, imgsz, project_path, patience=patience, train_overrides=train_overrides)
+		train_in_subprocess(classifier, yaml_path, epochs, imgsz, project_path, workers=workers, patience=patience, train_overrides=train_overrides)
 		move_to_expected(project_path, run_name="train", runs_root="runs")
 		_assert_weights(model_type, project_path, model_path)
 		print(f'Done training {model_type} model')
@@ -1036,7 +1041,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary static', _static_train_yaml, primary_static_project_path,
-			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_train_overrides)
+			primary_static_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_train_overrides, workers=train_workers)
 
 
 	if motion_label_classes:
@@ -1049,7 +1054,7 @@ if __name__ == '__main__':
 				slice_h=sahi_slice_height, slice_w=sahi_slice_width,
 				overlap_h=sahi_overlap_height_ratio, overlap_w=sahi_overlap_width_ratio)
 		maybe_retrain('primary motion', _motion_train_yaml, primary_motion_project_path,
-			primary_motion_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_motion_train_overrides)
+			primary_motion_model_path, primary_classifier, primary_epochs, primary_imgsz, patience=train_patience, train_overrides=primary_motion_train_overrides, workers=train_workers)
 
 	if hierarchical_mode:
 		# Static stream (pooled over all static primaries)
@@ -1060,7 +1065,7 @@ if __name__ == '__main__':
 			# unseeded (see behaveai_holdout.build_classification_split).
 			_static_crop_data = build_classification_split(secondary_static_data_path, val_frequency)
 			maybe_retrain('secondary_static', _static_crop_data, secondary_static_project_path,
-				secondary_static_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
+				secondary_static_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides, workers=train_workers)
 			if use_ncnn == 'true':
 				secondary_static_model = load_model_with_ncnn_preference(secondary_static_model_path, "classify")
 			else:
@@ -1076,7 +1081,7 @@ if __name__ == '__main__':
 		if _motion_class_count >= 2:
 			_motion_crop_data = build_classification_split(secondary_motion_data_path, val_frequency)
 			maybe_retrain('secondary_motion', _motion_crop_data, secondary_motion_project_path,
-				secondary_motion_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_motion_train_overrides)
+				secondary_motion_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_motion_train_overrides, workers=train_workers)
 			if use_ncnn == 'true':
 				secondary_motion_model = load_model_with_ncnn_preference(secondary_motion_model_path, "classify")
 			else:
@@ -1095,7 +1100,7 @@ if __name__ == '__main__':
 	if _species_class_count >= 2:
 		_species_crop_data = build_classification_split(species_cropped_base_dir, val_frequency)
 		maybe_retrain('species', _species_crop_data, 'model_species',
-			species_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
+			species_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides, workers=train_workers)
 		if use_ncnn == 'true':
 			model_species = load_model_with_ncnn_preference(species_model_path, "classify")
 		else:
@@ -1109,7 +1114,7 @@ if __name__ == '__main__':
 	if _age_class_count >= 2:
 		_age_crop_data = build_classification_split(age_cropped_base_dir, val_frequency)
 		maybe_retrain('age', _age_crop_data, 'model_age',
-			age_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides)
+			age_model_path, secondary_classifier, secondary_epochs, secondary_imgsz, patience=train_patience, train_overrides=secondary_train_overrides, workers=train_workers)
 		if use_ncnn == 'true':
 			model_age = load_model_with_ncnn_preference(age_model_path, "classify")
 		else:

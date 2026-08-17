@@ -24,7 +24,7 @@ from BehaveAI_settings_help import (
 from behaveai_config import (
 	parse_secondary_map, format_secondary_map, load_secondary_config,
 	species_key, get_species_list, load_ethogram_for_species, load_age_classes,
-	parse_train_overrides, resolve_project_dir, DEFAULT_SPECIES,
+	parse_train_overrides, DEFAULT_SPECIES,
 	stream_label_classes,
 )
 
@@ -760,17 +760,12 @@ class SettingsEditorApp(tk.Tk):
 		self.load_ini(self.ini_path)
 
 	def _validate_paths(self):
-		missing = []
-		for name, var in [
-			('Clips directory', self.clips_dir_var),
-			('Input directory', self.input_dir_var),
-			('Output directory', self.output_dir_var),
-		]:
-			if not var.get():
-				missing.append(name)
+		"""An empty directory box is valid, not missing.
 
-		if missing:
-			return "The following paths are missing:\n\n" + "\n".join(f"• {m}" for m in missing)
+		Blank means "use the project's own folder" (<project>/clips, /input,
+		/output), which resolve_project_dir already implements for every stage.
+		Forcing a value here was what pushed absolute, machine-specific paths
+		into the INI of a project meant to be shared."""
 		return None
 
 	# ----------------------- Per-species state (Species tab + Model structure) -----------------------
@@ -1200,17 +1195,38 @@ class SettingsEditorApp(tk.Tk):
 				var.set(path)
 				self._set_dirty()
 
-		def _path_row(parent, label, var, row, key):
+		def _path_row(parent, label, var, row, key, which):
+			"""One directory row. Leaving the box EMPTY is a valid choice: the
+			pipeline then uses <project>/<which>, so a project stays portable
+			instead of carrying an absolute path from the machine it was made on.
+			A live hint under the box says which folder an empty value resolves
+			to, so 'blank' never means 'unknown'."""
 			help_label(parent, label, key).grid(row=row, column=0, sticky='w', padx=8, pady=(6, 0))
-			ttk.Entry(parent, textvariable=var, width=60).grid(row=row, column=1, sticky='we', padx=8, pady=(6, 0))
+			cell = ttk.Frame(parent)
+			cell.grid(row=row, column=1, sticky='we', padx=8, pady=(6, 0))
+			cell.columnconfigure(0, weight=1)
+			ttk.Entry(cell, textvariable=var, width=60).grid(row=0, column=0, sticky='we')
+			hint = ttk.Label(cell, text='', foreground='#666666')
+			hint.grid(row=1, column=0, sticky='w')
+
+			def _refresh(*_a):
+				raw = var.get().strip()
+				if raw:
+					hint.config(text='')
+				else:
+					hint.config(text='empty → uses ' + os.path.normpath(
+						os.path.join(self.project_dir, which)))
+			var.trace_add('write', _refresh)
+			_refresh()
+
 			ttk.Button(parent, text='Select…', command=lambda: _browse_dir(var)).grid(row=row, column=2, padx=8, pady=(6, 0))
 			help_line(parent, key).grid(row=row + 1, column=0, columnspan=3, sticky='w', padx=24, pady=(0, 4))
 
 		tab_paths.columnconfigure(1, weight=1)
 
-		_path_row(tab_paths, 'Training video clips directory',  self.clips_dir_var, 1, 'clips_dir')
-		_path_row(tab_paths, 'Batch video input directory',  self.input_dir_var, 3, 'input_dir')
-		_path_row(tab_paths, 'Batch video output directory', self.output_dir_var, 5, 'output_dir')
+		_path_row(tab_paths, 'Training video clips directory',  self.clips_dir_var, 1, 'clips_dir', 'clips')
+		_path_row(tab_paths, 'Batch video input directory',  self.input_dir_var, 3, 'input_dir', 'input')
+		_path_row(tab_paths, 'Batch video output directory', self.output_dir_var, 5, 'output_dir', 'output')
 
 		# TAB 2: Video sampling parameters
 		tab6 = ttk.Frame(notebook)
@@ -2240,14 +2256,14 @@ class SettingsEditorApp(tk.Tk):
 		# populate fields
 		d = self.cfg['DEFAULT'] if 'DEFAULT' in self.cfg else self.cfg.defaults()
 
-		# Project paths. Shown through the same resolver the pipeline reads them
-		# with, so a blank setting displays the folder that will actually be
-		# used (<project>/clips, /input, /output) instead of an empty box the
-		# user has to guess about. A plain .get with a default does not do this:
-		# a key present but blank returns '', not the default.
-		self.clips_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'clips'))
-		self.input_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'input'))
-		self.output_dir_var.set(resolve_project_dir(self.cfg, self.project_dir, 'output'))
+		# Project paths are shown RAW, so a blank setting stays blank and round-trips
+		# as blank. Blank is meaningful: the pipeline resolves it to <project>/clips,
+		# /input, /output through resolve_project_dir, which keeps a project portable
+		# instead of pinning it to the machine it was configured on. The row's hint
+		# label says which folder an empty box resolves to, so nothing is hidden.
+		self.clips_dir_var.set((d.get('clips_dir', '') or '').strip())
+		self.input_dir_var.set((d.get('input_dir', '') or '').strip())
+		self.output_dir_var.set((d.get('output_dir', '') or '').strip())
 
 
 		# species
@@ -2944,9 +2960,11 @@ class SettingsEditorApp(tk.Tk):
 				state.get('secondary_map', {}))
 
 		# paths
-		new_default['clips_dir'] = self.clips_dir_var.get()
-		new_default['input_dir'] = self.input_dir_var.get()
-		new_default['output_dir'] = self.output_dir_var.get()
+		# Written as typed, empty included: blank round-trips as blank and the
+		# pipeline resolves it to the project's own folder (see _validate_paths).
+		new_default['clips_dir'] = self.clips_dir_var.get().strip()
+		new_default['input_dir'] = self.input_dir_var.get().strip()
+		new_default['output_dir'] = self.output_dir_var.get().strip()
 
 
 		# viewing
@@ -3173,6 +3191,11 @@ class SettingsEditorApp(tk.Tk):
 		for mk, mv in prev_default.items():
 			if mk.startswith('metric_fpx_'):
 				new_default[mk] = mv
+		#   train_workers : dataloader workers. A property of the machine that runs
+		#       the training, not of the study, so it has no widget; preserved here
+		#       so a GUI save on one machine does not reset another machine's value.
+		if 'train_workers' in prev_default:
+			new_default['train_workers'] = prev_default['train_workers']
 
 		# ---- write kalman section (unchanged logic) ----
 		if 'kalman' not in self.cfg:
