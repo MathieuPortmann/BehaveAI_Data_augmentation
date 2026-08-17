@@ -577,7 +577,14 @@ class ScriptRunnerApp:
 	            for f in all_aug_files:
 	                parts = f.stem.split('_aug_')
 	                if len(parts) >= 2:
-	                    aug_type = parts[-1]
+	                    # A multi-segment range writes '<param>_<segment index>'
+	                    # (see BehaveAI_augmentation: <basename>_aug_<param>[_<idx>]).
+	                    # Counting the raw suffix filed those copies under
+	                    # 'brightness_0' instead of 'brightness', so a parameter
+	                    # configured with two segments reported 0 files while its
+	                    # copies sat on disk. No parameter name ends in a digit,
+	                    # so dropping a trailing _<digits> is unambiguous.
+	                    aug_type = re.sub(r'_\d+$', '', parts[-1])
 	                    aug_type_counts[aug_type] = aug_type_counts.get(aug_type, 0) + 1
 
 	            # Parameters defined in INI (canonical order)
