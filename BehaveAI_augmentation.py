@@ -482,12 +482,20 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
     # --- Build target-class index set (NEW) ---
     # We need the YOLO integer indices that correspond to the configured class names.
     # The class names are read from the annotation YAML files (static + motion).
-    # If target_classes is empty, target_class_indices stays empty (= no filter).
-    target_class_indices = set()
+    # If target_classes is empty, both sets stay empty (= no filter, augment all).
+    # Resolved PER STREAM. The two streams number their classes independently
+    # (static Stand..Excrete = 0..8, motion Walk..Balk = 0..14), so a single
+    # merged set tests a static label file against motion-derived indices: with
+    # 'Trot' (motion 1) and 'Roll' (motion 3) selected, static indices 1 and 3 --
+    # Recumbent and Graze -- matched too. Graze is in most frames, so the filter
+    # silently degraded to "augment everything" exactly when it was asked to
+    # target the rare classes.
+    target_idx_by_stream = {'static': set(), 'motion': set()}
     target_classes = aug_config.get('target_classes', [])
     if target_classes:
         import yaml
-        for yaml_name in ('static_annotations.yaml', 'motion_annotations.yaml'):
+        for stream, yaml_name in (('static', 'static_annotations.yaml'),
+                                  ('motion', 'motion_annotations.yaml')):
             yaml_path = os.path.join(project_dir, yaml_name)
             if not os.path.exists(yaml_path):
                 continue
@@ -495,14 +503,17 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
                 with open(yaml_path, 'r') as yf:
                     ydata = yaml.safe_load(yf)
                 names = ydata.get('names', [])
+                if isinstance(names, dict):          # YOLO also allows {idx: name}
+                    names = [names[k] for k in sorted(names)]
                 for idx, name in enumerate(names):
                     if name in target_classes:
-                        target_class_indices.add(idx)
+                        target_idx_by_stream[stream].add(idx)
             except Exception as e:
                 print(f"  Warning: could not read {yaml_path}: {e}")
-        if target_class_indices:
-            print(f"Class filter active — augmenting only classes: "
-                  f"{target_classes} (indices {sorted(target_class_indices)})")
+        if any(target_idx_by_stream.values()):
+            print(f"Class filter active — augmenting only classes: {target_classes}")
+            for stream in ('static', 'motion'):
+                print(f"    {stream}: indices {sorted(target_idx_by_stream[stream]) or '(none)'}")
         else:
             print(f"  Warning: aug_target_classes={target_classes} but none were found "
                   f"in YAML files. All classes will be augmented.")
@@ -552,8 +563,11 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
         label_dir  = img_dir.replace('images', 'labels')
         label_path = os.path.join(label_dir, basename + '.txt')
 
-        # --- Class filter (NEW) ---
-        if not _label_contains_target_class(label_path, target_class_indices):
+        is_motion = 'annot_motion' in img_path.replace('\\', '/')
+
+        # --- Class filter: against THIS stream's index space (see above) ---
+        if not _label_contains_target_class(
+                label_path, target_idx_by_stream['motion' if is_motion else 'static']):
             skipped_class += 1
             continue
 
@@ -561,8 +575,6 @@ def apply_augmentation_to_all_annotations(config_path, progress_callback=None):
         if bgr is None:
             print(f"  Warning: could not read {img_path}, skipping.")
             continue
-
-        is_motion = 'annot_motion' in img_path.replace('\\', '/')
 
         augmentation_list = sample_augmentation_list(aug_config)
 
