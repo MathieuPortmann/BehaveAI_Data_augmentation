@@ -1898,6 +1898,13 @@ if __name__ == '__main__':
 		if writer is not None:
 			writer.release()
 		csv_file.close()
+		# Recomputed here instead of reusing the last progress tick's value:
+		# current_fps is only bound inside the tick branch, so a clip that ended
+		# before the first tick (unreadable file, a handful of frames, a very short
+		# analysis window) raised UnboundLocalError on this line -- killing the whole
+		# script and, with it, every stage after the video loop.
+		elapsed = time.time() - start_time
+		current_fps = current_frame / elapsed if elapsed > 0 else 0
 		print(f"Done processing {base} | {current_fps:.1f} FPS")
 
 
@@ -1941,9 +1948,26 @@ if __name__ == '__main__':
 	elif _all_input_videos:
 		print(f"Processing {len(_all_input_videos)} video(s) in name order")
 
+	_failed_videos = []
 	for _n, vid in enumerate(_all_input_videos, 1):
 			print(f"\n[{_n}/{len(_all_input_videos)}] {os.path.basename(vid)}")
-			process_video(vid)
+			try:
+				process_video(vid)
+			except Exception as e:
+				# A single unreadable/failing clip used to abort the script right
+				# here, silently skipping everything below -- drone correction,
+				# tracklet stitching, metric geometry, interaction graph, complex
+				# stage, activity budget. The run then looked like stitching had
+				# simply produced nothing, with no error to explain it. Report the
+				# clip and carry on; Ctrl-C still stops the run (KeyboardInterrupt
+				# is not an Exception).
+				import traceback
+				print(f"FAILED on {os.path.basename(vid)}: {type(e).__name__}: {e}")
+				traceback.print_exc()
+				_failed_videos.append(os.path.basename(vid))
+	if _failed_videos:
+		print(f"\nWARNING: {len(_failed_videos)} video(s) failed and produced no "
+			  f"tracking CSV: " + ", ".join(_failed_videos))
 
 	# Auto-launch drone motion correction when enabled (disabled -> no behaviour change)
 	try:
