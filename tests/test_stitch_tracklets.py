@@ -13,19 +13,23 @@ of pixels apart.
 """
 
 import os
+import io
 import sys
 import csv
 import math
 import tempfile
+import subprocess
+import contextlib
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import BehaveAI_stitch_tracklets as stitch_mod
 from BehaveAI_stitch_tracklets import (extract_tracklets, build_cost, stitch,
 									   estimate_motion_noise, occupied_area_px2,
 									   check_chains_disjoint, kappa, run_stitch,
-									   neighbour_spacing_px)
+									   neighbour_spacing_px, run_stitch_project)
 
 FPS = 30.0
 VEL_WINDOW = 15
@@ -201,6 +205,81 @@ def test_neighbour_spacing_is_measured_between_animals():
 	tk, _d = extract_tracklets(rows, 'x', 'y', min_len=1, vel_window_frames=VEL_WINDOW)
 	sp = neighbour_spacing_px((t['frames'], t['xs'], t['ys']) for t in tk.values())
 	assert abs(sp - 500.0) < 1.0, sp
+
+
+def _project(tmp, output_dir_value):
+	"""Minimal project on disk: an INI, plus <project>/output holding one CSV."""
+	os.makedirs(os.path.join(tmp, 'output'), exist_ok=True)
+	rows = walk('1', 0, 40, 100, 100, 2, 1, seed=3) + walk('2', 60, 40, 220, 160, 2, 1, seed=4)
+	with open(os.path.join(tmp, 'output', 'clipA_tracking.csv'), 'w', newline='') as f:
+		w = csv.DictWriter(f, fieldnames=['frame', 'id', 'x', 'y'])
+		w.writeheader()
+		w.writerows(rows)
+	ini = os.path.join(tmp, 'BehaveAI_settings.ini')
+	with open(ini, 'w') as f:
+		print('[DEFAULT]', file=f)
+		print('stitch_enabled = true', file=f)
+		print('output_dir = %s' % output_dir_value, file=f)
+	return ini
+
+
+def test_project_run_stitches_the_configured_output_dir():
+	with tempfile.TemporaryDirectory() as tmp:
+		ini = _project(tmp, 'output')
+		with contextlib.redirect_stdout(io.StringIO()):
+			run_stitch_project(ini)
+		produced = sorted(os.listdir(os.path.join(tmp, 'output')))
+		assert 'clipA_tracking_stitched.csv' in produced, produced
+		assert 'clipA_stitch_report.txt' in produced, produced
+
+
+def test_missing_output_dir_is_named_instead_of_read_as_empty():
+	"""An output_dir left over from another machine (an absolute path on a drive
+	that does not exist here) used to print 'no tracking CSVs', which reads as
+	'the tracker produced nothing to stitch' -- a silent no-op on a run whose CSVs
+	were sitting in the project all along."""
+	with tempfile.TemporaryDirectory() as tmp:
+		ini = _project(tmp, os.path.join(tmp, 'gone', 'output'))
+		buf = io.StringIO()
+		with contextlib.redirect_stdout(buf):
+			run_stitch_project(ini)
+		msg = buf.getvalue()
+		assert 'does not exist' in msg, msg
+		assert 'output_dir' in msg, msg
+		# and it says where the CSVs it can see actually are
+		assert os.path.join(tmp, 'output') in msg, msg
+		assert not os.path.exists(os.path.join(tmp, 'output',
+											   'clipA_tracking_stitched.csv'))
+
+
+def test_unreachable_media_dir_is_skipped_rather_than_waited_on():
+	"""A mapped drive whose server is gone blocks os.path.isdir() in the kernel
+	for minutes (154 s, measured on an unmounted W: drive). The probe therefore
+	runs in a child process that can be killed, and a timeout degrades to "skip
+	that directory", out loud, instead of stalling the run."""
+	with tempfile.TemporaryDirectory() as tmp:
+		assert stitch_mod._dir_reachable(tmp) is True
+		assert stitch_mod._dir_reachable(os.path.join(tmp, 'nope')) is False
+		assert stitch_mod._dir_reachable('') is False
+
+	class _NeverAnswers:
+		DEVNULL = subprocess.DEVNULL
+		TimeoutExpired = subprocess.TimeoutExpired
+
+		@staticmethod
+		def run(*args, **kwargs):
+			raise subprocess.TimeoutExpired(cmd='probe', timeout=kwargs.get('timeout', 0))
+
+	real = stitch_mod.subprocess
+	stitch_mod.subprocess = _NeverAnswers
+	try:
+		buf = io.StringIO()
+		with contextlib.redirect_stdout(buf):
+			reachable = stitch_mod._dir_reachable('X:' + os.sep + 'gone', timeout=0.1)
+		assert reachable is False
+		assert 'did not answer' in buf.getvalue(), buf.getvalue()
+	finally:
+		stitch_mod.subprocess = real
 
 
 if __name__ == '__main__':

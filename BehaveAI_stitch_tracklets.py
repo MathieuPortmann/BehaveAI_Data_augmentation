@@ -77,6 +77,7 @@ import json
 import math
 import hashlib
 import argparse
+import subprocess
 import configparser
 
 from behaveai_config import resolve_project_dir
@@ -99,6 +100,16 @@ DEFAULT_M0_PX = 1.0           # median residual at lag 0
 DEFAULT_ALPHA = 0.3           # px^2 per frame^beta
 DEFAULT_BETA = 1.7            # measured growth exponent, NOT the 3 of a free CV model
 DEFAULT_NU = 1.0              # Student-t d.o.f.; heavy-tailed, as measured
+
+# How long a media directory gets to answer "are you there?" before this pass
+# gives up on it. Locating each clip's video and flight log means walking
+# input_dir and clips_dir, and clips_dir is typically a network share: when the
+# share is not mounted, a single os.path.isdir() blocks in the kernel for
+# minutes (154 s, measured on an unmounted W: drive) -- and that was paid once
+# per clip, so a pass whose geometry is explicitly a bonus (it only sharpens the
+# speed gate) stalled instead of stitching. A mounted share answers in
+# milliseconds, so this ceiling is pure margin.
+MEDIA_PROBE_TIMEOUT_S = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -781,31 +792,76 @@ def _load_cfg(config_path):
 	}
 
 
-def _clip_geometry(config_path, stem):
+def _dir_reachable(path, timeout=MEDIA_PROBE_TIMEOUT_S):
+	"""Is `path` a directory? Decided in a child process we are able to kill.
+
+	A thread blocked on a dead network path cannot be cancelled -- it stays stuck
+	in the kernel call, which can hold up interpreter shutdown even after the
+	answer stopped mattering. A child process can simply be killed, so the run
+	always ends. Unreachable is reported, never silent: dropping a media
+	directory costs the metric speed gate, and the report must be able to say so.
+	"""
+	if not path:
+		return False
+	if getattr(sys, 'frozen', False):        # no interpreter to spawn a probe with
+		return os.path.isdir(path)
+	probe = "import os, sys; sys.exit(0 if os.path.isdir(sys.argv[1]) else 1)"
+	try:
+		done = subprocess.run([sys.executable, '-c', probe, path], timeout=timeout,
+							  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		return done.returncode == 0
+	except subprocess.TimeoutExpired:
+		print(f"    ({path} did not answer in {timeout:.0f}s -- unmounted network "
+			  f"share? Skipping it; the speed gate falls back to pixels.)")
+		return False
+	except Exception:                        # cannot probe -> trust the path
+		return os.path.isdir(path)
+
+
+def _clip_geometry(config_path, stem, index_cache=None):
 	"""(fps, f_px, flightlog) for a stem, or (30.0, None, None) when the metric
 	stack cannot resolve them. Never fatal: without a flight log the stitcher
-	falls back to the configured pixel gate."""
+	falls back to the configured pixel gate.
+
+	`index_cache` is a dict reused across stems. Locating a video and its flight
+	log means walking input_dir and clips_dir whole, and clips_dir is typically a
+	network share: rebuilding those indexes for every clip turned one scan into
+	one per clip, which on an unreachable share is the difference between a run
+	and a hang."""
 	try:
 		from behaveai_drone.metric_geometry import (load_metric_config, resolve_fpx,
-													build_video_index, find_video_for_stem,
+													VIDEO_EXTS, find_video_for_stem,
 													video_fps_for_stem, video_dims_fps,
 													_media_dirs, _build_index, _find_by_stem)
 		from behaveai_drone.flightlog import load_flightlog
 	except ImportError:
 		return 30.0, None, None
 	try:
-		index = build_video_index(config_path)
+		cache = {} if index_cache is None else index_cache
+		if 'dirs' not in cache:
+			# Same layout and precedence as build_video_index (input_dir first,
+			# then clips_dir), minus any directory that does not answer.
+			cache['dirs'] = [d for d in _media_dirs(config_path) if _dir_reachable(d)]
+		if 'videos' not in cache:
+			index = {}
+			for d in cache['dirs']:
+				for fname, path in _build_index(d, tuple(e.lower() for e in VIDEO_EXTS)).items():
+					index.setdefault(fname, path)
+			cache['videos'] = index
+		index = cache['videos']
 		fps = video_fps_for_stem(config_path, stem, default=30.0, video_index=index)
 		video = find_video_for_stem(stem, index)
 		if not video:
 			return fps, None, None
 		# Same lookup as run_metric_geometry: <stem>.flightlog.csv beside the
 		# video, in the input dir or the offline-clips dir.
-		input_dir, clips_dir = _media_dirs(config_path)
-		log_index = _build_index(input_dir, ('.flightlog.csv',))
-		for fname, path in _build_index(clips_dir, ('.flightlog.csv',)).items():
-			log_index.setdefault(fname, path)
-		fl_path = _find_by_stem(stem, log_index, ('.flightlog.csv',))
+		if 'flightlogs' not in cache:
+			log_index = {}
+			for d in cache['dirs']:
+				for fname, path in _build_index(d, ('.flightlog.csv',)).items():
+					log_index.setdefault(fname, path)
+			cache['flightlogs'] = log_index
+		fl_path = _find_by_stem(stem, cache['flightlogs'], ('.flightlog.csv',))
 		if not fl_path:
 			return fps, None, None
 		flightlog = load_flightlog(fl_path)
@@ -833,17 +889,40 @@ def run_stitch_project(config_path):
 	# INI using it does not silently stitch nothing.
 	output_dir = resolve_project_dir(cfg, project_dir, 'output')
 
-	jobs = {}
-	for c in sorted(glob.glob(os.path.join(output_dir, '*_tracking_corrected.csv'))):
-		jobs[os.path.basename(c).replace('_tracking_corrected.csv', '')] = c
-	for c in sorted(glob.glob(os.path.join(output_dir, '*_tracking.csv'))):
-		jobs.setdefault(os.path.basename(c).replace('_tracking.csv', ''), c)
+	def _collect(folder):
+		found = {}
+		for c in sorted(glob.glob(os.path.join(folder, '*_tracking_corrected.csv'))):
+			found[os.path.basename(c).replace('_tracking_corrected.csv', '')] = c
+		for c in sorted(glob.glob(os.path.join(folder, '*_tracking.csv'))):
+			found.setdefault(os.path.basename(c).replace('_tracking.csv', ''), c)
+		return found
+
+	jobs = _collect(output_dir)
+	# Say WHY nothing will be stitched. An absolute output_dir is machine-specific:
+	# a settings file copied from another machine (or a drive that moved) sends
+	# this pass to a folder that does not exist here, and glob on a missing
+	# directory returns [] exactly like an empty one -- so the run printed "no
+	# tracking CSVs", which reads as "the tracker produced nothing to stitch"
+	# while the CSVs were sitting in the project all along. Same failure, and same
+	# fix, as the input_dir check in BehaveAI_classify_track.
 	if not jobs:
-		print(f"Stitch: no tracking CSVs in {output_dir}")
+		if not os.path.isdir(output_dir):
+			print(f"Stitch: output directory does not exist: {output_dir}")
+			print(f"        Fix 'output_dir' in {os.path.basename(config_path)} "
+				  f"(empty = <project>/output). Nothing was stitched.")
+			default_dir = os.path.join(project_dir, 'output')
+			if os.path.normpath(default_dir) != os.path.normpath(output_dir):
+				n = len(_collect(default_dir))
+				if n:
+					print(f"        NOTE: {n} tracking CSV(s) are sitting in "
+						  f"{default_dir}, which is where an empty output_dir points.")
+		else:
+			print(f"Stitch: no tracking CSVs in {output_dir}")
 		return
 	print(f"Stitch: processing {len(jobs)} video(s)...")
+	index_cache = {}
 	for stem, c in jobs.items():
-		fps, f_px, flightlog = _clip_geometry(config_path, stem)
+		fps, f_px, flightlog = _clip_geometry(config_path, stem, index_cache)
 		run_stitch(c, max_speed_px=p['max_speed_px'], fps=fps,
 				   max_gap_s=p['max_gap_s'], gap_prior_s=p['gap_prior_s'],
 				   extrap_horizon_s=p['extrap_horizon_s'], min_len=p['min_len'],
