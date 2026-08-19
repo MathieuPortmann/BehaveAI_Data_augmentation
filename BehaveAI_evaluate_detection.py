@@ -443,7 +443,9 @@ def _class_metrics(conf_dict, classes):
 		gt_total = sum(v for (g, _), v in conf_dict.items() if g == c)
 		pred_total = sum(v for (_, p), v in conf_dict.items() if p == c)
 		precision, recall, f1 = ec.prf(tp, pred_total - tp, gt_total - tp)
-		rows[c] = {'support': gt_total, 'tp': tp, 'precision': precision, 'recall': recall, 'f1': f1}
+		lo, hi = ec.wilson_ci(tp, gt_total)
+		rows[c] = {'support': gt_total, 'tp': tp, 'precision': precision, 'recall': recall,
+				   'f1': f1, 'recall_lo': lo, 'recall_hi': hi}
 	return rows
 
 
@@ -493,15 +495,20 @@ def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_t
 		macro_f1 = sum(macro) / len(macro) if macro else 0.0
 		lines.append(f"Behaviour classification -- {stream} stream "
 					 f"(matched detections only), macro-F1 = {macro_f1:.3f}:")
-		lines.append(f"  {'class':<16} {'support':>7} {'P':>7} {'R':>7} {'F1':>7}")
+		lines.append(f"  {'class':<16} {'support':>7} {'P':>7} {'R':>7}  "
+					 f"{'R 95% CI':<16}{'F1':>7}")
 		for c in classes:
 			row = rows[c]
+			ci = ec.fmt_ci(row['recall_lo'], row['recall_hi'])
 			lines.append(f"  {c:<16} {row['support']:>7} {row['precision']:>7.3f} "
-						 f"{row['recall']:>7.3f} {row['f1']:>7.3f}")
+						 f"{row['recall']:>7.3f}  {ci:<16}{row['f1']:>7.3f}")
 			by_class_rows.append({'stream': stream, 'class': c, 'support': row['support'],
 								  'tp': row['tp'], 'precision': round(row['precision'], 4),
-								  'recall': round(row['recall'], 4), 'f1': round(row['f1'], 4)})
-		lines.append(_confusion_block(cls_conf[stream], classes))
+								  'recall': round(row['recall'], 4),
+								  'recall_ci_low': _round_or_blank(row['recall_lo']),
+								  'recall_ci_high': _round_or_blank(row['recall_hi']),
+								  'f1': round(row['f1'], 4)})
+		lines.append(ec.confusion_block(cls_conf[stream], classes))
 		lines.append("")
 
 	report = "\n".join(lines) + "\n"
@@ -515,7 +522,9 @@ def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_t
 		w.writeheader()
 		w.writerows(ablation_rows)
 	with open(os.path.join(eval_dir, names[2]), 'w', newline='', encoding='utf-8') as f:
-		w = csv.DictWriter(f, fieldnames=['stream', 'class', 'support', 'tp', 'precision', 'recall', 'f1'])
+		w = csv.DictWriter(f, fieldnames=['stream', 'class', 'support', 'tp',
+										  'precision', 'recall', 'recall_ci_low',
+										  'recall_ci_high', 'f1'])
 		w.writeheader()
 		w.writerows(by_class_rows)
 
@@ -523,17 +532,8 @@ def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_t
 	print(f"Wrote {', '.join(names)} -> {eval_dir}")
 
 
-def _confusion_block(conf_dict, classes):
-	"""Compact text confusion matrix (rows=true, cols=pred index)."""
-	if not any(conf_dict.values()):
-		return "  (no matched detections)"
-	idx = {c: i for i, c in enumerate(classes)}
-	header = "  confusion (rows=true, cols=pred; col j = class index j):"
-	out = [header, "  labels: " + ", ".join(f"{i}:{c}" for i, c in enumerate(classes))]
-	for c in classes:
-		row = [conf_dict.get((c, p), 0) for p in classes]
-		out.append(f"  {idx[c]:>2} " + " ".join(f"{n:>4}" for n in row))
-	return "\n".join(out)
+def _round_or_blank(x, nd=4):
+	return '' if x is None else round(x, nd)
 
 
 if __name__ == '__main__':

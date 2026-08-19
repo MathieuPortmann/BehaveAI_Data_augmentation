@@ -118,6 +118,43 @@ macro F1 per stream, over held-out frames. The **activity budget** is then a
 deterministic sum of those labels (see the guiding principle) — its accuracy is
 inherited from §B + §C and is **not** scored against a separate human budget.
 
+### D.1 Primary behaviour (the detectors)
+
+Nothing extra to run: it is the per-class half of §B above.
+
+### D.2 Secondary behaviour, age and species (the crop classifiers)
+
+**Tool.** `BehaveAI_evaluate_classifiers.py <project>` — scores every trained
+crop classifier (`model_secondary_static`, `model_secondary_motion`, `model_age`,
+`model_species`) on the `val` side of its `<pool>_split`, i.e. the same frozen
+per-video holdout as the detectors, and writes `classification_report.txt`,
+`classification_summary.csv`, `classification_by_class.csv` and one
+`classification_confusion_<model>.csv` per model.
+
+**Why it exists.** Ultralytics reports one number for a classification run,
+`metrics/accuracy_top1`, and on these pools that number is uninformative: the
+held-out motion crops are 94 % `__none__`, so "94 % accurate" is exactly the score
+of a model that answers `__none__` every time. The table therefore reports, per
+class, support / P / R (Wilson 95 % CI) / F1, and per model the **majority-class
+baseline next to top-1** so the two can be compared at a glance.
+
+**Three reporting rules**, all pinned by `tests/test_classifier_metrics.py`:
+
+1. A class with no held-out crop prints `—`, never 0.000 — "not measurable" and
+   "measured, scored zero" are different claims. A class that was never predicted
+   has an undefined *precision* but a real recall of 0.000.
+2. macro-F1 and balanced accuracy average over the classes that actually have
+   held-out crops; the count is printed (`8/9 classes`).
+3. For the secondary models the pooled accuracy is split into the two questions
+   it conflates: **(a) presence** (`__none__` vs the rest, a binary metric) and
+   **(b) identity** among the crops that do have a secondary. On a 9:1 pool (a)
+   alone can carry the pooled number, so quoting it undivided says nothing about
+   whether the ethogram's sub-classes are separable.
+
+**Scope.** These are component metrics on ground-truth crops — *oracle detection*.
+They must be labelled as such: the detector's own misses are scored in §B, and the
+deployed pipeline feeds the classifiers detector output, not GT boxes.
+
 ## E. Layer 4 — complex behaviours and the interaction graph
 
 **Tool.** `BehaveAI_complex_model.py` already evaluates honestly by video:

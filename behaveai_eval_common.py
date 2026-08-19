@@ -10,9 +10,14 @@ Stdlib ``csv`` + ``numpy`` only -- no pandas (repo convention).
 """
 
 import os
+import math
 import configparser
 
 import numpy as np
+
+# Printed wherever a metric is undefined rather than zero (no held-out instance
+# to recall, or no prediction to be precise about).
+UNDEFINED = '—'
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +136,50 @@ def prf(tp, fp, fn):
 	recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 	f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 	return precision, recall, f1
+
+
+def wilson_ci(k, n, z=1.959963985):
+	"""Wilson score 95% confidence interval for the proportion k/n.
+
+	The per-class tables are dominated by rare behaviours with 1-5 held-out
+	instances, where a bare point estimate invites over-reading ("recall 0.20").
+	Wilson rather than the normal approximation because it stays inside [0,1] and
+	still returns a usable interval at k=0, k=n and n<10 -- exactly the regime
+	those classes live in. Returns (lo, hi), or (None, None) when n == 0.
+	"""
+	if n <= 0:
+		return (None, None)
+	p = k / n
+	denom = 1.0 + z * z / n
+	centre = (p + z * z / (2 * n)) / denom
+	half = z / denom * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+	return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def fmt_ci(lo, hi, undefined=None):
+	"""Render a (lo, hi) interval for a text table, or the undefined marker.
+
+	Shared so the detection and classifier tables print intervals identically."""
+	if lo is None:
+		return UNDEFINED if undefined is None else undefined
+	return f"[{lo:.3f}-{hi:.3f}]"
+
+
+def confusion_block(conf_dict, classes, indent='  '):
+	"""Compact text confusion matrix (rows=true, cols=pred index).
+
+	Shared by the detection and classifier evaluations so both reports read the
+	same way; Ultralytics only ever saves this as a PNG, which cannot be quoted
+	in a table."""
+	if not any(conf_dict.values()):
+		return indent + "(no predictions)"
+	idx = {c: i for i, c in enumerate(classes)}
+	out = [indent + "confusion (rows=true, cols=pred; col j = class index j):",
+		   indent + "labels: " + ", ".join(f"{i}:{c}" for i, c in enumerate(classes))]
+	for c in classes:
+		row = [conf_dict.get((c, p), 0) for p in classes]
+		out.append(f"{indent}{idx[c]:>2} " + " ".join(f"{n:>4}" for n in row))
+	return "\n".join(out)
 
 
 def average_precision(scored, n_gt):
