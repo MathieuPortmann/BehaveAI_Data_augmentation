@@ -14,6 +14,12 @@ and classification are separated by design, so animal-finding is scored first).
 It also reports the per-stream behaviour *classification* quality (confusion
 matrix + per-class F1) over matched detections -- the per-frame behaviour metric.
 
+All three variants go through the SAME merge routine, the single-stream ones
+applied to themselves. merge_detections de-duplicates *within* a stream as well
+as across the two, so scoring raw per-stream output against a merged variant that
+has had that clean-up would credit the fusion with a precision gain that is in
+fact intra-stream de-duplication, and the ablation would not be a fair one.
+
 Why it runs on the saved annotation images: the images under
 ``annot_static/images`` and ``annot_motion/images`` are EXACTLY what the two
 detectors were trained on and what auto-annotation runs them on, so no video /
@@ -383,7 +389,14 @@ def main():
 		centroid_thresh_norm = centroid_merge_thresh / ref_w if ref_w else 0.0
 		merged = merge_detections(static_dets + motion_dets, centroid_thresh_norm, iou_thresh, dominant_source)
 
-		variant_dets = {'static': static_dets, 'motion': motion_dets, 'merged': merged}
+		# Same routine for every variant (see module docstring): with a single
+		# source the `same` branch always wins, so merge_detections degenerates to
+		# exactly the intra-stream de-duplication the merged variant also gets.
+		# The threshold is deliberately the one computed for the merged pass -- a
+		# per-variant threshold would reintroduce the asymmetry it removes.
+		static_solo = merge_detections(static_dets, centroid_thresh_norm, iou_thresh, dominant_source)
+		motion_solo = merge_detections(motion_dets, centroid_thresh_norm, iou_thresh, dominant_source)
+		variant_dets = {'static': static_solo, 'motion': motion_solo, 'merged': merged}
 		n_gt_union += len(gt_union)
 		for v in variants:
 			preds = variant_dets[v]
@@ -454,6 +467,8 @@ def _write_outputs(project_dir, config_path, args, conf_thresh, centroid_merge_t
 	lines.append(f"primary_conf_thresh: {conf_thresh}")
 	lines.append(f"merge              : centroid_merge_thresh={centroid_merge_thresh}px, "
 				 f"iou_thresh(containment)={iou_thresh}, dominant_source={dominant_source}")
+	lines.append("                     (applied to all three variants -- the single-stream "
+				 "ones to themselves)")
 	lines.append(f"GT match IoU       : {args.iou}")
 	lines.append("")
 	lines.append("Detection ablation (class-agnostic animal-finding):")
